@@ -3,11 +3,9 @@
 //! Ключ создаётся только явно (`create`, `rekey`), никогда молча. Приватный ключ
 //! не покидает хранилище ОС и память процесса: API не отдаёт seed и blob.
 //! Спецификация: `docs/specs/stage-10.md`.
+#![deny(clippy::unwrap_used)]
+#![deny(clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
 #![deny(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    clippy::panic,
     clippy::print_stdout,
     clippy::print_stderr,
     clippy::dbg_macro,
