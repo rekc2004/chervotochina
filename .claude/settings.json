@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'p=\"$CLAUDE_PROJECT_DIR/.claude/combine/hooks/state.py\"; if command -v python3 >/dev/null 2>&1; then exec python3 \"$p\"; else exec python \"$p\"; fi'"
+          }
+        ],
+        "matcher": "startup|resume|compact|clear"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'p=\"$CLAUDE_PROJECT_DIR/.claude/combine/hooks/guard.py\"; if command -v python3 >/dev/null 2>&1; then exec python3 \"$p\"; else exec python \"$p\"; fi'"
+          }
+        ],
+        "matcher": "Bash|PowerShell"
+      }
+    ]
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "files": {
+    ".claude/agents/combine-architect.md": "b360bd683b719f32a2a797415a3ce569ee358bd7a52494f3456ff2d7ff4ee345",
+    ".claude/agents/combine-builder.md": "495699d4c9b0594196fbfdb2da150178dcda87abd162857a6c49aa673dee3b23",
+    ".claude/agents/combine-scout.md": "535696ef89de17c18e92ffea447c0f491b583184da8ed7574fb0b92c374390c4",
+    ".claude/agents/combine-security.md": "3a2d427de59759f32fce8114a457afa269c96d1652cb7a63141069ce0f76be46",
+    ".claude/agents/combine-skeleton.md": "85f703db2a75a1f9a89e7aedfe138e7a228c661e701787441ca6e528643fe58c",
+    ".claude/combine/CORE.md": "b7d31148bb6fee69e5aabb6f44063caa1085f6c5a46d2e7a88e4facf8b1c636d",
+    ".claude/combine/hooks/_common.py": "1515643bef3b6f0a9c225aac78d76cb20bc0dddddc468b27a883173890e95ad8",
+    ".claude/combine/hooks/guard.py": "0c03e03bb60af9b48234e2fe48f62c6e1642d2ea68e22c0463dd062499a5be2d",
+    ".claude/combine/hooks/state.py": "316efc7878ba14cc53df4b4d23ee71b36dc23607631957b2476d7f5ec2c08846",
+    ".claude/combine/pipeline.md": "8d7c2458d787e11abe93b2b3780e83e422855cbc0cf84541cc92958dac191bf4",
+    ".claude/skills/combine-review-quick/SKILL.md": "f38262ed83cce37df01ca2f0cf7ef35cbcb34aa2b944ae200e2c94513f394c85",
+    ".claude/skills/combine-technical-verify-done/SKILL.md": "185ebda82b9eac95745d5da21350bcb68f8fad46d66877145d0e1ff052d7f565"
+  }
+}

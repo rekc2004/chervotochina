@@ -1,0 +1,13 @@
+{
+  "version": {
+    "commit": "e68688fff5f67ae83068f03ec4507c96dc64ffbf",
+    "describe": "v0.2.1",
+    "dirty": false
+  },
+  "packs": [
+    "technical",
+    "review"
+  ],
+  "with": [],
+  "disabled": []
+}
