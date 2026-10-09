@@ -1,0 +1,16 @@
+[package]
+name = "chervo-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "chervo"
+path = "src/main.rs"
+
+[dependencies]
+chervo-core.workspace = true
+
+[lints]
+workspace = true
