@@ -29,14 +29,14 @@ impl SecretStore for UnavailableKeyStore {
     }
 }
 
-/// Новый ключ и запись для хранилища: `[версия][seed][публичный ключ]`.
-fn fresh_key() -> Result<(PairKey, Zeroizing<[u8; KEY_BLOB_LEN]>), IdentityError> {
+/// Новый ключ; запись для хранилища `[версия][seed][публичный ключ]` заполняется
+/// в переданном буфере, чтобы массив с seed не перемещался.
+fn fresh_key(blob: &mut Zeroizing<[u8; KEY_BLOB_LEN]>) -> Result<PairKey, IdentityError> {
     let mut seed = Zeroizing::new([0u8; 32]);
     getrandom::fill(seed.as_mut_slice()).map_err(|_| IdentityError::RandomUnavailable)?;
     let key = PairKey::from_seed(&seed);
     let public = key.public_key().to_bytes();
 
-    let mut blob = Zeroizing::new([0u8; KEY_BLOB_LEN]);
     *blob.first_mut().ok_or(IdentityError::CorruptKey)? = KEY_BLOB_VERSION;
     blob.get_mut(1..33)
         .ok_or(IdentityError::CorruptKey)?
@@ -44,12 +44,13 @@ fn fresh_key() -> Result<(PairKey, Zeroizing<[u8; KEY_BLOB_LEN]>), IdentityError
     blob.get_mut(33..KEY_BLOB_LEN)
         .ok_or(IdentityError::CorruptKey)?
         .copy_from_slice(public.as_slice());
-    Ok((key, blob))
+    Ok(key)
 }
 
 /// Записать новый ключ и убедиться, что хранилище вернуло те же байты.
 fn write_new<S: SecretStore + ?Sized>(store: &S, pair: &PairId) -> Result<PairKey, IdentityError> {
-    let (key, blob) = fresh_key()?;
+    let mut blob = Zeroizing::new([0u8; KEY_BLOB_LEN]);
+    let key = fresh_key(&mut blob)?;
     store.write(pair, blob.as_slice())?;
     match store.read(pair)? {
         Some(back) if back.as_slice() == blob.as_slice() => Ok(key),

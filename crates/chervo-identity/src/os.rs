@@ -110,3 +110,48 @@ impl SecretStore for OsKeyStore {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn platform() -> keyring_core::error::PlatformError {
+        Box::new(std::fmt::Error)
+    }
+
+    #[test]
+    fn map_error_no_storage_access_is_locked() {
+        assert_eq!(
+            map_error(KeyringError::NoStorageAccess(platform())),
+            IdentityError::StorageLocked
+        );
+    }
+
+    #[test]
+    fn map_error_ambiguous_is_inconsistent() {
+        assert_eq!(
+            map_error(KeyringError::Ambiguous(Vec::new())),
+            IdentityError::StorageInconsistent
+        );
+    }
+
+    #[test]
+    fn map_error_other_kinds_are_unavailable() {
+        assert_eq!(
+            map_error(KeyringError::BadEncoding(vec![1])),
+            IdentityError::StorageUnavailable
+        );
+        assert_eq!(
+            map_error(KeyringError::BadDataFormat(vec![1], platform())),
+            IdentityError::StorageUnavailable
+        );
+        assert_eq!(
+            map_error(KeyringError::PlatformFailure(platform())),
+            IdentityError::StorageUnavailable
+        );
+        assert_eq!(
+            map_error(KeyringError::NoEntry),
+            IdentityError::StorageUnavailable
+        );
+    }
+}

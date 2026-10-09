@@ -240,7 +240,9 @@ fn src_has_no_io_or_default_store() {
     for f in files {
         let mut text = std::fs::read_to_string(&f).unwrap();
         // Имена lint-атрибутов `clippy::print_stdout`/`print_stderr` содержат "stdout"/"stderr".
-        text = text.replace("print_stdout", "").replace("print_stderr", "");
+        text = text
+            .replace("clippy::print_stdout", "")
+            .replace("clippy::print_stderr", "");
         for s in substrings {
             assert!(!text.contains(s), "{}: найдено {s:?}", f.display());
         }
@@ -461,7 +463,16 @@ fn public_key_rejects_weak() {
     minus_one[31] = 0x7F;
     let mut identity_sign = identity;
     identity_sign[31] = 0x80;
-    for k in [identity, minus_one, identity_sign] {
+    // y = 0: точка порядка 4 (x^2 = -1 имеет корень), оба знака x
+    let order4 = [0u8; 32];
+    let mut order4_sign = order4;
+    order4_sign[31] = 0x80;
+    for k in [order4, order4_sign] {
+        // контроль: ключ раскладывается в точку и dalek считает её слабой
+        let vk = ed25519_dalek::VerifyingKey::from_bytes(&k).unwrap();
+        assert!(vk.is_weak());
+    }
+    for k in [identity, minus_one, identity_sign, order4, order4_sign] {
         assert_eq!(
             PublicKey::try_from_slice(&k).unwrap_err(),
             IdentityError::InvalidPublicKey

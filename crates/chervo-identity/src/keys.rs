@@ -108,6 +108,19 @@ impl fmt::Debug for PublicKey {
 /// fn needs<T: std::ops::Deref>() {}
 /// needs::<chervo_identity::PairKey>();
 /// ```
+///
+/// Положительные контроли (та же конструкция `needs::<T>()` компилируется там,
+/// где свойство есть, поэтому `compile_fail` выше падают не из-за опечатки в пути):
+///
+/// ```
+/// fn needs<T: Clone + PartialEq + std::hash::Hash>() {}
+/// needs::<chervo_identity::PairId>();
+/// ```
+///
+/// ```
+/// fn needs<T: std::ops::Deref>() {}
+/// needs::<zeroize::Zeroizing<Vec<u8>>>();
+/// ```
 pub struct PairKey(SigningKey);
 
 impl PairKey {
