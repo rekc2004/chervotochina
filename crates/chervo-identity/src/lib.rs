@@ -1,64 +1,38 @@
-//! Идентичность устройства: тип ключа и заглушка хранилища.
-//! Заглушки закрыты по умолчанию: возвращают `NotImplemented`.
+//! Идентичность: ключи Ed25519 пар друзей в хранилище ОС.
+//!
+//! Ключ создаётся только явно (`create`, `rekey`), никогда молча. Приватный ключ
+//! не покидает хранилище ОС и память процесса: API не отдаёт seed и blob.
+//! Спецификация: `docs/specs/stage-10.md`.
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::print_stdout,
+    clippy::print_stderr,
+    clippy::dbg_macro,
+    clippy::todo
+)]
 
-use std::fmt;
+mod error;
+mod ids;
+mod keys;
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+mod os;
+mod store;
 
-/// Публичный идентификатор устройства (32 байта).
-///
-/// Ключ не валидируется, проверка точки кривой появится с библиотекой в этапе 10.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DeviceId([u8; 32]);
+pub use error::IdentityError;
+pub use ids::{DeviceId, PairId};
+pub use keys::{PairKey, PublicKey, SignDomain};
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+pub use os::OsKeyStore;
+pub use store::{SecretStore, UnavailableKeyStore, create, load, rekey};
 
-impl DeviceId {
-    /// Ключ не валидируется, проверка точки кривой появится с библиотекой в этапе 10.
-    pub const fn from_bytes(b: [u8; 32]) -> Self {
-        Self(b)
-    }
-
-    pub const fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-}
-
-/// Байты ключа не выводятся.
-impl fmt::Debug for DeviceId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("DeviceId(..)")
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IdentityError {
-    NotImplemented,
-    StorageUnavailable,
-}
-
-impl fmt::Display for IdentityError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let text = match self {
-            Self::NotImplemented => "not implemented",
-            Self::StorageUnavailable => "key storage unavailable",
-        };
-        f.write_str(text)
-    }
-}
-
-impl std::error::Error for IdentityError {}
-
-pub trait SecretKeyStore {
-    fn load_or_create(&self) -> Result<DeviceId, IdentityError>;
-    fn delete(&self) -> Result<(), IdentityError>;
-}
-
-/// Заглушка хранилища: всегда `NotImplemented`.
-pub struct UnavailableKeyStore;
-
-impl SecretKeyStore for UnavailableKeyStore {
-    fn load_or_create(&self) -> Result<DeviceId, IdentityError> {
-        Err(IdentityError::NotImplemented)
-    }
-
-    fn delete(&self) -> Result<(), IdentityError> {
-        Err(IdentityError::NotImplemented)
-    }
-}
+/// Версия формата записи ключа.
+pub const KEY_BLOB_VERSION: u8 = 1;
+/// Длина записи: `[версия][seed 32][публичный ключ 32]`.
+pub const KEY_BLOB_LEN: usize = 65;
+/// Имя сервиса в хранилище ОС.
+pub const DEFAULT_SERVICE: &str = "chervotochina";
+/// Префикс имени записи пары.
+pub const ACCOUNT_PREFIX: &str = "pair-v1-";
