@@ -1,0 +1,19 @@
+[package]
+name = "chervo-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+chervo-identity.workspace = true
+chervo-addr.workspace = true
+chervo-transport.workspace = true
+chervo-token.workspace = true
+chervo-friends.workspace = true
+chervo-connect.workspace = true
+chervo-transfer.workspace = true
+chervo-receive.workspace = true
+
+[lints]
+workspace = true

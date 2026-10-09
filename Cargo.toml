@@ -1,0 +1,42 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/chervo-identity",
+    "crates/chervo-addr",
+    "crates/chervo-transport",
+    "crates/chervo-token",
+    "crates/chervo-friends",
+    "crates/chervo-connect",
+    "crates/chervo-transfer",
+    "crates/chervo-receive",
+    "crates/chervo-core",
+    "crates/chervo-cli",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+
+[workspace.dependencies]
+chervo-identity = { path = "crates/chervo-identity", version = "0.0.0" }
+chervo-addr = { path = "crates/chervo-addr", version = "0.0.0" }
+chervo-transport = { path = "crates/chervo-transport", version = "0.0.0" }
+chervo-token = { path = "crates/chervo-token", version = "0.0.0" }
+chervo-friends = { path = "crates/chervo-friends", version = "0.0.0" }
+chervo-connect = { path = "crates/chervo-connect", version = "0.0.0" }
+chervo-transfer = { path = "crates/chervo-transfer", version = "0.0.0" }
+chervo-receive = { path = "crates/chervo-receive", version = "0.0.0" }
+chervo-core = { path = "crates/chervo-core", version = "0.0.0" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+
+[profile.release]
+overflow-checks = true
