@@ -164,6 +164,12 @@ pub enum IdentityError {          // Display: строка в кавычках, 
 - Этап 9: выбор ключа в TLS и передача ключа пары транспорту (U10b).
 - Этапы 9/11 (по ответу U10b): заменить заглушку `DeviceId` в `chervo-friends`, `chervo-transport`, `chervo-token` и тестах `chervo-transport`/`chervo-connect` на проверенный `PublicKey`/`PairId` (или иной тип по U10b) и удалить её из `chervo-identity`. До этого байты, пришедшие из сети или от друга, через `DeviceId::from_bytes` за ключ не принимать: проверка ключа только `PublicKey::try_from_slice`.
 
+- По итогам ревью реализации (`docs/exp/ARCH-REVIEW-STAGE10.md`, `docs/exp/SECURITY-REVIEW-STAGE10.md`), дописано дирижёром:
+  - Этап 11: `StorageLocked` и `StorageUnavailable` показывать пользователю одинаково (на macOS отказ доступа даёт `PlatformFailure` → `StorageUnavailable`, Н1); хранить `PairId` до `create` и вызывать `delete` при ошибке `create` (Н2); при `UnsupportedKeyVersion` перед `rekey` спрашивать пользователя (откат формата, L5).
+  - Этап 9 / U10b: ключ пары в TLS только при TLS 1.3 (QUIC), иначе отдельный транспортный ключ: теги доменов не отделены от подписи TLS 1.2 (Н3).
+  - Этап журналов: фильтр `keyring_core`, `zbus`, `secret_service` не ниже info: на debug/trace видны имена записей `pair-v1-<hex>` (L3).
+  - Этап 6: DH сессии Secret Service (группа 1024 бит, переменное время) записать в модель угроз (L4).
+
 ## Не делать
 - Не трогать другие крейты, `deny.toml`, `ci.yml`, `rust-toolchain.toml`, workspace-линты, документы (кроме подпункта U10 из шага 7).
 - Не менять и не удалять `DeviceId` (кроме doc-комментария, см. «Интерфейс»); не использовать его в новом API.
@@ -219,6 +225,8 @@ Doc-тесты `compile_fail` в документации `PairKey` (4 шт.): `
 - `no_disk` покрывает только путь через память (`MemStore`), не бэкенды ОС, своп и журналы.
 - grep-тест обходится макросами и псевдонимами; вторая линия: lint-атрибуты.
 - Как другие крейты используют `DeviceId` (принимают ли его из сети без проверки): вне этапа, этапы 9/11.
+- secret-service 5.2.0 не обнуляет память (расшифрованный секрет, ключ сессии) [П, ревью security L1]; данные внутри `PlatformFailure(Box<dyn Error>)` уничтожаются без обнуления [НП].
+- Паника вместо ошибки возможна в `OsKeyStore::open` на Linux: `.expect` на Mutex в zbus-store и `expect("platform RNG failed")` в secret-service session.rs:70 (L2); не обходится.
 
 ## Стоп-условия
 Противоречие спецификации и кода, нужна новая зависимость или критерий непроверяем: остановиться и доложить, не обходить. Дополнительно:
