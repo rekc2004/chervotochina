@@ -1,6 +1,6 @@
 # SPEC 10: Идентичность (ключи пар)          критичность: КРИТИЧНЫЙ
 
-Автор: combine-architect, 2026-10-09, редакция 2 (учтены 15 замечаний `docs/exp/SECURITY-REVIEW-SPEC10.md` и решение владельца U10a-2). Метки: [П] проверено мной по исходнику крейта с crates.io (файл:строка, версия ниже); [НП] не проверено, проверяется командой из критериев или остаётся в «НЕ проверяется»; [В] вывод архитектора. Ничего из спецификации не запускалось.
+Автор: combine-architect, 2026-10-09, редакция 3 (редакция 2: учтены 15 замечаний `docs/exp/SECURITY-REVIEW-SPEC10.md` и решение владельца U10a-2; редакция 3: по ревью дирижёра `DeviceId` остаётся заглушкой, т.к. используется другими крейтами; факт по supply-chain). Метки: [П] проверено мной по исходнику крейта с crates.io (файл:строка, версия ниже); [НП] не проверено, проверяется командой из критериев или остаётся в «НЕ проверяется»; [В] вывод архитектора. Ничего из спецификации не запускалось.
 
 Основание: действует только раздел «U10a-2» в `docs/OWNER_DECISIONS.md`; «U10a, первая редакция» отменена и не применяется. Ключ создаётся на каждую пару друзей (U10a-2 п.3), не один на устройство. Вопросы совместимости с DECISION/BRIEF вынесены в `docs/OPEN_QUESTIONS.md` U10b; этот этап от ответа на U10b не зависит.
 
@@ -16,6 +16,7 @@
 - **Кто подписывает приглашение до появления пары:** новый ключ пары, созданный явным `create` в момент «добавить друга» (U10a-2 п.5). Подпись в приглашении доказывает только владение ключом; подлинность даёт SAS (BRIEF разд. 3, без изменений) [В].
 - **Токен обновления адреса** подписывается ключом той пары, которой он адресован (домен `AddressUpdate`): один токен на друга (следствие записано в U10b) [В].
 - **Выбор ключа сервером в TLS** до того, как известен клиент: не в этом этапе, см. U10b (варианты: идентификатор пары в первом пакете/SNI, отдельный транспортный ключ, endpoint на пару). Этап 10 не передаёт ключ транспорту и не даёт метода, возвращающего seed; API для транспорта добавит этап 9 по ответу на U10b.
+- **`DeviceId` (заглушка скелета)** остаётся без изменений: его используют `chervo-friends`, `chervo-transport`, `chervo-token`, тесты `chervo-transport` и `chervo-connect` (grep дирижёра), а другие крейты этот этап не трогает. Это несекретный 32-байтный идентификатор без проверки, не ключ и не связан с ключами пар; новый API его не принимает и не возвращает. Заменить или удалить его решают этапы 9/11 по ответу на U10b [В].
 
 ## Факты по исходникам (версии для этапа)
 Версии: `ed25519-dalek` 3.0.0, `curve25519-dalek` 5.0.0 (транзитивно), `zeroize` 1.9.1, `getrandom` 0.4.3, `keyring-core` 1.0.0, `apple-native-keyring-store` 1.0.2, `windows-native-keyring-store` 1.1.0, `zbus-secret-service-keyring-store` 1.0.1. Все MSRV ≤ 1.88 (`rust-version` в их `Cargo.toml`) ≤ наш 1.97 [П].
@@ -39,7 +40,7 @@
 
 ## Сделать (по порядку, каждый шаг проверить до следующего, CORE п.5)
 1. Среда: `cargo --version`, `rustc --version`. Нет команды → СТОП.
-2. Использование старого API вне крейта: `grep -rnE "DeviceId|SecretKeyStore|load_or_create" crates --include=*.rs | grep -v "^crates/chervo-identity/"`. Непусто → СТОП (другие крейты не трогаем, решает architect).
+2. Использование удаляемого API вне крейта: `grep -rnE "SecretKeyStore|load_or_create" crates --include=*.rs | grep -v "^crates/chervo-identity/"`. Непусто → СТОП (другие крейты не трогаем, решает architect). `DeviceId` в grep не входит: он остаётся (см. «Интерфейс»), его использование другими крейтами ожидаемо.
 3. Версии: `cargo search <имя> --limit 1` для восьми крейтов из «Фактов». В спецификацию вписаны версии выше; если на crates.io новее, **не переходить**, записать в отчёт (ссылки файл:строка верны только для этих версий).
 4. Зависимости. В корне `[workspace.dependencies]` с точными версиями (`"=X.Y.Z"`):
    `ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["zeroize", "fast"] }`; `getrandom = { version = "=0.4.3", default-features = false }`; `zeroize = { version = "=1.9.1", default-features = false, features = ["alloc"] }`; `keyring-core = { version = "=1.0.0", default-features = false }`; `apple-native-keyring-store = { version = "=1.0.2", default-features = false, features = ["keychain"] }`; `windows-native-keyring-store = { version = "=1.1.0", default-features = false }`; `zbus-secret-service-keyring-store = { version = "=1.0.1", default-features = false, features = ["crypto-rust"] }`.
@@ -58,6 +59,18 @@ pub const KEY_BLOB_VERSION: u8 = 1;
 pub const KEY_BLOB_LEN: usize = 65;          // [версия][seed 32][публичный ключ 32]
 pub const DEFAULT_SERVICE: &str = "chervotochina";
 pub const ACCOUNT_PREFIX: &str = "pair-v1-";
+
+// Заглушка скелета, оставить как есть (используется другими крейтами; решение по U10b, этапы 9/11).
+// Сигнатуры, derive и Debug не менять. Не ключ: байты не проверяются, к ключам пар не относится.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DeviceId([u8; 32]);               // Debug = "DeviceId(..)" (как сейчас)
+impl DeviceId {
+    pub const fn from_bytes(b: [u8; 32]) -> Self;
+    pub const fn as_bytes(&self) -> &[u8; 32];
+}
+// Doc-комментарий DeviceId заменить на: «Временный несекретный идентификатор-заглушка для других
+// крейтов. Не публичный ключ: байты не проверяются. Не используется API ключей пар. Будет заменён
+// или удалён по решению U10b (этапы 9/11).» Упоминание «проверка точки появится в этапе 10» убрать.
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PairId([u8; 16]);                 // несекретный; Debug = "PairId(..)"
@@ -134,7 +147,7 @@ pub enum IdentityError {          // Display: строка в кавычках, 
     SigningFailed,        // "signing failed"
 }
 ```
-Удаляются: `DeviceId`, трейт `SecretKeyStore` (шаг 2 подтверждает, что вне крейта их нет). `MemoryKeyStore` в библиотеке **нет** (замечание 14): тестовые хранилища живут в `tests/common/mod.rs`.
+Удаляется: трейт `SecretKeyStore` с `load_or_create` (шаг 2 подтверждает, что вне крейта их нет; `UnavailableKeyStore` теперь реализует `SecretStore`). `DeviceId` **остаётся** без изменений сигнатур (см. выше; вне крейта `IdentityError` и `UnavailableKeyStore` не используются, поэтому `#[non_exhaustive]` и новые варианты другие крейты не ломают, по grep дирижёра). `MemoryKeyStore` в библиотеке **нет** (замечание 14): тестовые хранилища живут в `tests/common/mod.rs`.
 
 Семантика (точно):
 - `create`: `read(pair)`; `Some(_)` (даже испорченная) → `KeyAlreadyExists`, запись не трогать. `None` → seed в `Zeroizing<[u8; 32]>`, заполнить `getrandom::fill` на месте (ошибка → `RandomUnavailable`); `SigningKey::from_bytes(&seed)`; blob в `Zeroizing<[u8; KEY_BLOB_LEN]>` копированием в подсрезы (без `Vec::push/extend`); `write`; `read` и сверить с blob: `None` или не совпало → `StorageInconsistent`.
@@ -149,9 +162,11 @@ pub enum IdentityError {          // Display: строка в кавычках, 
 - Этап 18 (или ядро): один экземпляр приложения на пользователя (блокировка), иначе гонка `rekey` двух процессов (замечание 4).
 - Этап 6: в `THREAT_MODEL.md` сценарии «вредонос под тем же пользователем», «украденный ноутбук», «бэкап связки средствами пользователя (допустим, U10a-2 п.1)», таблица силы защиты выше.
 - Этап 9: выбор ключа в TLS и передача ключа пары транспорту (U10b).
+- Этапы 9/11 (по ответу U10b): заменить заглушку `DeviceId` в `chervo-friends`, `chervo-transport`, `chervo-token` и тестах `chervo-transport`/`chervo-connect` на проверенный `PublicKey`/`PairId` (или иной тип по U10b) и удалить её из `chervo-identity`. До этого байты, пришедшие из сети или от друга, через `DeviceId::from_bytes` за ключ не принимать: проверка ключа только `PublicKey::try_from_slice`.
 
 ## Не делать
 - Не трогать другие крейты, `deny.toml`, `ci.yml`, `rust-toolchain.toml`, workspace-линты, документы (кроме подпункта U10 из шага 7).
+- Не менять и не удалять `DeviceId` (кроме doc-комментария, см. «Интерфейс»); не использовать его в новом API.
 - Никакой своей криптографии: генерация, подпись, проверка, разбор точек только вызовами `ed25519-dalek`/`getrandom`. Байты ключа только копировать.
 - Не писать seed/blob/hex/base64 в файлы, переменные окружения, аргументы процессов, логи, stdout/stderr. Никакого запасного файлового хранилища, даже зашифрованного. Не экспортировать и не копировать ключ никуда, кроме хранилища ОС (U10a-2 п.1).
 - Не включать фичи `serde`, `pkcs8`, `pem`, `rand_core`, `hazmat`, `legacy_compatibility`, `batch`, `digest` у ed25519-dalek; `sample` у keyring-core; `search` у windows-store; `crypto-openssl` у zbus-store. Не брать крейты `keyring`, `linux-keyutils-keyring-store`, `dbus-secret-service-keyring-store`.
@@ -160,6 +175,7 @@ pub enum IdentityError {          // Display: строка в кавычках, 
 ## Недоверенный ввод
 - Байты из хранилища (любая длина 0..МиБ, любой первый байт): порядок проверок как в `load`. Без копирования до проверки длины.
 - `PublicKey::try_from_slice`: длина ≠ 32 → `InvalidPublicKey`; `VerifyingKey::from_bytes` ошибка → `InvalidPublicKey`; `is_weak()` → `InvalidPublicKey`; `VerifyingKey::from(vk.to_edwards()).to_bytes() != input` (неканоническая кодировка) → `InvalidPublicKey`.
+- `DeviceId::from_bytes` ничего не проверяет и проверкой ключа не является; в новом API недоверенные байты ключа принимает только `PublicKey::try_from_slice`.
 - Подпись в `verify`: любая длина; ≠ 64 → `BadSignature`.
 - Без `unwrap`/`expect`/`panic!`/индексации в `src/` (lint-атрибут выше). Сообщения ошибок без байтов ввода. Паника возможна только внутри keyring-core/zbus-store на отравленном Mutex (`zbus-secret-service-keyring-store src/service.rs:34-37`, `.expect`) [П]: записать в отчёт, не обходить.
 
@@ -167,6 +183,7 @@ pub enum IdentityError {          // Display: строка в кавычках, 
 `tests/common/mod.rs`: `MemStore` (Mutex<HashMap<PairId, Zeroizing<Vec<u8>>>>, метод `raw(&PairId) -> Option<Vec<u8>>` только для тестов), `FixedStore(Vec<u8>)`, `LossyStore` (write Ok, read None), `FailingStore(IdentityError)` (всё возвращает заданную ошибку).
 
 `tests/identity.rs`:
+- заглушка `DeviceId` (сохранить существующие имена): `device_id_roundtrip` (как сейчас: `from_bytes([7;32]).as_bytes() == &[7;32]`), `debug_does_not_leak_key` (ровно "DeviceId(..)" для `from_bytes([0xAB;32])`; проверку `UnavailableKeyStore.load_or_create()` из него убрать, её заменяет `unavailable_store_fails_closed`).
 - позитивные: `pair_id_generate_distinct`, `account_name_format` (префикс, 40 символов, только `[0-9a-f]` после префикса), `create_then_load_same_key`, `rekey_replaces_key` (новый публичный ≠ старого; `load` со старым expected → `KeyMismatch`, с новым → Ok), `sign_verify_roundtrip` (все `SignDomain::ALL`), `public_key_roundtrip`, `delete_missing_is_ok`, `pair_key_debug_redacted` (ровно "PairKey(..)"), `public_debug_redacted` ("PublicKey(..)", "PairId(..)", "OsKeyStore(..)" под cfg), `error_display_fixed_strings`, `domain_tags_prefix_free` (теги попарно различны, ни один не префикс другого, каждый оканчивается единственным 0x00, ни один не начинается с 0x20), `secret_types_zeroize_on_drop` (компиляция `fn f<T: ZeroizeOnDrop>()` для `PairKey`, `ed25519_dalek::SigningKey`, `Zeroizing<Vec<u8>>`; для `PairKey` тавтология, маркер ручной), `src_has_no_io_or_default_store` (читает `src/**/*.rs` через `env!("CARGO_MANIFEST_DIR")`; нет вхождений `std::fs`, `\bfs\b`, `File`, `OpenOptions`, `set_var`, `env::var`, `print!`, `println!`, `eprint`, `dbg!`, `stdout`, `stderr`, `log::`, `tracing`, `Command`, `set_default_store`, `get_default_store`, `mock`, `Entry::new(`, `keyring::`, `.sign(` (только `try_sign`)).
 - негативные: `load_missing_is_key_missing` (хранилище после вызова пусто), `create_refuses_existing_record` (`KeyAlreadyExists`, байты записи прежние), `load_expected_mismatch_rejected`, `locked_store_not_missing` (`FailingStore(StorageLocked)`: `load`/`create`/`rekey` дают `StorageLocked`, не `KeyMissing`), `failing_store_propagates` (`StorageUnavailable`), `lossy_store_detected` (`create` → `StorageInconsistent`), `rekey_missing_is_key_missing`, `delete_then_load_is_key_missing`, `unavailable_store_fails_closed`, `blob_empty_rejected`, `blob_wrong_length_rejected` (64, 66, 1 МиБ с первым байтом 1), `blob_unknown_version_rejected` (0x00, 0x02, 0xFF при длинах 65 и 10), `blob_public_part_mismatch_rejected` (инвертирован бит в байте 40 → `CorruptKey`), `blob_seed_bit_flip_rejected` (инвертирован бит в байте 5 → `CorruptKey`), `corrupt_blob_not_overwritten`, `blob_exhaustive_lengths_and_versions` (длины 0..=130 с первым байтом 1 и все 256 значений первого байта при длине 65: нет паники, ошибки по правилам `load`), `public_key_rejects_wrong_length` (0, 31, 33), `public_key_rejects_weak` (`01 00..00`; `EC FF..FF 7F` (y = -1); `01 00..00 80`), `public_key_rejects_noncanonical` (y = p + k, k = 0..=18, бит знака 0 и 1: все → `InvalidPublicKey`; положительный контроль: хотя бы одна из этих кодировок принимается `ed25519_dalek::VerifyingKey::from_bytes` и не `is_weak`, иначе тест падает с сообщением «нет положительного контроля»), `verify_rejects_other_domain`, `verify_rejects_modified_message`, `verify_rejects_modified_signature`, `verify_rejects_other_key`, `verify_rejects_wrong_sig_length` (0, 63, 65).
 - `os_store_roundtrip_manual` с `#[ignore]`: `OsKeyStore::open_with_service("chervotochina-test-" + hex случайных 8 байт)`; Drop-guard удаляет запись даже при панике; `assert_ne!(service, DEFAULT_SERVICE)`; `create`, затем **новый экземпляр** `OsKeyStore` и `load` с тем же expected; `rekey`; `delete`; `load` → `KeyMissing`. Запускает владелец вручную; в CI не запускается.
@@ -179,9 +196,10 @@ Doc-тесты `compile_fail` в документации `PairKey` (4 шт.): `
 
 ## Критерии приёмки (каждый командой, вывод в отчёт)
 - [ ] `cargo build -p chervo-identity --locked` и `cargo build --workspace --locked`
-- [ ] `cargo test -p chervo-identity --locked`: проходят все тесты из перечня (включая негативные), `os_store_roundtrip_manual` ignored; `cargo test -p chervo-identity --locked -- --list --include-ignored` содержит каждое имя (сверить grep по списку)
+- [ ] `cargo test -p chervo-identity --locked`: проходят все тесты из перечня (включая негативные и два теста `DeviceId`), `os_store_roundtrip_manual` ignored; `cargo test -p chervo-identity --locked -- --list --include-ignored` содержит каждое имя (сверить grep по списку)
 - [ ] `cargo test --doc -p chervo-identity --locked`: 4 строки `compile fail ... ok`
-- [ ] `cargo test --workspace --locked`
+- [ ] `cargo test --workspace --locked` (в том числе тесты других крейтов, использующие `DeviceId`)
+- [ ] `git diff --stat <база этапа> -- crates | grep -v "crates/chervo-identity/"` пусто (другие крейты не тронуты)
 - [ ] `cargo clippy --workspace --all-targets --locked -- -D warnings`
 - [ ] `cargo fmt --all -- --check`
 - [ ] `bash scripts/check-forbidden.sh` и `bash scripts/check-forbidden.sh --self-test`
@@ -191,7 +209,7 @@ Doc-тесты `compile_fail` в документации `PairKey` (4 шт.): `
 - [ ] `cargo tree -p chervo-identity -e features -i ed25519-dalek`: фичи только `zeroize`, `fast` (нет `default`, `serde`, `pkcs8`, `pem`, `rand_core`, `hazmat`, `legacy_compatibility`, `batch`)
 - [ ] `cargo tree -p chervo-identity --target all -e features -i secret-service | grep -c crypto-rust` ≥ 1 и `... | grep -ci openssl` = 0
 - [ ] `cargo tree -p chervo-identity --target all -e normal | grep -Ei "openssl|libdbus|dbus-sys|keyutils|regex"` пусто; `cargo tree -p chervo-identity --target all -e features -i keyring-core | grep sample` пусто
-- [ ] `cargo deny check licenses sources` и `cargo audit --deny warnings`: запущены локально, либо зелёный supply-chain job CI на этом коммите (дирижёр приводит ссылку на прогон). Ни то ни другое → этап не принят по этому пункту (замечание 12); ничего не устанавливать без разрешения владельца
+- [ ] Supply-chain (`cargo deny check licenses sources`, `cargo audit --deny warnings`). Факт: локально `cargo deny` и `cargo audit` не установлены (`error: no such command`, по проверке дирижёра); `.github/workflows/ci.yml` запускается на любой `push` и `pull_request` (`:2-4`) и содержит job `supply-chain` с этими двумя командами (`:32-42`) [П]. Поэтому пункт проверяется статусом job `supply-chain` в прогоне CI на коммите этапа: дирижёр приводит ссылку на прогон и его статус. Нет зелёного прогона → этап не принят по этому пункту (замечание 12); локально ничего не устанавливать без разрешения владельца
 - [ ] `docs/OPEN_QUESTIONS.md` U10 содержит «Статус (этап 10)»
 
 ## НЕ проверяется на этапе (записать в отчёт, не заявлять)
@@ -200,13 +218,15 @@ Doc-тесты `compile_fail` в документации `PairKey` (4 шт.): `
 - Обнуление: копии от перемещений, буферы ОС, security-framework и `secret-service` [НП], временные массивы внутри ed25519-dalek (факт 7), дампы при аварии [В]. Тест `secret_types_zeroize_on_drop` для `PairKey` тавтологичен.
 - `no_disk` покрывает только путь через память (`MemStore`), не бэкенды ОС, своп и журналы.
 - grep-тест обходится макросами и псевдонимами; вторая линия: lint-атрибуты.
+- Как другие крейты используют `DeviceId` (принимают ли его из сети без проверки): вне этапа, этапы 9/11.
 
 ## Стоп-условия
 Противоречие спецификации и кода, нужна новая зависимость или критерий непроверяем: остановиться и доложить, не обходить. Дополнительно:
 - нет `cargo`/`rustc`; шаг 2 непуст; API из «Фактов» устроено иначе (шаг 5);
 - сборка требует системных пакетов, правки `ci.yml` или openssl/libdbus;
 - лицензия любой новой зависимости вне `deny.toml` (`deny.toml` не править);
-- `public_key_rejects_noncanonical` без положительного контроля.
+- `public_key_rejects_noncanonical` без положительного контроля;
+- сборка или тесты другого крейта требуют изменений в нём (например, из-за `IdentityError` или `DeviceId`).
 
 ## Процесс и исполнители
 1. Исполнитель: `combine-builder`, effort high (критичный этап: не ниже Sonnet строго по спецификации, OWNER_DECISIONS «Принцип распределения»). Effort high, а не модель выше: спецификация закрывает решения, остаётся аккуратная реализация.
@@ -225,13 +245,13 @@ Doc-тесты `compile_fail` в документации `PairKey` (4 шт.): `
 | 3 | `crypto-rust` обязательна, openssl запрещён (критерий `cargo tree`); сессия DH [П факт 6]; поведение без фичи [НП] |
 | 4 | Раздельные `load` (с `expected`) и явные `create`/`rekey`; `KeyMissing` ≠ `StorageLocked` ≠ `StorageUnavailable`; `create` не перезаписывает; случайный `PairId` убирает гонку создания; требование одного экземпляра к этапу 18 |
 | 5 | Формат 65 байт с публичной частью, сверка при загрузке, тесты на порчу seed и публичной части |
-| 6 | `DeviceId::from_bytes` удалён; `PublicKey` только через проверку длины, точки, `is_weak` и каноничности перекодированием (сравнение `to_bytes()` с вводом бесполезно [П]); тесты на слабые и неканонические ключи с положительным контролем |
+| 6 | `DeviceId::from_bytes` остаётся только у заглушки `DeviceId` (её используют другие крейты; не ключ, в новом API не участвует; замена/удаление на этапах 9/11 по U10b, требование записано). Недоверенные байты ключа идут только через `PublicKey::try_from_slice`: проверка длины, точки, `is_weak` и каноничности перекодированием (сравнение `to_bytes()` с вводом бесполезно [П]); тесты на слабые и неканонические ключи с положительным контролем. Остаточный риск до этапов 9/11: другой крейт может принять сетевые байты как `DeviceId` без проверки [В] |
 | 7 | Seed и blob в `Zeroizing<[u8;N]>` без `push`; результат хранилища сразу в `Zeroizing`; обнуление байтов в ошибках keyring; остатки в библиотеках и тавтологичность теста записаны |
 | 8 | `sign/verify` только с `SignDomain`, теги без префиксов друг друга и отличны от контекста TLS (0x20) |
 | 9 | Lint-атрибуты `deny(unwrap_used, expect_used, indexing_slicing, panic, print_*)`; расширенный grep; ограничение записано |
 | 10 | Сканер ищет blob, hex, base64 (оба алфавита, с паддингом и без); ограничение «только память» в «НЕ проверяется» |
 | 11 | Drop-guard, запрет `DEFAULT_SERVICE`, случайный service; запуск вручную владельцем (U10 решён U10a-2) |
-| 12 | Критерий `cargo tree -e features -i ed25519-dalek`; версия 3.0.0 (≥ 2); supply-chain: локальный прогон или зелёный job CI, иначе не принят |
+| 12 | Критерий `cargo tree -e features -i ed25519-dalek`; версия 3.0.0 (≥ 2); supply-chain: локально инструментов нет, проверяется зелёным job `supply-chain` CI на коммите этапа, иначе не принят |
 | 13 | `blob_exhaustive_lengths_and_versions` без новых зависимостей; фаззинг токенов на этапе 11 |
 | 14 | `PairKey` без Clone/PartialEq/Hash/Deref (doc-тесты `compile_fail`); `MemoryKeyStore` убран из библиотеки в тесты |
 | 15 | Раздел «Процесс»: ревью architect перед security; исполнитель builder (effort high) вместо «ведёт architect» из TASK.md по OWNER_DECISIONS и указанию дирижёра |
@@ -240,4 +260,5 @@ Doc-тесты `compile_fail` в документации `PairKey` (4 шт.): `
 - Ключ теперь на каждую пару друзей: одна запись в хранилище ОС на друга, адрес записи `chervotochina` / `pair-v1-<случайный id>`, без имён и ключей в названии.
 - Ключ никогда не создаётся сам: только `create` (добавление друга) и `rekey` («пересоздать ключ»). Пропал ключ → ошибка `KeyMissing` и повторное добавление друга; заблокированное хранилище даёт другую ошибку.
 - От вредоноса под вашим пользователем хранилище ОС на Windows и Linux не защищает (на macOS возможен запрос) [не проверено в работе]. Поэтому: пересоздание ключа, автоприём выключен, уведомление друзей (этапы 11, 12, 15).
+- Старый тип `DeviceId` пока остаётся заглушкой (им пользуются другие части программы); это не ключ, его заменят на этапах 9/11 после вашего ответа на U10b. Этап 10 другие части не трогает.
 - Вопрос вам: U10b в `docs/OPEN_QUESTIONS.md` (как сервер выбирает ключ пары в TLS, токен адреса на каждого друга, влияние на выбор iroh/quinn). Этап 10 от ответа не зависит.
