@@ -81,7 +81,9 @@ pub fn load<S: SecretStore + ?Sized>(
         return Err(IdentityError::CorruptKey);
     }
     let seed_src = blob.get(1..33).ok_or(IdentityError::CorruptKey)?;
-    let public_src = blob.get(33..KEY_BLOB_LEN).ok_or(IdentityError::CorruptKey)?;
+    let public_src = blob
+        .get(33..KEY_BLOB_LEN)
+        .ok_or(IdentityError::CorruptKey)?;
 
     let mut seed = Zeroizing::new([0u8; 32]);
     seed.copy_from_slice(seed_src);

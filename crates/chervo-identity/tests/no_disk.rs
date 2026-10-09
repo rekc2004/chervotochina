@@ -2,7 +2,7 @@ mod common;
 
 use std::path::{Path, PathBuf};
 
-use chervo_identity::{create, load, rekey, PairId, SignDomain};
+use chervo_identity::{PairId, SignDomain, create, load, rekey};
 use common::MemStore;
 
 const STD: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

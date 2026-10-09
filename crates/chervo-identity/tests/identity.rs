@@ -1,8 +1,8 @@
 mod common;
 
 use chervo_identity::{
-    create, load, rekey, DeviceId, IdentityError, PairId, PairKey, PublicKey, SecretStore,
-    SignDomain, UnavailableKeyStore, ACCOUNT_PREFIX, DEFAULT_SERVICE, KEY_BLOB_LEN,
+    ACCOUNT_PREFIX, DEFAULT_SERVICE, DeviceId, IdentityError, KEY_BLOB_LEN, PairId, PairKey,
+    PublicKey, SecretStore, SignDomain, UnavailableKeyStore, create, load, rekey,
 };
 use common::{FailingStore, FixedStore, LossyStore, MemStore};
 use zeroize::{ZeroizeOnDrop, Zeroizing};
@@ -64,7 +64,12 @@ fn create_then_load_same_key() {
     let loaded = load(&s, &p, &expected).unwrap();
     assert_eq!(loaded.public_key(), expected);
     let sig = k.sign(SignDomain::Invite, b"m").unwrap();
-    assert!(loaded.public_key().verify(SignDomain::Invite, b"m", &sig).is_ok());
+    assert!(
+        loaded
+            .public_key()
+            .verify(SignDomain::Invite, b"m", &sig)
+            .is_ok()
+    );
     assert_eq!(s.raw(&p).unwrap().len(), KEY_BLOB_LEN);
 }
 
@@ -211,9 +216,26 @@ fn src_has_no_io_or_default_store() {
     collect_rs(&src, &mut files);
     assert!(!files.is_empty());
     let substrings = [
-        "std::fs", "File", "OpenOptions", "set_var", "env::var", "print!", "println!", "eprint",
-        "dbg!", "stdout", "stderr", "log::", "tracing", "Command", "set_default_store",
-        "get_default_store", "mock", "Entry::new(", "keyring::", ".sign(",
+        "std::fs",
+        "File",
+        "OpenOptions",
+        "set_var",
+        "env::var",
+        "print!",
+        "println!",
+        "eprint",
+        "dbg!",
+        "stdout",
+        "stderr",
+        "log::",
+        "tracing",
+        "Command",
+        "set_default_store",
+        "get_default_store",
+        "mock",
+        "Entry::new(",
+        "keyring::",
+        ".sign(",
     ];
     for f in files {
         let mut text = std::fs::read_to_string(&f).unwrap();
@@ -244,7 +266,10 @@ fn create_refuses_existing_record() {
     assert_eq!(s.raw(&p), before);
     // испорченная запись тоже не перезаписывается
     let s2 = MemStore::with_raw(&p, vec![9, 9, 9]);
-    assert_eq!(create(&s2, &p).unwrap_err(), IdentityError::KeyAlreadyExists);
+    assert_eq!(
+        create(&s2, &p).unwrap_err(),
+        IdentityError::KeyAlreadyExists
+    );
     assert_eq!(s2.raw(&p), Some(vec![9, 9, 9]));
 }
 
@@ -277,8 +302,14 @@ fn failing_store_propagates() {
         load(&s, &p, &some_public()).unwrap_err(),
         IdentityError::StorageUnavailable
     );
-    assert_eq!(create(&s, &p).unwrap_err(), IdentityError::StorageUnavailable);
-    assert_eq!(rekey(&s, &p).unwrap_err(), IdentityError::StorageUnavailable);
+    assert_eq!(
+        create(&s, &p).unwrap_err(),
+        IdentityError::StorageUnavailable
+    );
+    assert_eq!(
+        rekey(&s, &p).unwrap_err(),
+        IdentityError::StorageUnavailable
+    );
 }
 
 #[test]
@@ -447,10 +478,10 @@ fn public_key_rejects_noncanonical() {
             let mut b = [0xFFu8; 32];
             b[0] = 0xED + k;
             b[31] = 0x7F | sign;
-            if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&b) {
-                if !vk.is_weak() {
-                    control = true;
-                }
+            if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&b)
+                && !vk.is_weak()
+            {
+                control = true;
             }
             assert_eq!(
                 PublicKey::try_from_slice(&b).unwrap_err(),
