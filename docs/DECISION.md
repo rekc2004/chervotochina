@@ -1,37 +1,51 @@
 # DECISION: этап 0 (разведка и выбор базы)
 
-Дата: 2026-10-09. Автор: combine-architect. Вход: `docs/BRIEF.md`, факты разведчиков (haiku), чтение исходников iroh 1.3.0 (распакованы с crates.io).
+Дата: 2026-10-09. Автор: combine-architect. Вход: `docs/BRIEF.md`, факты разведчиков (haiku), чтение исходников iroh 1.3.0 (распакованы с crates.io). Раздел 1 переписан на этапе 2б (2026-10-09) по новым фактам разведчиков; разделы 2.1 и 2.3 сверены с ними.
 
 Метки у каждого вывода:
 - **[П]** проверено мной по первоисточнику (исходник крейта, файл:строка).
-- **[П-р]** проверено разведчиком по реестру (crates.io / PyPI / proxy.golang.org), мной не перепроверено.
+- **[П-р]** проверено разведчиком по первоисточнику (реестр crates.io / PyPI / proxy.golang.org, raw-файл репозитория, docs.rs, сайт проекта), мной не перепроверено.
 - **[В]** выведено логикой из проверенного или из общеизвестного устройства сетей; в нашей системе не запускалось.
 - **[Д]** догадка, опереться нельзя.
 - **[НП]** не проверено: источник недоступен.
 
-Ограничение среды: прокси пропускает только crates.io, PyPI, proxy.golang.org. GitHub, docs.rs, сайты проектов (blip.net, localsend.org, iroh.computer) отдают 403. **Ничего не запускалось**: ни тесты iroh, ни сетевые эксперименты. Всё ниже про поведение в сети это [В] или [Д], пока не пройдены эксперименты из раздела 2.4.
+Ограничение среды: на этапе 0 прокси пропускал только crates.io, PyPI, proxy.golang.org. На этапе 2б открылись raw.githubusercontent.com, docs.rs, docs.iroh.computer, localsend.org, главная blip.net (подстраницы 403 от Cloudflare); github.com, api.github.com, codeload.github.com по-прежнему 403 (U16). **Ничего не запускалось**: ни тесты iroh, ни сетевые эксперименты. Всё ниже про поведение в сети это [В] или [Д], пока не пройдены эксперименты из раздела 2.4.
 
 ---
 
 ## 1. Аналоги
 
-| Аналог | Версия, дата | Лицензия | Внешние серверы по умолчанию | Статус |
-|---|---|---|---|---|
-| iroh (база-кандидат, не приложение) | 1.3.0, 2026-09-28 [П-р] | MIT OR Apache-2.0 [П] (`Cargo.toml:35`) | Пресет `N0`: relay `*.relay.n0.iroh.link` (4 региона, `src/defaults.rs:27-33`), публикация и поиск адресов через pkarr `https://dns.iroh.link/pkarr` и DNS `iroh.link` (`src/endpoint/presets.rs:116-139`, `src/address_lookup/pkarr.rs:127`) [П] | Проверено по исходнику |
-| magic-wormhole | 0.24.0, 2026-05-05 [П-р] | MIT [П-р] | Rendezvous и transit relay проекта [НП] | Лицензия и версия с PyPI; серверы не проверены |
-| croc | v10.7.0, 2026-07-28 [П-р] | [НП] | Публичный relay автора [НП] | Только версия |
-| Blip | [НП] | [НП] | По пересказу BRIEF: вход по e-mail, свой relay [НП] | Не проверено |
-| AltSendme | [НП] | [НП] | По пересказу BRIEF: iroh с публичными relay n0 [НП]. Если он на пресете `N0`, это совпадает с тем, что видно в исходнике iroh [В] | Не проверено |
-| LocalSend | [НП] | [НП] | По пересказу: только LAN [НП] | Не проверено |
-| fsend | [НП] | [НП] | По пересказу: WebRTC, нужны STUN/TURN [НП] | Не проверено |
-| AlterSend | [НП] | [НП] | [НП] | Не проверено |
+Факты этапа 2б собрали разведчики; их метка [П] записана здесь как [П-р], их [В]/[Д]/[НП] сохранены; мои выводы помечены «(arch)». Я в веб не ходил. **Дата последнего коммита не проверена ни для одного аналога** (github.com закрыт); даты только релизов из реестров и CHANGELOG. raw-файлы читались с ветки `main` на дату проверки: версия в `main` не обязательно выпущенный релиз (arch, [В]).
 
-**Критерий этапа 2 в TASK.md («по каждому аналогу проверено по первоисточникам») выполнен только для iroh и частично для magic-wormhole и croc.** Для остальных первоисточники недоступны. Это записывается как невыполненная часть критерия, а не замалчивается (см. U13). На выбор ниже это не влияет: ни один аналог не берётся в форк, и каждый по пересказу держится на relay или чужих серверах, что нарушает требования 1-2 [В].
+| Аналог | Версия, дата релиза | Лицензия | Внешние серверы по умолчанию | Соединение | BRIEF раздел 8 |
+|---|---|---|---|---|---|
+| iroh (база-кандидат, не приложение) | 1.3.0, 2026-09-28 [П-р] | MIT OR Apache-2.0 [П] | Пресет `N0`: relay `*.relay.n0.iroh.link`, pkarr/DNS `dns.iroh.link` [П]; UDP 7842 к relay для узнавания своего адреса [П-р] (это QAD [В]) | QUIC + TLS 1.3 RPK, адрес = ключ; обычно relay, затем прямой путь [П] | Подтверждено: relay и lookup отключаемы (исходник [П], документация [П-р]); в работе не проверено |
+| AltSendme, теперь DashBeam | 0.7.1 в `main` [П-р]; дата релиза [НП] | AGPL-3.0-only [П-р] | relay n0 (`RelayMode::Default`), публикация pkarr и поиск через DNS n0 [П-р] | iroh 1.0.3, одноразовый ticket/QR, ссылка `app.dashbeam.net/receive?ticket=`, mDNS [П-р] | Подтверждено (публичные relay n0); дополнено: обнаружение n0 в приложении не отключается; репозиторий переименован [В] |
+| Blip | [НП] | проприетарная [Д]; «© 2026 Blip Studio Inc.» [П-р] | «Blip's fast relay»; хосты, STUN/TURN, сигналинг [НП] | «LAN direct connect»; вне LAN через relay [В]; «mTLS over TLS 1.3» (заявление вендора, не аудит) [П-р] | relay и mTLS подтверждены как заявление вендора; вход по e-mail и поиск людей [НП]; прямое через интернет [НП] |
+| LocalSend | 1.18.2, 2026-08-21 [П-р] | Apache-2.0 [П-р] | Нет (README, протокол) [П-р]; код не проверялся | LAN: UDP multicast 224.0.0.0/24 порт 53317, запасной HTTP POST `/api/localsend/v2/register` по локальным IP; TLS-сертификат устройства, отпечаток SHA-256 [П-р] | Подтверждено «только LAN» (по документации); «Receive via link» вне LAN [НП] |
+| fsend (кандидат: spectre10/fs-cli) | fs-cli v0.5.2, 2024-03-08 [П-р] | Apache-2.0 [П-р] | STUN `stun.l.google.com:19302`; TURN не настроен [П-р] | WebRTC (pion v3.2.21), сигналинг ручным копированием SDP base64, без сервера [П-р] | Частично: STUN есть, TURN по умолчанию нет; что fs-cli и есть «fsend» [НП] |
+| AlterSend | 2.0.0 в package.json [П-р]; дата [НП] | Apache-2.0 [П-р] | Hyperswarm DHT (bootstrap-узлы не названы [НП]); blind relay с адресами из подписанной DHT-записи; `relay.altersend.com`, `relay-sg.altersend.com` (dht-relay для браузера) [П-р] | Hyperswarm, тема = BLAKE2b(join-код), Noise; relay при симметричном NAT, по README включён по умолчанию (в коде [НП]) [П-р] | Опровергнуто «зрелость неизвестна» как единственная характеристика: устройство известно, DHT и relay нарушают требования 1-2 (arch, [В]); зрелость [НП] |
+| croc | v11.5.4, 2026-09-26 [П-р] (в этапе 0 записан v10.7.0, 2026-07-28) | MIT [П-р] | relay `croc.schollz.com:9009`, `croc6.schollz.com:9009` [П-р] | Прямое P2P, при сбое relay; PAKE по коду [П-р] | Публичный relay подтверждён; «за границей» [НП] |
+| magic-wormhole | 0.24.0, 2026-05-05 [П-р] | MIT [П-р] | mailbox `wss://relay.magic-wormhole.io/v1` (нужен всегда), transit `tcp:transit.magic-wormhole.io:4001` [П-р] | Одноразовый код, PAKE; transit при отсутствии прямого пути [П-р] | Публичные серверы подтверждены; кто и где хостит [НП] |
+
+Источники и детали:
+- **iroh.** Исходник 1.3.0: `Cargo.toml:35`, `src/defaults.rs:27-33`, `src/endpoint/presets.rs:116-139`, `src/address_lookup/pkarr.rs:127` [П]. https://docs.rs/iroh/1.3.0/iroh/endpoint/struct.Builder.html: `Builder::empty()` «with no address lookup services, and RelayMode::Disabled»; `presets`: Empty, Minimal, N0, N0DisableRelay; `RelayMode`: Disabled, Default, Staging, Custom [П-р]. docs.iroh.computer: configuring-networks.md (Empty «no external infrastructure configured», UDP 7842 «the job STUN does»), concepts/security-privacy.md (изолированный режим: multicast в LAN и прямое соединение), FAQ (прямые адреса пробуются «with or without a relay») [П-р]. Публичные relay n0 «suitable for development and testing»; relay видит пары Endpoint ID и объём, пока нет прямого пути; метрики iroh-services только при клиенте с API key [П-р]; гарантии «нет телеметрии» в документации не найдено [НП].
+- **DashBeam.** raw.githubusercontent.com/tonyantony300/alt-sendme/main/: `src-tauri/Cargo.toml:2-3` (имя, версия), `:34` и `engine/Cargo.toml:56` (iroh 1.0.3); `engine/protocol/src/types.rs`, `relay.rs` (тест `build_relay_mode_defaults_to_public`), `relay.rs:96` («disabled» = `RelayMode::Disabled`); `engine/native/src/node.rs` ~2241-2243 (`presets::N0` + `PkarrPublisher::n0_dns()`), `receive.rs` ~273-301 (`DnsAddressLookup::n0_dns()`), `discovery.rs:129-146` (только «default» или свой pkarr URL, иное ошибка); README:60,173 (без аккаунта), :209-217 (ticket) [П-р; строки с «~» приблизительны]. Rust + Tauri 2.10.1. Собран на iroh 1.0.3, наш разбор на 1.3.0 (arch: поведение версий может отличаться [В]).
+- **Blip.** https://blip.net/ (FAQ вшит в JSON главной); /faq, /privacy, /security 403 (Cloudflare) [П-р]. «Blip doesn't upload your files to the web», бесплатно без карты [П-р]; нужен ли аккаунт или e-mail [НП].
+- **LocalSend.** raw.githubusercontent.com/localsend/localsend/main/: `app/pubspec.yaml:7` (1.18.2+64), `app/assets/CHANGELOG.md:9` (дата), `LICENSE:1`, `README:46` («doesn't require an internet connection or third-party servers»); raw.githubusercontent.com/localsend/protocol/main/README.md:5 («does not rely on any external servers»), :34-42, :59-63, :122-126 [П-р]. relay/STUN/TURN в README и протоколе не упомянуты [П-р], отсутствие в коде [В].
+- **fs-cli.** Репозиторий «fsend» не найден [НП]. Версия с proxy.golang.org; STUN в `session/receive/methods.go:21`, `session/send/methods.go:50` [П-р]. В README бейдж fileshare-cli, имя не совпадает.
+- **AlterSend.** github.com/denislupookov/altersend (найден веб-поиском, прочитан через raw): package.json; README («Under the hood», :55 без аккаунтов, «on by default and can be turned off in Settings -> Relay»); docs/architecture.md:97 (DHT, тема), «Relay fallback», :108 (адреса relay из подписанной DHT-записи, ключ при сборке), :110 (платный канал entitlement), :120 (dht-relay Франкфурт и Сингапур) [П-р].
+- **croc.** proxy.golang.org/github.com/schollz/croc/v11/@latest; `src/models/constants.go:21-22`; go.mod (go 1.27.0); свой relay `croc relay`, `--relay host:port` [П-р]. v10 и v11 это разные пути модуля Go; этап 0, видимо, смотрел путь `/v10` [Д].
+- **magic-wormhole.** pypi.org (0.24.0, Python >=3.10); `src/wormhole/cli/public_relay.py:3-4`; свои серверы `--relay-url`, `--transit-helper` [П-р].
+
+**Критерий этапа 2 в TASK.md по аналогам теперь выполнен частично, в большей части** (статус U13 в `docs/OPEN_QUESTIONS.md`). Не проверено: даты последних коммитов у всех; у Blip версия, лицензия, состав серверов, e-mail и поиск людей; тождество fsend и fs-cli; даты релизов DashBeam и AlterSend, bootstrap-узлы и значение relay по умолчанию в коде AlterSend; отсутствие внешних обращений в коде LocalSend; физическое расположение серверов croc и magic-wormhole.
+
+Вывод BRIEF «готового решения не найдено» подтверждается (arch, [В]): LocalSend по документации без внешних серверов, но только LAN; остальные по умолчанию держатся на relay (Blip, DashBeam, croc, AlterSend), серверах обнаружения или DHT (DashBeam, magic-wormhole, AlterSend) или публичном STUN Google (fs-cli). На выбор ниже это не влияет: ни один аналог не берётся в форк.
 
 ## 2. Выбор
 
 ### 2.1. Форк или с нуля
-**Сборка с нуля поверх библиотек, без форка приложений-аналогов** [В]. Причины: ни один аналог не проходит требования 1-2 без вырезания ядра соединения; лицензии и состояние большинства не проверены; форк потянул бы чужую модель relay/аккаунтов, которую пришлось бы удалять, и это риск оставить скрытый путь к чужому серверу.
+**Сборка с нуля поверх библиотек, без форка приложений-аналогов** [В]. Причины: требованиям 1-2 по документации соответствует только LocalSend, но он только для LAN, на Flutter/Dart, с HTTP API и TLS-сертификатом устройства, а не QUIC (раздел 1); остальные по умолчанию держатся на relay, DHT, серверах обнаружения или публичном STUN, их пришлось бы вырезать из ядра соединения; форк потянул бы чужую модель relay и обнаружения, которую пришлось бы удалять, и это риск оставить скрытый путь к чужому серверу (у DashBeam обнаружение через n0 в приложении не отключается [П-р]); ближайший по архитектуре DashBeam под AGPL-3.0-only [П-р], форк или заимствование кода навязали бы лицензию до решения владельца (U17, U21).
 
 ### 2.2. QUIC и аутентификация: TLS 1.3, не Noise
 - QUIC несёт TLS 1.3 штатно (RFC 9001), forward secrecy через эфемерный ECDHE [В]. Noise поверх QUIC нестандартен, `snow` 0.10.0 не обновлялся с 2025-07 [П-р]. Значит TLS 1.3 с raw public keys (RFC 7250) и пиннингом Ed25519-ключей друзей.
@@ -41,21 +55,21 @@
 
 **A. iroh 1.3.0 через `Builder::empty()` + пресет `Minimal`** (только крипто-провайдер).
 Что видно в исходнике [П]:
-- `Builder::empty()`: пустой список address lookup, relay выключен (транспорт relay не создаётся), только IPv4/IPv6 UDP (`src/endpoint.rs:192-222`, `:155-158`). `Builder::new(preset)` = `empty().preset(preset)` (`:182-184`). Значит все внешние службы приходят из пресета `N0`, их можно не включать.
+- `Builder::empty()`: пустой список address lookup, relay выключен (транспорт relay не создаётся), только IPv4/IPv6 UDP (`src/endpoint.rs:192-222`, `:155-158`). `Builder::new(preset)` = `empty().preset(preset)` (`:182-184`). Значит все внешние службы приходят из пресета `N0`, их можно не включать. Документация это подтверждает: «Creates an empty builder with no address lookup services, and RelayMode::Disabled» (docs.rs/iroh/1.3.0, `Builder`) [П-р].
 - Проверка captive portal и HTTPS/QAD-пробы net_report ходят только к relay из relay map (`src/net_report/reportgen.rs:287-289`, `:593`, `src/net_report/options.rs:62-75`). При пустой карте relay целей у них нет [В по коду, не запускалось].
-- Адрес пира задаётся явно: `EndpointAddr { id, addrs }`, где `addrs` содержит `TransportAddr::Ip(SocketAddr)` или `Relay(url)` (`src/socket/remote_map.rs:316`, `src/endpoint.rs:1295-1300`). Если прямые адреса даны, они используются без relay (документация `connect`, `src/endpoint.rs:1050-1061`).
+- Адрес пира задаётся явно: `EndpointAddr { id, addrs }`, где `addrs` содержит `TransportAddr::Ip(SocketAddr)` или `Relay(url)` (`src/socket/remote_map.rs:316`, `src/endpoint.rs:1295-1300`). Если прямые адреса даны, они используются без relay (документация `connect`, `src/endpoint.rs:1050-1061`; FAQ docs.iroh.computer: «with or without a relay» [П-р]).
 - Свой внешний адрес можно объявить вручную: `add_external_addr` / `Builder::external_addr` (`src/endpoint.rs:1021-1033`). Это подходит для адреса из UPnP или известного белого IP.
 - TLS: только RFC 7250 raw public keys, Ed25519 (`src/tls.rs:1-6`, `src/tls/resolver.rs:66`). Сервер проверяется по ключу, зашитому в имя сервера (пиннинг по EndpointId, `src/tls/verifier.rs:33-47`).
 - **Клиентский ключ сервер принимает любой** (`src/tls/verifier.rs:125-139`, «we don't check the client certificate»). Отсев не-друзей возможен только после рукопожатия хуком `after_handshake` (`src/endpoint/hooks.rs:102`). То есть незнакомец доводит рукопожатие до конца и тратит наш CPU.
 - Пробивание NAT в iroh это расширение QUIC по черновику draft-seemann-quic-nat-traversal поверх **уже установленного соединения**, требует multipath (`src/endpoint/quic.rs:526-548`). В архитектуре iroh первое соединение обычно идёт через relay, потом мигрирует на прямой путь (`src/lib.rs:107-115`). **Без relay встроенный hole punching первую связь не создаёт**: первый путь должен пройти напрямую сам [В].
 - Есть обмен наблюдаемыми адресами между пирами: `send_observed_address_reports` / `receive_observed_address_reports` в `QuicTransportConfig` (`src/endpoint/quic.rs:447-460`). Это и есть «адрес, полученный при прямом контакте». Значения по умолчанию не проверены.
-- STUN как протокол в коде не найден [П-р]; внешний адрес iroh узнаёт через QAD/HTTPS к relay [П].
-- Фичи по умолчанию: `metrics`, `fast-apple-datapath`, `portmapper`, `tls-ring` (`Cargo.toml:67-73`). `iroh-relay` остаётся обязательной зависимостью даже при выключенном relay [П], код клиента relay попадает в сборку.
+- STUN как протокол в коде не найден [П-р]; внешний адрес iroh узнаёт через QAD/HTTPS к relay [П]. Документация: UDP 7842 к relay «Lets a device learn its own public address. This is the job STUN does» [П-р].
+- Фичи по умолчанию: `metrics`, `fast-apple-datapath`, `portmapper`, `tls-ring` (`Cargo.toml:67-73`). `iroh-relay` остаётся обязательной зависимостью даже при выключенном relay [П], код клиента relay попадает в сборку. Гарантии «нет телеметрии» в документации не найдено [НП]; метрики iroh-services шлются только при подключённом клиенте с API key [П-р].
 - Тест `endpoint_two_direct_only` (`src/endpoint.rs:2430-2489`) **не доказывает работу без внешних служб**: он строит endpoint через `presets::N0` и только выключает relay, а pkarr/DNS-поиск n0 при этом включён [П]. Опираться на него нельзя, нужен свой тест на `Builder::empty()`.
 - Транспорт `noq` 1.3.0 от n0-computer [П-р]; является ли он форком quinn и насколько аудирован [НП].
 
 Плюсы [В]: готовый пиннинг Ed25519 по RPK (меньше нашего кода в критичном месте), multipath и миграция путей при смене IP, обмен наблюдаемыми адресами, порт-маппер, хуки. Модель «адресация по ключу» совпадает с нашей идентичностью.
-Минусы и риски [В]: архитектура рассчитана на relay, путь «без relay и без lookup» у апстрима, похоже, второстепенный; ошибка конфигурации (`Builder::new(N0)` вместо `empty()`) молча включает зарубежные серверы; код relay и DNS в сборке; незнакомец доходит до конца рукопожатия; noq менее известен, чем quinn; объём зависимостей больше.
+Минусы и риски [В]: архитектура рассчитана на relay; путь «без relay и без lookup» документирован (`presets::Empty`, изолированный режим [П-р]), но по умолчанию везде N0, а единственный найденный тест прямого режима идёт с N0 [П]; ошибка конфигурации (`Builder::new(N0)` вместо `empty()`) молча включает зарубежные серверы, и реальный пример этого есть: DashBeam на iroh держит обнаружение n0 неотключаемым [П-р]; код relay и DNS в сборке; незнакомец доходит до конца рукопожатия; noq менее известен, чем quinn; объём зависимостей больше.
 
 **B. quinn 0.11.12 + rustls 0.23.45 с RFC 7250 RPK и своим верификатором.**
 Что известно [П-р]: rustls реализует RPK на клиенте и сервере, даёт кастомные верификаторы; quinn-proto принимает готовый `rustls::ClientConfig`. Работа RPK поверх QUIC end-to-end [НП].
@@ -141,4 +155,5 @@ Hole punching требует, чтобы обе стороны знали вне
 ## 6. Что не сделано
 - Ни один эксперимент не запускался, тесты iroh не запускались, сеть не эмулировалась.
 - Не прочитаны: `iroh-relay`, `noq`, `portmapper`, `iroh-mdns-address-lookup`, пример `incoming-filter`, значения по умолчанию для обмена наблюдаемыми адресами.
-- Аналоги, кроме iroh, по первоисточникам не проверены (раздел 1).
+- Аналоги (этап 2б): факты собраны разведчиками (haiku) и мной не перепроверены по первоисточнику; исходники аналогов я не читал. Не проверено: даты последних коммитов у всех (github.com 403); у Blip версия, лицензия, состав серверов, e-mail и поиск людей (подстраницы blip.net 403); тождество fsend и fs-cli; даты релизов DashBeam и AlterSend; bootstrap-узлы Hyperswarm и значение relay по умолчанию в коде AlterSend; отсутствие внешних обращений в коде LocalSend; расположение серверов croc и magic-wormhole. Номера строк DashBeam с «~» приблизительны.
+- Статус U13 в разделе 5 оставлен в формулировке этапа 0; актуальный статус в `docs/OPEN_QUESTIONS.md`.
