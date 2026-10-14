@@ -1,0 +1,3 @@
+state/
+logs/**/*.pcap
+!logs/**/g12-*.pcap
