@@ -5,20 +5,26 @@ use std::fmt;
 use std::future::Future;
 use std::net::SocketAddr;
 
-use chervo_identity::DeviceId;
+use chervo_identity::PairId;
 
 /// Без Debug: адреса не печатаются через derive.
 #[derive(Clone)]
 pub struct PeerAddr {
-    pub id: DeviceId,
+    pub pair: PairId,
     pub addrs: Vec<SocketAddr>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TransportError {
     NotImplemented,
     PeerNotAllowed,
     Closed,
+    AuthFailed,
+    TimedOut,
+    UnknownPair,
+    Io,
+    Duplicate,
 }
 
 impl fmt::Display for TransportError {
@@ -27,6 +33,11 @@ impl fmt::Display for TransportError {
             Self::NotImplemented => "not implemented",
             Self::PeerNotAllowed => "peer not allowed",
             Self::Closed => "connection closed",
+            Self::AuthFailed => "authentication failed",
+            Self::TimedOut => "timed out",
+            Self::UnknownPair => "unknown pair",
+            Self::Io => "i/o error",
+            Self::Duplicate => "duplicate connection",
         };
         f.write_str(text)
     }
@@ -36,7 +47,7 @@ impl std::error::Error for TransportError {}
 
 /// Вызывается до чтения любых прикладных данных; соединение с запрещённым ключом не возвращается из accept/connect.
 pub trait PeerFilter: Send + Sync {
-    fn is_allowed(&self, peer: &DeviceId) -> bool;
+    fn is_allowed(&self, pair: &PairId) -> bool;
 }
 
 /// Запрещает всех.
@@ -44,7 +55,7 @@ pub trait PeerFilter: Send + Sync {
 pub struct DenyAll;
 
 impl PeerFilter for DenyAll {
-    fn is_allowed(&self, _peer: &DeviceId) -> bool {
+    fn is_allowed(&self, _pair: &PairId) -> bool {
         false
     }
 }
@@ -64,8 +75,8 @@ pub trait RecvStream: Send {
 pub trait Connection: Send + Sync {
     type Tx: SendStream;
     type Rx: RecvStream;
-    /// Key verified in the handshake (pinned), never self-reported.
-    fn remote_id(&self) -> DeviceId;
+    /// Пара, подтверждённая Noise KK внутри канала; никогда не со слов собеседника.
+    fn remote_pair(&self) -> PairId;
     fn remote_addr(&self) -> SocketAddr;
     fn open_bi(&self) -> impl Future<Output = Result<(Self::Tx, Self::Rx), TransportError>> + Send;
     fn accept_bi(
@@ -116,7 +127,7 @@ impl Connection for NullConnection {
     type Tx = NullStream;
     type Rx = NullStream;
 
-    fn remote_id(&self) -> DeviceId {
+    fn remote_pair(&self) -> PairId {
         match *self {}
     }
 

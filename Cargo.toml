@@ -4,6 +4,7 @@ members = [
     "crates/chervo-identity",
     "crates/chervo-addr",
     "crates/chervo-transport",
+    "crates/chervo-transport-quinn",
     "crates/chervo-token",
     "crates/chervo-friends",
     "crates/chervo-connect",
@@ -23,6 +24,7 @@ publish = false
 chervo-identity = { path = "crates/chervo-identity", version = "0.0.0" }
 chervo-addr = { path = "crates/chervo-addr", version = "0.0.0" }
 chervo-transport = { path = "crates/chervo-transport", version = "0.0.0" }
+chervo-transport-quinn = { path = "crates/chervo-transport-quinn", version = "0.0.0" }
 chervo-token = { path = "crates/chervo-token", version = "0.0.0" }
 chervo-friends = { path = "crates/chervo-friends", version = "0.0.0" }
 chervo-connect = { path = "crates/chervo-connect", version = "0.0.0" }
@@ -40,6 +42,10 @@ curve25519-dalek = { version = "=5.0.0", default-features = false }
 apple-native-keyring-store = { version = "=1.0.2", default-features = false, features = ["keychain"] }
 windows-native-keyring-store = { version = "=1.1.0", default-features = false }
 zbus-secret-service-keyring-store = { version = "=1.0.1", default-features = false, features = ["crypto-rust"] }
+quinn = { version = "=0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std"] }
+ring = { version = "=0.17.14", default-features = false, features = ["alloc"] }
+tokio = { version = "=1.53.3", default-features = false, features = ["rt", "net", "time", "sync", "macros"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

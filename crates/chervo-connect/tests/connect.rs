@@ -2,7 +2,7 @@ use std::future::Future;
 use std::task::{Context, Poll, Waker};
 
 use chervo_connect::{ConnectError, PathKind, connect_direct};
-use chervo_identity::DeviceId;
+use chervo_identity::PairId;
 use chervo_transport::{NullTransport, PeerAddr};
 
 fn poll_once<F: Future>(f: F) -> Poll<F::Output> {
@@ -24,7 +24,7 @@ fn path_label(kind: PathKind) -> &'static str {
 #[test]
 fn connect_direct_fails_closed() {
     let peer = PeerAddr {
-        id: DeviceId::from_bytes([2; 32]),
+        pair: PairId::from_bytes([2; 16]),
         addrs: Vec::new(),
     };
     assert!(matches!(

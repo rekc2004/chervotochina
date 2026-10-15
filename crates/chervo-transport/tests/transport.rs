@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::task::{Context, Poll, Waker};
 
-use chervo_identity::DeviceId;
+use chervo_identity::PairId;
 use chervo_transport::{DenyAll, NullTransport, PeerAddr, PeerFilter, Transport, TransportError};
 
 fn poll_once<F: Future>(f: F) -> Poll<F::Output> {
@@ -12,14 +12,14 @@ fn poll_once<F: Future>(f: F) -> Poll<F::Output> {
 
 #[test]
 fn deny_all_denies() {
-    assert!(!DenyAll.is_allowed(&DeviceId::from_bytes([1; 32])));
+    assert!(!DenyAll.is_allowed(&PairId::from_bytes([1; 16])));
 }
 
 #[test]
 fn null_transport_fails_closed() {
     let t = NullTransport;
     let peer = PeerAddr {
-        id: DeviceId::from_bytes([1; 32]),
+        pair: PairId::from_bytes([1; 16]),
         addrs: Vec::new(),
     };
     assert!(matches!(
