@@ -26,7 +26,8 @@ fn sources() -> Vec<(String, String)> {
         .into_iter()
         .map(|p| {
             let name = p.file_name().unwrap().to_string_lossy().into_owned();
-            (name, fs::read_to_string(p).unwrap())
+            // Git на Windows может выдать CRLF: приводим к LF, иначе многострочные иглы не находятся.
+            (name, fs::read_to_string(p).unwrap().replace("\r\n", "\n"))
         })
         .collect()
 }
