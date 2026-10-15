@@ -7,7 +7,7 @@ use chervo_identity::{KK_MSG2_LEN, PairId, kk_initiate};
 use chervo_transport::{PeerAddr, TransportError};
 use tokio::time::{Instant, timeout_at};
 
-use crate::conn::{Fail, QuinnConn, binding, expect_eof, read_exact_n, refuse};
+use crate::conn::{Fail, QuinnConn, RefuseGuard, binding, expect_eof, read_exact_n, refuse};
 use crate::limits::Counters;
 use crate::registry::{Promoted, promote};
 use crate::tls::client_config;
@@ -102,11 +102,14 @@ async fn caller_handshake(
     let (initiator, msg1) = kk_initiate(kx, &bind).map_err(|_| Fail::Failed)?;
     let ours_public = kx.ours_public().to_bytes();
     let (mut tx, mut rx) = conn.open_bi().await.map_err(|_| Fail::Failed)?;
+    // объявлен после потоков: при любом выходе отказ уходит раньше FIN/STOP_SENDING потоков
+    let mut guard = RefuseGuard::new(conn);
     tx.write_all(&msg1).await.map_err(|_| Fail::Failed)?;
     let msg2: [u8; KK_MSG2_LEN] = read_exact_n(&mut rx).await?;
     expect_eof(&mut rx).await?;
     let msg3 = initiator.finish(&msg2).map_err(|_| Fail::Failed)?;
     tx.write_all(&msg3).await.map_err(|_| Fail::Failed)?;
     tx.finish().map_err(|_| Fail::Failed)?;
+    guard.disarm();
     Ok(ours_public)
 }

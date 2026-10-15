@@ -30,6 +30,32 @@ pub(crate) fn refuse(conn: &quinn::Connection) {
     conn.close(VarInt::from_u32(crate::CLOSE_REFUSED), b"");
 }
 
+/// Закрывает соединение отказом при любом выходе до `disarm`, раньше, чем освободятся потоки:
+/// сброшенный без `finish` поток quinn завершает штатно (FIN), а непрочитанный отправляет STOP_SENDING,
+/// и это опередило бы закрытие и стало бы видимым отличием причин отказа. Объявлять после потоков.
+pub(crate) struct RefuseGuard<'a> {
+    conn: &'a quinn::Connection,
+    armed: bool,
+}
+
+impl<'a> RefuseGuard<'a> {
+    pub(crate) fn new(conn: &'a quinn::Connection) -> Self {
+        Self { conn, armed: true }
+    }
+
+    pub(crate) fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for RefuseGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            refuse(self.conn);
+        }
+    }
+}
+
 /// Проигравшее дубликат соединение (только аутентифицированному собеседнику).
 pub(crate) fn close_duplicate(conn: &quinn::Connection) {
     conn.close(VarInt::from_u32(CLOSE_DUPLICATE), b"");

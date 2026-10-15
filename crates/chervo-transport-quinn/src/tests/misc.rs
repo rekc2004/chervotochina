@@ -122,20 +122,22 @@ async fn same_direction_reconnect_replaces() {
         }
         _ => panic!("неожиданная причина закрытия"),
     }
+    // Событие шлёт та сторона, которая закрыла старое соединение (если вторая успела раньше, у этой
+    // стороны старое уже мертво): ждём его хотя бы у одной.
     let ev = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if let Ok(TransportEvent::ConnectionReplaced { pair }) = ev_a.recv().await {
-                return pair;
+            tokio::select! {
+                Ok(TransportEvent::ConnectionReplaced { pair }) = ev_a.recv() => return pair,
+                Ok(TransportEvent::ConnectionReplaced { pair }) = ev_b.recv() => return pair,
             }
         }
     })
     .await
-    .expect("событие ConnectionReplaced у звонящего");
+    .expect("событие ConnectionReplaced хотя бы у одной стороны");
     assert_eq!(ev, k.pid);
     // у вызываемого тоже ровно одно живое
     let sb = survivors(&acc_b.lock().unwrap().clone());
     assert_eq!(sb.len(), 1);
-    let _ = ev_b.try_recv();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

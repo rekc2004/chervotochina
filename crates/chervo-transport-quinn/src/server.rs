@@ -9,7 +9,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::time::{Instant, timeout_at};
 
 use crate::Inner;
-use crate::conn::{Fail, binding, expect_eof, read_exact_n, refuse};
+use crate::conn::{Fail, RefuseGuard, binding, expect_eof, read_exact_n, refuse};
 use crate::limits::Counters;
 use crate::registry::{Promoted, promote};
 use crate::tls::ephemeral_server_config;
@@ -111,6 +111,8 @@ async fn callee_handshake(
 ) -> Result<Authed, Fail> {
     let bind = binding(conn).map_err(|_| Fail::Failed)?;
     let (mut tx, mut rx) = conn.accept_bi().await.map_err(|_| Fail::Failed)?;
+    // объявлен после потоков: при любом выходе отказ уходит раньше FIN/STOP_SENDING потоков
+    let mut guard = RefuseGuard::new(conn);
     let msg1: [u8; KK_MSG1_LEN] = read_exact_n(&mut rx).await?;
     if msg1.first() != Some(&KK_KIND_V1) {
         return Err(Fail::Failed);
@@ -142,5 +144,6 @@ async fn callee_handshake(
         .find(|p| p.pair() == pair)
         .map(|p| p.theirs().to_bytes())
         .ok_or(Fail::Failed)?;
+    guard.disarm();
     Ok(Authed { pair, caller_pub })
 }
