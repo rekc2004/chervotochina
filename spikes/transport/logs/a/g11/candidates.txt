@@ -1,0 +1,15 @@
+endpoint/quic.rs:    pub fn crypto_buffer_size(mut self, value: usize) -> Self {
+endpoint/quic.rs:    pub fn set_token_key(mut self, value: Arc<dyn HandshakeTokenKey>) -> Self {
+endpoint.rs:    pub fn secret_key(mut self, secret_key: SecretKey) -> Self {
+endpoint.rs:    pub fn dns_resolver(mut self, dns_resolver: DnsResolver) -> Self {
+endpoint.rs:    pub fn ca_tls_config(mut self, ca_tls_config: CaTlsConfig) -> Self {
+endpoint.rs:    pub fn ca_roots_config(self, ca_roots_config: CaTlsConfig) -> Self {
+endpoint.rs:    pub fn keylog(mut self, keylog: bool) -> Self {
+endpoint.rs:    pub fn max_tls_tickets(mut self, n: usize) -> Self {
+endpoint.rs:    pub fn crypto_provider(mut self, crypto_provider: Arc<rustls::crypto::CryptoProvider>) -> Self {
+endpoint.rs:    pub fn secret_key(&self) -> &SecretKey {
+endpoint.rs:    pub fn dns_resolver(&self) -> Result<&DnsResolver, EndpointError> {
+endpoint.rs:    pub fn tls_config(&self) -> &rustls::ClientConfig {
+endpoint.rs:    pub fn create_server_config_builder(&self, alpns: Vec<Vec<u8>>) -> ServerConfigBuilder {
+endpoint/connection.rs:    pub fn peer_identity(&self) -> Option<Box<dyn Any>> {
+endpoint/connection.rs:    pub fn export_keying_material(

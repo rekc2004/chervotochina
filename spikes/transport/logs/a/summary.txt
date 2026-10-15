@@ -1,0 +1,6 @@
+G11 FAIL logs/a/g11/evidence.txt публичного API нового ключа сервера на соединение на одном сокете нет; клиент без ключа сервера не соединяется; второй bind на порт отвергнут
+G1 PASS logs/a/g1 dns=0 other=0 fwd_drop=0, кортежи вне списка пусты, peer>0; без порт-маппера portmap=0
+G2 INCONCLUSIVE logs/a/g2 IPv4: 2/2 ok, счётчики чисты; IPv6-соединения (2 из 4) не запускались: IPv6 в ядре стенда выключен (ipv6.disable=1)
+G10 PASS logs/a/g10 ekm совпадает и различается между соединениями; 8 режимов отказа до прикладных данных; peer_sig; MITM с разными ekm отвергнут (sig)
+G12 PASS logs/a/g12/observe.txt совпадений нет; положительные контроли выполнены
+G3 PASS logs/a/g3 (а) неверный id: hs_error без hs_done; (в) retry=1799, окно ≤6 на IP, друг 5/5 ≤2 с; CPU в /home/user/chervotochina/spikes/transport/logs/a/g3/cpu.txt

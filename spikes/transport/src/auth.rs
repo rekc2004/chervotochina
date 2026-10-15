@@ -252,6 +252,8 @@ pub async fn caller_auth<C: Conn>(
             s.shutdown().await.map_err(closed)?;
         }
         Mode::EarlyApp => {
+            // Ждём закрытия со стороны сервера дольше его таймаута 5 с, иначе гонка: кто закроет первым.
+            read_for = Duration::from_secs(12);
             let (mut s2, _r2) = conn.open_bi().await.map_err(closed)?;
             let app = [0x5au8; 256];
             s2.write_all(&app).await.map_err(closed)?;
@@ -382,10 +384,7 @@ mod tests {
         let cfg = CallerCfg { mode, pair: &p1, other: &p2, ekm_override: ovr, random_pair: [9; 16] };
         let mut st = Stats::default();
         let srv = callee_auth(&s, &server_pairs, &ekm_s, bad2);
-        let cli = async {
-            let r = caller_auth(&c, &cfg, &ekm_c, &mut st).await;
-            r
-        };
+        let cli = caller_auth(&c, &cfg, &ekm_c, &mut st);
         let (sr, cr) = tokio::join!(srv, cli);
         (sr, cr)
     }

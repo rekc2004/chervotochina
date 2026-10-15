@@ -127,13 +127,8 @@ async fn handle<I: Incoming>(inc: I, n: u64, peer: SocketAddr, pairs: Arc<PairSe
         }
         Ok(_) => {
             ev!("auth_ok", "side=s conn={n}");
-            loop {
-                match timeout(Duration::from_secs(150), conn.accept_bi()).await {
-                    Ok(Ok((s, r))) => {
-                        tokio::spawn(echo(s, r, n));
-                    }
-                    _ => break,
-                }
+            while let Ok(Ok((s, r))) = timeout(Duration::from_secs(150), conn.accept_bi()).await {
+                tokio::spawn(echo(s, r, n));
             }
             ev!("conn_end", "conn={n}");
         }

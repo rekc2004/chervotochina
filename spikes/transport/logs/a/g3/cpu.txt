@@ -1,0 +1,7 @@
+CPU сервера (тики процесса utime+stime за 30 с, CLK_TCK=100; 100 тиков = 100% одного ядра в секунду):
+idle: ticks=0 -> 0.00% одного ядра
+flood_with_limit: ticks=136 -> 4.53%
+flood_no_limit: ticks=312 -> 10.40% (hs_done=1803)
+retry_events_with_limit=1799 ignore_events=10527
+flood: EVENT flood_done t=38004 attempts=1793 connected=52 failed=1741 skipped=10
+flood_nolimit: EVENT flood_done t=36008 attempts=1803 connected=1803 failed=0 skipped=0

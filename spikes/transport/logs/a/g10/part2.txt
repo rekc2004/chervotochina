@@ -1,0 +1,8 @@
+bad-sig expect=sig result=ok | server: EVENT auth_fail t=1125 side=s conn=3 reason=sig app_bytes_read=0 | client: EVENT client_result t=5 closed err="connection lost" app_bytes_received=0 app_bytes_sent=0
+wrong-pair expect=pair result=ok | server: EVENT auth_fail t=2657 side=s conn=4 reason=pair app_bytes_read=0 | client: EVENT client_result t=5 closed err="connection lost" app_bytes_received=0 app_bytes_sent=0
+wrong-key expect=sig result=ok | server: EVENT auth_fail t=4186 side=s conn=5 reason=sig app_bytes_read=0 | client: EVENT client_result t=5 closed err="connection lost" app_bytes_received=0 app_bytes_sent=0
+other-conn expect=sig result=ok | server: EVENT auth_fail t=5718 side=s conn=7 reason=sig app_bytes_read=0 | client: EVENT client_result t=8 closed err="connection lost" app_bytes_received=0 app_bytes_sent=0
+wrong-role expect=role result=ok | server: EVENT auth_fail t=7246 side=s conn=8 reason=role app_bytes_read=0 | client: EVENT client_result t=5 closed err="connection lost" app_bytes_received=0 app_bytes_sent=0
+timeout expect=timeout result=ok | server: EVENT auth_fail t=13776 side=s conn=9 reason=timeout app_bytes_read=0 | client: EVENT client_result t=5006 closed err="connection lost" app_bytes_received=0 app_bytes_sent=0
+too-long expect=len result=ok | server: EVENT auth_fail t=15311 side=s conn=10 reason=len app_bytes_read=0 | client: EVENT client_result t=7 closed err="eof" app_bytes_received=0 app_bytes_sent=0
+early-app expect=timeout result=ok | server: EVENT auth_fail t=21842 side=s conn=11 reason=timeout app_bytes_read=0 | client: EVENT client_result t=5006 closed err="connection lost" app_bytes_received=0 app_bytes_sent=256

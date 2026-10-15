@@ -1,0 +1,6 @@
+EVENT bound t=2 id=c945bf9cb1b303bb510a99bed1444bfda3a7351eff901bddfd536fa76026354e
+EVENT incoming t=132 peer=10.77.3.10:51508 validated=0 action=accept
+EVENT hs_done t=134 peer=10.77.3.10:51508 conn=1
+EVENT ekm t=134 side=s conn=1 ekm=4e65566cdf46169133d791ce4f61f755856c3c70885f9be02ef427716e95cfe1
+EVENT peer_identity t=134 some conn=1
+EVENT auth_fail t=134 side=s conn=1 reason=sig app_bytes_read=0

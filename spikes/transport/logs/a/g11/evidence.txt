@@ -1,0 +1,4 @@
+api_found_unknown_candidate=0
+g3a_client_result: EVENT client_result t=31 hs_error err="the cryptographic handshake failed: error 48: invalid peer certificate: UnknownIssuer" app_bytes_received=0 app_bytes_sent=0
+g3a_server_hs_done_from_a: 0
+second_server_exit_code=2 bind_error=1 stderr: ERROR Failed to bind sockets

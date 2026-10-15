@@ -1,0 +1,7 @@
+EVENT bound t=2 id=a6c05d06e8564b8ee6f421e5bc45109f3d9d1d3739d3c447d0d32522a85ef6db
+EVENT attempt_start t=2 n=1
+EVENT hs_done t=5 peer=10.77.3.20:4433 conn=1
+EVENT ekm t=5 side=c conn=1 ekm=0d28fce93d1b142ff8bb39349e19036933150cbabb22f6907a1b43362722a9ad
+EVENT peer_identity t=5 some conn=1
+EVENT auth_fail t=8 side=c conn=1 reason=closed app_bytes_sent=0
+EVENT client_result t=8 closed err="eof" app_bytes_received=0 app_bytes_sent=0

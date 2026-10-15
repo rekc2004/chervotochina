@@ -98,18 +98,14 @@ impl Matcher {
         let mut hit: HashSet<usize> = HashSet::new();
         if !self.windows.is_empty() {
             for w in hay.windows(WINDOW) {
-                if let Some(k) = key8(w) {
-                    if let Some(&idx) = self.windows.get(&k) {
-                        hit.insert(idx);
-                    }
+                if let Some(&idx) = key8(w).and_then(|k| self.windows.get(&k)) {
+                    hit.insert(idx);
                 }
             }
         }
         for &idx in &self.exact {
-            if let Some(n) = self.needles.get(idx) {
-                if contains(hay, &n.bytes) {
-                    hit.insert(idx);
-                }
+            if self.needles.get(idx).is_some_and(|n| contains(hay, &n.bytes)) {
+                hit.insert(idx);
             }
         }
         let mut v: Vec<String> = hit
@@ -156,7 +152,7 @@ fn be16(b: &[u8], off: usize) -> Option<usize> {
 }
 
 /// Ethernet-кадр → UDP-датаграмма.
-fn udp_of_frame(f: &[u8]) -> Result<((IpAddr, u16), (IpAddr, u16), &[u8]), &'static str> {
+fn udp_of_frame(f: &[u8]) -> Result<(Ep, Ep, &[u8]), &'static str> {
     let mut off = 12usize;
     let mut et = be16(f, off).ok_or("eth_short")?;
     off += 2;
@@ -535,35 +531,57 @@ pub fn analyze(pcap: &[u8], needles: Vec<Needle>, alpn: &[u8], version: u32) -> 
             Err(_) => unresolved.push(p),
         }
     }
-    // Положительный контроль ALPN допускает разрыв между пакетами.
-    if !rep.alpn_found {
-        let all: Vec<u8> = client_plain.concat();
-        if contains(&all, alpn) {
-            rep.alpn_found = true;
-        }
-    }
-    // Направление сервер → клиент: DCID пакета = SCID клиента, ключи от DCID клиента.
+    // Остальные Initial: ключи выводятся от самого первого DCID клиента (после Retry от нового), а не от
+    // текущего DCID пакета. Клиентские пакеты опознаём по своему SCID, серверные по DCID = SCID клиента.
     for p in unresolved {
         let d = &dgs[p.dg];
-        let Some(cands) = by_scid.get(&p.hdr.dcid) else {
-            rep.lines.push(format!("SKIP reason=no_key_candidate pkt={}", d.idx));
+        let (cands, dir) = if let Some(c) = by_scid.get(&p.hdr.scid) {
+            (c, Dir::ToServer)
+        } else if let Some(c) = by_scid.get(&p.hdr.dcid) {
+            (c, Dir::ToClient)
+        } else {
+            rep.lines.push(format!(
+                "SKIP reason=no_key_candidate pkt={} src={}:{} len={} dcid={} scid={}",
+                d.idx, d.src.0, d.src.1, p.bytes.len(), crate::util::hex(&p.hdr.dcid), crate::util::hex(&p.hdr.scid)
+            ));
             rep.skips += 1;
             continue;
         };
         let mut done = false;
         for c in cands {
-            if let Ok(plain) = decrypt_initial(&cfg, p.hdr.version, c, p.bytes, p.hdr.pn_offset, Dir::ToClient) {
-                rep.server_decrypted += 1;
+            if let Ok(plain) = decrypt_initial(&cfg, p.hdr.version, c, p.bytes, p.hdr.pn_offset, dir) {
+                let (where_, ctr) = if dir == Dir::ToServer {
+                    ("initial_client", &mut rep.client_decrypted)
+                } else {
+                    ("initial_server", &mut rep.server_decrypted)
+                };
+                *ctr += 1;
                 for h in matcher.find(&plain) {
-                    rep.hits.push((h, format!("initial_server pkt={}", d.idx)));
+                    rep.hits.push((h, format!("{where_} pkt={}", d.idx)));
+                }
+                if dir == Dir::ToServer {
+                    if contains(&plain, alpn) {
+                        rep.alpn_found = true;
+                    }
+                    client_plain.push(plain);
                 }
                 done = true;
                 break;
             }
         }
         if !done {
-            rep.lines.push(format!("SKIP reason=aead_fail_server pkt={}", d.idx));
+            rep.lines.push(format!(
+                "SKIP reason=aead_fail pkt={} src={}:{} len={}",
+                d.idx, d.src.0, d.src.1, p.bytes.len()
+            ));
             rep.skips += 1;
+        }
+    }
+    // Положительный контроль ALPN допускает разрыв между пакетами.
+    if !rep.alpn_found {
+        let all: Vec<u8> = client_plain.concat();
+        if contains(&all, alpn) {
+            rep.alpn_found = true;
         }
     }
     // Соединения: уникальные scid клиента и их первый DCID.

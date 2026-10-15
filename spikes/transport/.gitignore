@@ -1,3 +1,7 @@
 state/
 logs/**/*.pcap
 !logs/**/g12-*.pcap
+logs/**/cap-*.txt
+target/
+logs/**/*.pid
+logs/**/g3/server*.log

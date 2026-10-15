@@ -24,7 +24,7 @@ fn write(dir: &Path, name: &str, content: &str) -> Result<(), BoxErr> {
 }
 
 fn read(dir: &Path, name: &str) -> Result<String, BoxErr> {
-    Ok(std::fs::read_to_string(dir.join(name)).map_err(|e| err(format!("{name}: {e}")))?)
+    std::fs::read_to_string(dir.join(name)).map_err(|e| err(format!("{name}: {e}")))
 }
 
 /// Создаёт ключи пар 1 и 2 (звонящий и вызываемый) и файл игл. Возвращает строки игл.

@@ -1,0 +1,9 @@
+EVENT bound t=2 id=a6c05d06e8564b8ee6f421e5bc45109f3d9d1d3739d3c447d0d32522a85ef6db
+EVENT attempt_start t=2 n=1
+EVENT ekm t=4 side=c conn=0 ekm=8e2a4326a569738c83510a4847513094e0bca6d9dfcacf10ac7c5655a29b9c80
+EVENT decoy t=6 auth=ok
+EVENT hs_done t=7 peer=10.77.2.2:4433 conn=1
+EVENT ekm t=7 side=c conn=1 ekm=27e2443308622f9d3dc8d01cd4ea2dcb6c93065d88d2fa8b3f4d29de5d8f9974
+EVENT peer_identity t=7 some conn=1
+EVENT auth_fail t=8 side=c conn=1 reason=closed app_bytes_sent=0
+EVENT client_result t=8 closed err="connection lost" app_bytes_received=0 app_bytes_sent=0

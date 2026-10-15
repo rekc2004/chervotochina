@@ -142,7 +142,7 @@ fn dir_of(a: &Args) -> Result<PathBuf, BoxErr> {
     Ok(PathBuf::from(a.get("pairs").or(a.get("dir")).ok_or_else(|| err("нужен --pairs/--dir"))?))
 }
 
-fn id_arg(a: &Args, dir: &PathBuf, key: &str, file: &str) -> Result<Option<[u8; 32]>, BoxErr> {
+fn id_arg(a: &Args, dir: &std::path::Path, key: &str, file: &str) -> Result<Option<[u8; 32]>, BoxErr> {
     match a.get(key) {
         Some(h) => Ok(Some(unhex32(h)?)),
         None => match keys::read_text(dir, file) {

@@ -42,7 +42,7 @@ pub fn hex(b: &[u8]) -> String {
 
 pub fn unhex(s: &str) -> Result<Vec<u8>, BoxErr> {
     let s = s.trim();
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err(err("hex: нечётная длина"));
     }
     let v = |c: u8| -> Result<u8, BoxErr> {
