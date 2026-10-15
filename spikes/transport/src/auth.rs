@@ -52,6 +52,10 @@ pub trait Conn: Send + Sync + 'static {
     fn peer_identity(&self) -> bool {
         false
     }
+    /// SPKI сервера, предъявленный в рукопожатии (B, сторона клиента); в A нет.
+    fn server_spki(&self) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

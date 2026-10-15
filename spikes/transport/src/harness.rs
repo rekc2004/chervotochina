@@ -245,6 +245,9 @@ async fn attempt<N: ClientNet>(net: &N, o: &ClientOpts, k: u32) {
         return;
     }
     ev!("ekm", "side=c conn={k} ekm={}", hex(&ekm));
+    if let Some(spki) = conn.server_spki() {
+        ev!("server_spki", "conn={k} spki={}", hex(&spki));
+    }
     ev!("peer_identity", "{} conn={k}", if conn.peer_identity() { "some" } else { "none" });
     let random_pair = rand16().unwrap_or([0xee; 16]);
     let cfg = CallerCfg { mode: o.mode, pair, other, ekm_override, random_pair };

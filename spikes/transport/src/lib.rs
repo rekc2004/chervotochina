@@ -5,4 +5,5 @@ pub mod auth;
 pub mod harness;
 pub mod keys;
 pub mod observe;
+pub mod tlsb;
 pub mod util;
