@@ -1,0 +1,8 @@
+EVENT bound t=0 id=- local=0.0.0.0:0
+EVENT auth_ok t=2 side=c to=127.0.0.1:4433 hs_ms=1 auth_ms=0
+EVENT xfer_start t=2 id=f45625ce68aa3c2d049477dff3fbf249 size=536870912 streams=1 resume_from=0
+EVENT cpu_ticks t=2 phase=start ticks=0
+EVENT cpu_ticks t=2316 phase=end ticks=210
+EVENT qstats t=2316 rtt_ms=0 min_rtt_ms=0 cwnd=526565 lost_packets=9364 sent_packets=387628 congestion_events=132 mtu=1452
+EVENT send_done t=2316 app_bytes_sent=536870912 conns=1
+EVENT send_result t=2396 ok=1 size=536870912 app_bytes_sent=536870912 conns=1 first_resume_from=0 max_resume_from=0

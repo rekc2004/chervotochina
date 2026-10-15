@@ -1,0 +1,21 @@
+warning: this system does not seem to support IPv6 - trying IPv4
+-----------------------------------------------------------
+Server listening on 5201 (test #1)
+-----------------------------------------------------------
+Accepted connection from 10.77.0.2, port 35176
+[  5] local 10.77.0.3 port 5201 connected to 10.77.0.2 port 35186
+[ ID] Interval           Transfer     Bitrate
+[  5]   0.00-1.00   sec  1.81 GBytes  15.5 Gbits/sec                  
+[  5]   1.00-2.00   sec  1.81 GBytes  15.6 Gbits/sec                  
+[  5]   2.00-3.00   sec  1.59 GBytes  13.7 Gbits/sec                  
+[  5]   3.00-4.00   sec  1.51 GBytes  12.9 Gbits/sec                  
+[  5]   4.00-5.00   sec  1.49 GBytes  12.8 Gbits/sec                  
+[  5]   5.00-6.00   sec  1.54 GBytes  13.2 Gbits/sec                  
+[  5]   6.00-7.00   sec  1.72 GBytes  14.8 Gbits/sec                  
+[  5]   7.00-8.00   sec  1.49 GBytes  12.8 Gbits/sec                  
+[  5]   8.00-9.00   sec  1.48 GBytes  12.7 Gbits/sec                  
+[  5]   9.00-10.00  sec  1.60 GBytes  13.7 Gbits/sec                  
+[  5]  10.00-10.00  sec  2.12 MBytes  10.5 Gbits/sec                  
+- - - - - - - - - - - - - - - - - - - - - - - - -
+[ ID] Interval           Transfer     Bitrate
+[  5]   0.00-10.00  sec  16.0 GBytes  13.8 Gbits/sec                  receiver

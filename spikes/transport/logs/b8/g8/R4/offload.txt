@@ -1,0 +1,16 @@
+== ethtool -k ra
+tcp-segmentation-offload: off
+generic-segmentation-offload: off
+generic-receive-offload: off
+== ethtool -k rb
+tcp-segmentation-offload: off
+generic-segmentation-offload: off
+generic-receive-offload: off
+== ethtool -k la
+tcp-segmentation-offload: off
+generic-segmentation-offload: off
+generic-receive-offload: off
+== ethtool -k lb
+tcp-segmentation-offload: off
+generic-segmentation-offload: off
+generic-receive-offload: off
