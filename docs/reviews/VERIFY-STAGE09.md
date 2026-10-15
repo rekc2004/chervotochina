@@ -1,0 +1,7 @@
+# Приёмка этапа 9 (combine-verifier, Sonnet/low), 2026-10-16
+
+HEAD 59e4780, база 97b4cba. Стенд netns не перезапускался (логи G1/G12 проверены по коммиту; они свежее кода). Все критерии `docs/specs/stage-09-transport.md`, проверяемые командой, выполнены: сборка; `cargo test --workspace --locked` дважды подряд — одинаково зелёные, флейков нет (адаптер: 34 + 5 + 6 + 2 [2 ignored]); все 50 имён тестов из спецификации на месте; адресные тесты ворот перебора, отказов, EKM и повтора msg1 (7 passed; `friend_starved_documented`: AuthFailed, kk_denied=1); `friend_admitted_under_strangers` X=4.234 с, факт 2.464 с; clippy `-D warnings`, fmt; `check-forbidden.sh` и `--self-test`; grep `kk_respond(`/`spawn_blocking(` ровно 2 строки в `limits.rs`; diff вне разрешённых крейтов пуст, `chervo-core` не тронут, `DeviceId` в transport/quinn/connect нет; фичи rustls/quinn/quinn-proto/ed25519-dalek по спецификации; запрещённых зависимостей нет. Дирижёр независимо прогнал `cargo test --workspace --locked`: exit 0.
+
+Замеры (release, петля; без порога): `accept_cost_by_pairs` медиана мс N=1/10/50/200: 2.20/3.60/10.27/37.92. `friend_latency_under_flood`: при N=200 и 50 незнакомцах с бюджетом 2000/с друг отказан 5 из 5 — остаток T9, учесть при выборе бюджета.
+
+Не проверено командой: supply-chain (`cargo deny`/`cargo audit`) и CI-матрица 3 ОС — по прогону CI; запрет core dump (этап 17); полный список `cargo tree -d` (снят частично: дубли от snow/RustCrypto и chacha20 0.9/0.10 от quinn-proto/rand).
