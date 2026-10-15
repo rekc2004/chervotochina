@@ -30,7 +30,7 @@ use crate::{ALPN, QuinnConfig};
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TlsError;
 
-fn provider() -> Arc<CryptoProvider> {
+pub(crate) fn provider() -> Arc<CryptoProvider> {
     Arc::new(rustls::crypto::ring::default_provider())
 }
 
@@ -74,22 +74,24 @@ impl ResolvesServerCert for ClosedResolver {
     }
 }
 
-fn harden(sc: &mut rustls::ServerConfig) {
+pub(crate) fn harden(sc: &mut rustls::ServerConfig) {
     sc.alpn_protocols = vec![ALPN.to_vec()];
     sc.max_early_data_size = 0;
     sc.send_tls13_tickets = 0;
     sc.session_storage = Arc::new(NoServerSessionStorage {});
 }
 
-fn quic_server(
+/// `sent`: число токенов NEW_TOKEN; в продукте всегда 0 (параметр нужен тестам-контролям).
+pub(crate) fn quic_server(
     sc: rustls::ServerConfig,
     cfg: &QuinnConfig,
+    sent: u32,
 ) -> Result<quinn::ServerConfig, TlsError> {
     let quic = QuicServerConfig::try_from(Arc::new(sc)).map_err(|_| TlsError)?;
     let mut server = quinn::ServerConfig::with_crypto(Arc::new(quic));
     server.transport_config(pre_auth_transport(cfg, Role::Server));
     let mut tokens = ValidationTokenConfig::default();
-    tokens.sent(0).log(Arc::new(NoneTokenLog));
+    tokens.sent(sent).log(Arc::new(NoneTokenLog));
     server.validation_token_config(tokens);
     Ok(server)
 }
@@ -102,7 +104,7 @@ pub(crate) fn base_server_config(cfg: &QuinnConfig) -> Result<quinn::ServerConfi
         .with_no_client_auth()
         .with_cert_resolver(Arc::new(ClosedResolver));
     harden(&mut sc);
-    let mut server = quic_server(sc, cfg)?;
+    let mut server = quic_server(sc, cfg, 0)?;
     server
         .max_incoming(cfg.max_incoming)
         .incoming_buffer_size(cfg.incoming_buffer)
@@ -110,10 +112,8 @@ pub(crate) fn base_server_config(cfg: &QuinnConfig) -> Result<quinn::ServerConfi
     Ok(server)
 }
 
-/// Новый одноразовый конфиг сервера с новым ключом Ed25519 (ring).
-pub(crate) fn ephemeral_server_config(
-    cfg: &QuinnConfig,
-) -> Result<Arc<quinn::ServerConfig>, TlsError> {
+/// Rustls-конфиг сервера с новым ключом Ed25519 (ring), без защитных настроек `harden`.
+pub(crate) fn ephemeral_rustls() -> Result<rustls::ServerConfig, TlsError> {
     let rng = SystemRandom::new();
     let doc = Ed25519KeyPair::generate_pkcs8(&rng).map_err(|_| TlsError)?;
     let der = Zeroizing::new(doc.as_ref().to_vec());
@@ -125,15 +125,22 @@ pub(crate) fn ephemeral_server_config(
     let key = rustls::crypto::ring::sign::any_eddsa_type(&PrivatePkcs8KeyDer::from(der.as_slice()))
         .map_err(|_| TlsError)?;
     let ck = CertifiedKey::new(vec![CertificateDer::from(spki.as_ref().to_vec())], key);
-    let mut sc = rustls::ServerConfig::builder_with_provider(provider())
+    Ok(rustls::ServerConfig::builder_with_provider(provider())
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|_| TlsError)?
         .with_no_client_auth()
         .with_cert_resolver(Arc::new(AlwaysResolvesServerRawPublicKeys::new(Arc::new(
             ck,
-        ))));
+        )))))
+}
+
+/// Новый одноразовый конфиг сервера с новым ключом Ed25519 (ring).
+pub(crate) fn ephemeral_server_config(
+    cfg: &QuinnConfig,
+) -> Result<Arc<quinn::ServerConfig>, TlsError> {
+    let mut sc = ephemeral_rustls()?;
     harden(&mut sc);
-    Ok(Arc::new(quic_server(sc, cfg)?))
+    Ok(Arc::new(quic_server(sc, cfg, 0)?))
 }
 
 /// Клиентский верификатор: ключ сервера одноразовый и не пиннится, подпись рукопожатия
