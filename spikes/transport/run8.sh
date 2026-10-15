@@ -73,9 +73,33 @@ do_install() {
   [[ ! -s "$d/pgrep-after.txt" && ! -s "$d/nft.diff" ]] || { log "СТОП: после установки есть процесс или diff nft"; return 1; }
 }
 
+# ---------------------------------------------------------------- часть 0: сборка
+do_build() {
+  local d="$L8/build"; mkdir -p "$d"
+  log "cargo build (вне ns)"
+  ( cd "$ROOT"
+    cargo build --release
+    cargo build --release --locked
+    mkdir -p "$BIN"
+    cp target/release/spike8 "$BIN/"
+    {
+      echo "== cargo tree -i igd-next@0.18.0 =="; cargo tree -i igd-next@0.18.0
+      echo "== cargo tree -e features -i attohttpc =="; cargo tree -e features -i attohttpc
+      echo "== rustc -V =="; rustc -V
+      echo "== uname -r =="; uname -r
+    } > "$d/versions.txt" 2>&1
+  ) >&2
+  # в графе attohttpc не должно быть TLS-фич (иначе стоп)
+  if grep -Eqi 'feature "(tls|rustls|native-tls|openssl|compress|json|form|multipart)' "$d/versions.txt"; then
+    log "СТОП: у attohttpc найдены TLS/доп. фичи, см. $d/versions.txt"; return 1
+  fi
+  log "spike8 собран: $SPK"
+}
+
 main() {
   case "$CMD" in
     install) do_install ;;
+    build) do_build ;;
     *) echo "использование: run8.sh <install|build|g8 СЦЕНАРИЙ|g5|g7|natcheck|g6|g4a|g4b|teardown>" >&2; exit 2 ;;
   esac
 }

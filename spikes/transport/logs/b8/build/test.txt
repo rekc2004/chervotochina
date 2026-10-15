@@ -1,0 +1,61 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.22s
+     Running unittests src/lib.rs (spikes/transport/target/debug/deps/spike-45809d8cf60e369b)
+
+running 22 tests
+test auth::tests::auth_rejects_bad_sig ... ok
+test auth::tests::auth_rejects_unknown_pair ... ok
+test auth::tests::auth_rejects_len_81_and_83 ... ok
+test auth::tests::auth_rejects_bad_auth2 ... ok
+test auth::tests::auth_rejects_wrong_role ... ok
+test natp::tests::probe_rejects_bad_len ... ok
+test natp::tests::rdv_pairs_and_limits_registrations ... ok
+test natp::tests::rdv_rejects_bad_len ... ok
+test observe::tests::observe_skips_truncated_packet ... ok
+test observe::tests::observe_window_match_split_needle ... ok
+test tlsb::tests::client_tls_builds ... ok
+test tlsb::tests::ring_accepts_dalek_pkcs8_and_keys_differ ... ok
+test util::tests::hex_roundtrip ... ok
+test xfer::tests::slices_cover_file_exactly ... ok
+test auth::tests::auth_rejects_wrong_key ... ok
+test xfer::tests::xfer_rejects_bad_slice ... ok
+test xfer::tests::xfer_rejects_offset_overflow ... ok
+test xfer::tests::xfer_rejects_size_over_max ... ok
+test auth::tests::auth_rejects_other_ekm ... ok
+test xfer::tests::xfer_resume_roundtrip ... ok
+test auth::tests::auth_roundtrip_ok ... ok
+test xfer::tests::xfer_loopback_resume_after_drop ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
+
+     Running unittests src/bin/g12-observe.rs (spikes/transport/target/debug/deps/g12_observe-d40f7f2a94538dd3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/spike-a.rs (spikes/transport/target/debug/deps/spike_a-d12178c3fd2ea839)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/spike-b.rs (spikes/transport/target/debug/deps/spike_b-5dcc4501371fb877)
+
+running 1 test
+test tests::b_loopback_ekm_equal_and_server_keys_differ ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.42s
+
+     Running unittests src/bin/spike8.rs (spikes/transport/target/debug/deps/spike8-80cab201144eda18)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests spike
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+test_rc=0

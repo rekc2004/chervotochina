@@ -1,0 +1,17 @@
+== cargo tree -i igd-next@0.18.0 ==
+igd-next v0.18.0
+└── chervo-spike-transport v0.0.0 (/home/user/chervotochina/spikes/transport)
+== cargo tree -e features -i attohttpc ==
+attohttpc v0.30.1
+└── igd-next v0.18.0
+    ├── igd-next feature "attohttpc"
+    │   └── igd-next feature "io_sync"
+    │       └── igd-next feature "default"
+    │           └── chervo-spike-transport v0.0.0 (/home/user/chervotochina/spikes/transport)
+    │               └── chervo-spike-transport feature "default" (command-line)
+    ├── igd-next feature "default" (*)
+    └── igd-next feature "io_sync" (*)
+== rustc -V ==
+rustc 1.97.0 (2d8144b78 2026-07-07)
+== uname -r ==
+6.18.44-fc-v114

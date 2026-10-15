@@ -234,6 +234,7 @@ version = "0.0.0"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.3",
+ "igd-next 0.18.0",
  "iroh",
  "quinn",
  "quinn-proto",
@@ -1129,6 +1130,21 @@ dependencies = [
  "rand",
  "tokio",
  "url",
+ "xmltree",
+]
+
+[[package]]
+name = "igd-next"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c71312255fdc5364bff7eec0adf68146bc4e72aba85075261af40d234c11be99"
+dependencies = [
+ "attohttpc",
+ "log",
+ "rand",
+ "thiserror 2.0.21",
+ "url",
+ "xml-rs",
  "xmltree",
 ]
 
@@ -2103,7 +2119,7 @@ dependencies = [
  "bytes",
  "derive_more",
  "hyper-util",
- "igd-next",
+ "igd-next 0.17.1",
  "iroh-metrics",
  "libc",
  "n0-error",
