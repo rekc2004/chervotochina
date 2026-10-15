@@ -1083,7 +1083,9 @@ g4_def() {
     hairpin) BH=ha2; BN=na; BT=PR; BP=4434; BK=PR@na; B_EXT_FIXED="HAIRPIN" ;;
     *) return 1 ;;
   esac
-  NEED="$AK"; [[ "$BK" != W@w ]] && NEED="$NEED $BK"
+  NEED="$AK"
+  if [[ "$BK" != W@w ]]; then NEED="$NEED $BK"; fi
+  return 0
 }
 
 g4_attempt() { # режим строка повтор → G4_ST G4_MS G4_DIR G4_NOTE
