@@ -301,7 +301,7 @@ rand_hex32() { head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 # ---------------------------------------------------------------- G11
 g11() {
   ensure_ready
-  if [[ $V != a ]]; then log "G11 для B = пункты 1-2 G9 (часть 2)"; return 2; fi
+  if [[ $V != a ]]; then log "G11 для B = пункты 1-2 G9: считается в g9"; g9; return 0; fi
   GD="$LOGS/g11"; rm -rf "$GD"; mkdir -p "$GD"
   local src; src="$(echo ~/.cargo/registry/src/*/iroh-1.3.0/src)"
   local ev="$GD/evidence.txt"
@@ -528,7 +528,9 @@ g3() {
   } > "$GD/incoming-stats.txt"
   gate_end_simple
   if [[ -z "$fails" ]]; then
-    verdict G3 PASS "$GD" "(а) неверный id: hs_error без hs_done; (в) retry=$retry, окно ≤6 на IP, друг 5/5 ≤2 с; CPU в $GD/cpu.txt"
+    local pa="(а) неверный id: hs_error без hs_done; "
+    [[ $V == a ]] || pa="(а) не применимо к B (id сервера нет); "
+    verdict G3 PASS "$GD" "${pa}(в) retry=$retry, окно ≤6 на IP, друг 5/5 ≤2 с; CPU в $GD/cpu.txt"
   else
     verdict G3 FAIL "$GD" "сбои: $fails"
   fi
@@ -548,6 +550,14 @@ g12() {
   cap_stop
   cp "$STATE/needles.hex" "$GD/needles.txt"
   echo "uname_n str $(uname -n)" >> "$GD/needles.txt"
+  if [[ $V == b ]]; then
+    # одноразовые ключи сервера из лога выдачи (32 байта открытого ключа в хвосте SPKI)
+    local k=0 sp
+    while read -r sp; do
+      [[ ${#sp} -ge 64 ]] || continue
+      k=$((k + 1)); echo "ephemeral_server_pub_$k hex ${sp: -64}" >> "$GD/needles.txt"
+    done < <(sed -n 's/^EVENT server_spki_issued .* spki=\([0-9a-f]*\)$/\1/p' "$GD/server.log")
+  fi
   nsx r env -i PATH="$PATH" "$OBS" --pcap "$GD/g12-$V.pcap" --needles "$GD/needles.txt" --alpn chervo-spike/1 --version 1 > "$GD/observe.txt" || true
   local res; res="$(grep '^RESULT ' "$GD/observe.txt" || true)"
   local sz; sz="$(stat -c %s "$GD/g12-$V.pcap")"
@@ -644,7 +654,73 @@ g2() {
 }
 
 # ---------------------------------------------------------------- G9 (только B), all, decide
-g9() { log "G9 (вариант B) реализуется в части 2 этапа 7"; return 2; }
+# G9 (B): (1) 3 разных server_spki, (2) peer_identity none на сервере, (3) --tls-key-mismatch -> hs_error,
+# (4) повторное соединение: into_0rtt -> zero_rtt refused, (5) TLS 1.3 only в коде. G11 для B = пункты 1-2.
+g9() {
+  ensure_ready
+  if [[ $V != b ]]; then log "G9 только для варианта B"; return 2; fi
+  GD="$LOGS/g9"; rm -rf "$GD"; mkdir -p "$GD"
+  local fails="" tgt="10.77.2.2:$PORT" i
+  cap_start a "$GD/cap-a.pcap" -i any -s 128
+  cap_start b "$GD/cap-b.pcap" -i any -s 128
+  srv_start "$GD/server.log" b "$SPK" --listen "$LISTEN" --no-limit
+  for i in 1 2 3; do cli "$GD/c-$i.log" a "$SPK" --connect "$tgt" --pair 1 --mode ok --bytes 4096; done
+  sleep 1
+  # (4) повторное соединение того же клиента (тот же сервер; его события conn=4,5 в пункт 2 не входят)
+  spk_in a "$SPK" zrtt --connect "$tgt" > "$GD/zrtt.log" 2> "$GD/zrtt.log.err" || true
+  sleep 1
+  srv_stop
+  # (3) сервер с несовпадающими SPKI и подписью
+  srv_start "$GD/server-mismatch.log" b "$SPK" --listen "$LISTEN" --no-limit --tls-key-mismatch
+  cli "$GD/c-mismatch.log" a "$SPK" --connect "$tgt" --pair 1 --mode ok --bytes 4096
+  sleep 1
+  srv_stop
+  cap_stop
+  local ns; for ns in a b r; do nsx "$ns" nft list counters > "$GD/nft-$ns.txt"; done
+  # (1)
+  local sp_c n_c n_u sp_s
+  sp_c="$(for i in 1 2 3; do evl "$GD/c-$i.log" server_spki | kv x spki; done)"
+  n_c="$(echo "$sp_c" | grep -c . || true)"; n_u="$(echo "$sp_c" | sort -u | grep -c . || true)"
+  sp_s="$(evl "$GD/server.log" server_spki_issued | sed -n 's/.* spki=\([0-9a-f]*\)$/\1/p' | sort -u)"
+  {
+    echo "client_observed_spki (3 соединения):"; echo "$sp_c"
+    echo "server_issued_spki (уникальные, за весь прогон включая zrtt):"; echo "$sp_s"
+    echo "observed=$n_c distinct=$n_u"
+  } > "$GD/p1.txt"
+  [[ "$n_c" == 3 && "$n_u" == 3 ]] || fails+="p1:distinct=$n_u/$n_c "
+  local x; for x in $sp_c; do echo "$sp_s" | grep -qx "$x" || fails+="p1:client_spki_not_issued_by_server "; done
+  for i in 1 2 3; do evl "$GD/c-$i.log" client_result | grep -q ' ok ' || fails+="p1:client${i}_not_ok "; done
+  # (2)
+  local pn; pn="$(grep -cE '^EVENT peer_identity t=[0-9]+ none conn=[123]$' "$GD/server.log" || true)"
+  local ps; ps="$(grep -cE '^EVENT peer_identity t=[0-9]+ some ' "$GD/server.log" || true)"
+  { grep '^EVENT peer_identity ' "$GD/server.log"; echo "none(conn 1-3)=$pn some=$ps"; } > "$GD/p2.txt"
+  [[ "$pn" == 3 && "$ps" == 0 ]] || fails+="p2:peer_identity none=$pn some=$ps "
+  # (3)
+  { evl "$GD/c-mismatch.log" client_result; evl "$GD/c-mismatch.log" server_spki; } > "$GD/p3.txt"
+  grep -q ' hs_error ' "$GD/p3.txt" || fails+="p3:no_hs_error "
+  # (4)
+  cat "$GD/zrtt.log" > "$GD/p4.txt"
+  grep -q '^EVENT zero_rtt t=[0-9]* refused' "$GD/zrtt.log" || fails+="p4:not_refused "
+  grep -q 'zero_rtt t=[0-9]* accepted' "$GD/zrtt.log" && fails+="p4:accepted "
+  # (5)
+  local tls13; tls13="$(grep -c 'with_protocol_versions(&\[&rustls::version::TLS13\])' "$ROOT/src/tlsb.rs" || true)"
+  { echo "with_protocol_versions(&[&rustls::version::TLS13]) в src/tlsb.rs: $tls13 (сервер и клиент)"
+    grep -n 'with_protocol_versions' "$ROOT/src/tlsb.rs"; } > "$GD/p5.txt"
+  [[ "$tls13" -ge 2 ]] || fails+="p5:tls13_count=$tls13 "
+  if [[ -z "$fails" ]]; then
+    verdict G9 PASS "$GD" "1) 3 разных server_spki, совпадают с выданными сервером; 2) peer_identity none (3/3); 3) mismatch -> hs_error; 4) zero_rtt refused; 5) TLS13 в обоих конфигах"
+  else
+    verdict G9 FAIL "$GD" "сбои: $fails"
+  fi
+  # G11 для B: пункты 1-2 G9 (один сокет, ключ сервера новый на каждое соединение, клиент не знает его заранее)
+  local f11=""
+  [[ "$fails" == *p1:* ]] && f11+="p1 "; [[ "$fails" == *p2:* ]] && f11+="p2 "
+  if [[ -z "$f11" ]]; then
+    verdict G11 PASS "$GD/p1.txt" "на одном сокете (Incoming::accept_with, новый rustls::ServerConfig на входящее) 3 соединения получили 3 разных ключа сервера; клиент без пиннинга, ключ заранее не знал; peer_identity none"
+  else
+    verdict G11 FAIL "$GD/p1.txt" "не выполнены пункты G9: $f11"
+  fi
+}
 
 do_all() {
   trap do_teardown EXIT
@@ -656,31 +732,43 @@ do_all() {
   if [[ $V == a ]]; then
     g11; g1; g2; g3; g10; g12
   else
-    log "вариант B реализуется в части 2 этапа 7"; return 2
+    g1; g2; g3; g9; g10; g12
   fi
 }
 
+# Блокирующие строки summary: FAIL, а также INCONCLUSIVE, причина которых не IPv6 в ядре стенда.
+blocking() { # файл
+  grep -E '^G[0-9]+ (FAIL|INCONCLUSIVE) ' "$1" | grep -vE '^G[0-9]+ INCONCLUSIVE .*IPv6 в ядре' || true
+}
+
 do_decide() {
-  local sa="$ROOT/logs/a/summary.txt" sb="$ROOT/logs/b/summary.txt"
+  local sa="$ROOT/logs/a/summary.txt" sb="$ROOT/logs/b/summary.txt" g
   [[ -s "$sa" ]] || { echo "нет $sa: сначала run.sh all a" >&2; exit 2; }
-  local need_a="G1 G2 G3 G10 G11 G12" g
-  for g in $need_a; do grep -q "^$g " "$sa" || { echo "в $sa нет $g" >&2; exit 2; }; done
-  local fa ia
-  fa="$(grep -cE '^G[0-9]+ FAIL ' "$sa" || true)"; ia="$(grep -cE '^G[0-9]+ INCONCLUSIVE ' "$sa" || true)"
-  if [[ "$fa" == 0 && "$ia" == 0 ]]; then echo "DECISION A"; return 0; fi
-  if [[ "$fa" == 0 ]]; then
-    echo "INCONCLUSIVE у A: $(grep -E '^G[0-9]+ INCONCLUSIVE ' "$sa" | cut -d' ' -f1 | tr '\n' ' ')- не переход на B, стоп и доклад"
-    echo "DECISION STOP"; return 0
+  for g in G1 G2 G3 G10 G11 G12; do grep -q "^$g " "$sa" || { echo "в $sa нет $g" >&2; exit 2; }; done
+  local fa ba
+  fa="$(grep -E '^G[0-9]+ FAIL ' "$sa" | cut -d' ' -f1 | tr '\n' ' ' || true)"
+  ba="$(blocking "$sa" | cut -d' ' -f1,2 | tr '\n' ';' || true)"
+  grep -E '^G[0-9]+ INCONCLUSIVE ' "$sa" | grep -E 'IPv6 в ядре' | cut -d' ' -f1 | sed 's/^/INCONCLUSIVE (только IPv6 в ядре стенда, не блокирует): A /' || true
+  if [[ -z "$fa" ]]; then
+    if [[ -z "$ba" ]]; then echo "DECISION A"; else echo "STOP: у A нет FAIL, но есть INCONCLUSIVE не из-за IPv6: $ba (стоп и доклад, DECISION 2.4 / U23)"; echo "DECISION STOP"; fi
+    return 0
   fi
-  echo "у A есть FAIL: $(grep -E '^G[0-9]+ FAIL ' "$sa" | cut -d' ' -f1 | tr '\n' ' ')"
+  echo "у A есть FAIL: $fa-> автопереход на B (DECISION 2.4, U23)"
   if [[ ! -s "$sb" ]]; then
-    echo "прогон B не выполнен (часть 2 этапа 7): запустите run.sh all b" >&2
+    echo "прогон B не выполнен: запустите run.sh all b" >&2
     echo "DECISION B-PENDING"; return 0
   fi
-  local fb ib
-  fb="$(grep -cE '^G[0-9]+ (FAIL|INCONCLUSIVE) ' "$sb" || true)"
-  for g in G1 G2 G3 G9 G10 G12; do grep -q "^$g " "$sb" || { echo "в $sb нет $g" >&2; echo "DECISION STOP"; return 0; }; done
-  if [[ "$fb" == 0 ]]; then echo "DECISION B"; else echo "DECISION STOP"; fi
+  for g in G1 G2 G3 G9 G10 G11 G12; do
+    grep -q "^$g " "$sb" || { echo "STOP: в $sb нет $g"; echo "DECISION STOP"; return 0; }
+  done
+  grep -E '^G[0-9]+ INCONCLUSIVE ' "$sb" | grep -E 'IPv6 в ядре' | cut -d' ' -f1 | sed 's/^/INCONCLUSIVE (только IPv6 в ядре стенда, не блокирует): B /' || true
+  local bb; bb="$(blocking "$sb" | cut -d' ' -f1,2 | tr '\n' ';' || true)"
+  if [[ -z "$bb" ]]; then
+    echo "DECISION B"
+  else
+    echo "STOP: у B есть блокирующие результаты: $bb"
+    echo "DECISION STOP"
+  fi
 }
 
 # ---------------------------------------------------------------- запуск

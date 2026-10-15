@@ -1,0 +1,72 @@
+EVENT bound t=0 id=-
+EVENT incoming t=63 peer=10.77.1.2:54579 validated=0 action=accept
+EVENT server_spki_issued t=64 peer=10.77.1.2:54579 spki=302a300506032b657003210005c1b5759c0d2d7ee9850a9640e7959d3938d82e2acfba3bfc45fe0b8b0ea76d
+EVENT hs_done t=65 peer=10.77.1.2:54579 conn=1
+EVENT ekm t=65 side=s conn=1 ekm=ce7384d94062e044596e4be4fc7e5cc2a9dc3600e830572f5dcbbcd34a06c163
+EVENT peer_identity t=65 none conn=1
+EVENT auth_ok t=65 side=s conn=1
+EVENT app_served t=66 conn=1 bytes=4096
+EVENT conn_end t=66 conn=1
+EVENT incoming t=160 peer=10.77.1.2:52932 validated=0 action=accept
+EVENT server_spki_issued t=160 peer=10.77.1.2:52932 spki=302a300506032b65700321007765f1b3f128d4696337db3e302eefee7662831639f21d0d0af731ece64dd35f
+EVENT hs_done t=161 peer=10.77.1.2:52932 conn=2
+EVENT ekm t=161 side=s conn=2 ekm=86a6514aae1adc65c4be596e0e0494067a8e8f6d5c97aed0292481bd99b6994f
+EVENT peer_identity t=161 none conn=2
+EVENT auth_ok t=161 side=s conn=2
+EVENT app_served t=162 conn=2 bytes=4096
+EVENT conn_end t=163 conn=2
+EVENT incoming t=1278 peer=10.77.1.2:54673 validated=0 action=accept
+EVENT server_spki_issued t=1278 peer=10.77.1.2:54673 spki=302a300506032b6570032100d5111c8894985a6950cbceb5f180a117d325df08d1069eef8e35417a811b6ab0
+EVENT hs_done t=1279 peer=10.77.1.2:54673 conn=3
+EVENT ekm t=1279 side=s conn=3 ekm=5b64094c6d99ea98bf224cab1f109a30317776f70faf5509fe231a073b0e347c
+EVENT peer_identity t=1279 none conn=3
+EVENT auth_fail t=1280 side=s conn=3 reason=sig app_bytes_read=0
+EVENT incoming t=2890 peer=10.77.1.2:43097 validated=0 action=accept
+EVENT server_spki_issued t=2890 peer=10.77.1.2:43097 spki=302a300506032b6570032100d51aad869c07e498d24ddc3af771024bd9b7947bdea2c25402245ad867884b3c
+EVENT hs_done t=2891 peer=10.77.1.2:43097 conn=4
+EVENT ekm t=2891 side=s conn=4 ekm=c491cace4da355221250ff6a6b55a7c095c0c65d2aa17d81a5c300eb153f0b84
+EVENT peer_identity t=2891 none conn=4
+EVENT auth_fail t=2891 side=s conn=4 reason=pair app_bytes_read=0
+EVENT incoming t=4502 peer=10.77.1.2:37221 validated=0 action=accept
+EVENT server_spki_issued t=4502 peer=10.77.1.2:37221 spki=302a300506032b657003210081c8a65662bd9f5b785bb1e91941de37f63155a7f7d44c787adb6d03ed0758c4
+EVENT hs_done t=4503 peer=10.77.1.2:37221 conn=5
+EVENT ekm t=4504 side=s conn=5 ekm=0468b1e6c77dad252d4fe1ba1b6e741fa8f69311dc1bd443d56fcf613ced63bb
+EVENT peer_identity t=4504 none conn=5
+EVENT auth_fail t=4504 side=s conn=5 reason=sig app_bytes_read=0
+EVENT incoming t=6113 peer=10.77.1.2:33620 validated=0 action=accept
+EVENT server_spki_issued t=6113 peer=10.77.1.2:33620 spki=302a300506032b65700321007332250eace624eb0f12fd7d2600ea29fa5603ca63b77dd1df84ab59339ded15
+EVENT hs_done t=6114 peer=10.77.1.2:33620 conn=6
+EVENT ekm t=6114 side=s conn=6 ekm=88dcc6267825d3894e58210b72d76fd4b57d84162a8be43f2804de8542066296
+EVENT peer_identity t=6114 none conn=6
+EVENT auth_ok t=6114 side=s conn=6
+EVENT incoming t=6115 peer=10.77.1.2:33620 validated=0 action=accept
+EVENT server_spki_issued t=6115 peer=10.77.1.2:33620 spki=302a300506032b6570032100932a4cadac07aed1f14f89b10d92b81e04c654bd2005a77e32e34258c4bc3751
+EVENT hs_done t=6116 peer=10.77.1.2:33620 conn=7
+EVENT ekm t=6116 side=s conn=7 ekm=b6b88a96d580ca5e7032b54327ded8dd5328f76bbcf195516ea57df420b31d58
+EVENT peer_identity t=6116 none conn=7
+EVENT auth_fail t=6116 side=s conn=7 reason=sig app_bytes_read=0
+EVENT conn_end t=6117 conn=6
+EVENT incoming t=7725 peer=10.77.1.2:45544 validated=0 action=accept
+EVENT server_spki_issued t=7725 peer=10.77.1.2:45544 spki=302a300506032b657003210005e0303144254151de59c7525958a825884e979857a2833c3ed39ef10d0e425a
+EVENT hs_done t=7726 peer=10.77.1.2:45544 conn=8
+EVENT ekm t=7726 side=s conn=8 ekm=438e7ceada7cc393fc3dfa8cf1878918f60b1949fcdd74565a2d73de5f6c0321
+EVENT peer_identity t=7726 none conn=8
+EVENT auth_fail t=7726 side=s conn=8 reason=role app_bytes_read=0
+EVENT incoming t=9334 peer=10.77.1.2:48743 validated=0 action=accept
+EVENT server_spki_issued t=9335 peer=10.77.1.2:48743 spki=302a300506032b657003210014d09b2671c59b8deb9b07081c234597e19ab8fa181e3e44566fdf139d0f3c0a
+EVENT hs_done t=9336 peer=10.77.1.2:48743 conn=9
+EVENT ekm t=9336 side=s conn=9 ekm=219c9a636f23a7a04a426e521eac3c7350a23f27cd9ee4dfff86b39d6791d780
+EVENT peer_identity t=9336 none conn=9
+EVENT auth_fail t=14338 side=s conn=9 reason=timeout app_bytes_read=0
+EVENT incoming t=15949 peer=10.77.1.2:60343 validated=0 action=accept
+EVENT server_spki_issued t=15949 peer=10.77.1.2:60343 spki=302a300506032b6570032100168573f1d9aef08cc9de5f0667a6dac5bb6b10c510a431fbcaa02cd07dc31d52
+EVENT hs_done t=15950 peer=10.77.1.2:60343 conn=10
+EVENT ekm t=15950 side=s conn=10 ekm=b3c3f87c4ffcbf1e70a31ecb2c13d2f7c5ec677b17d68cc1cea18a766861d3e7
+EVENT peer_identity t=15950 none conn=10
+EVENT auth_fail t=15950 side=s conn=10 reason=len app_bytes_read=0
+EVENT incoming t=17559 peer=10.77.1.2:52679 validated=0 action=accept
+EVENT server_spki_issued t=17559 peer=10.77.1.2:52679 spki=302a300506032b6570032100e923afe11d1c22701b60af961ba4f0f84aa61d58ee8d5a6c167beb96595f0dc6
+EVENT hs_done t=17560 peer=10.77.1.2:52679 conn=11
+EVENT ekm t=17560 side=s conn=11 ekm=fb43fa4992ad645fff30dafe6f451295714dcfd16127adce5aab2e440cee820b
+EVENT peer_identity t=17560 none conn=11
+EVENT auth_fail t=22561 side=s conn=11 reason=timeout app_bytes_read=0

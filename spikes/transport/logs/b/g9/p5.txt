@@ -1,0 +1,3 @@
+with_protocol_versions(&[&rustls::version::TLS13]) в src/tlsb.rs: 2 (сервер и клиент)
+49:        .with_protocol_versions(&[&rustls::version::TLS13])
+118:        .with_protocol_versions(&[&rustls::version::TLS13])

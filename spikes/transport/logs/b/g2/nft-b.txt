@@ -1,0 +1,20 @@
+table inet chv {
+	counter dns {
+		packets 0 bytes 0
+	}
+	counter peer {
+		packets 189 bytes 2165475
+	}
+	counter nd {
+		packets 0 bytes 0
+	}
+	counter mcast_kernel {
+		packets 0 bytes 0
+	}
+	counter portmap {
+		packets 0 bytes 0
+	}
+	counter other {
+		packets 0 bytes 0
+	}
+}

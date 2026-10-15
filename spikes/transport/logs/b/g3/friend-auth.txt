@@ -1,0 +1,5 @@
+EVENT auth_ok t=3 side=c conn=1 dur_ms=2
+EVENT auth_ok t=6 side=c conn=2 dur_ms=2
+EVENT auth_ok t=8 side=c conn=3 dur_ms=2
+EVENT auth_ok t=11 side=c conn=4 dur_ms=2
+EVENT auth_ok t=14 side=c conn=5 dur_ms=2

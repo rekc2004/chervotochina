@@ -1,0 +1,19 @@
+EVENT bound t=1 id=-
+EVENT incoming t=57 peer=10.77.0.2:45993 validated=0 action=retry
+EVENT incoming t=57 peer=10.77.0.2:45993 validated=1 action=accept
+EVENT server_spki_issued t=57 peer=10.77.0.2:45993 spki=302a300506032b6570032100f54e7f6e22b2c8959b11a2a2fc444fcbe80a47e0d10079a1dff06afdd4e09a9f
+EVENT hs_done t=58 peer=10.77.0.2:45993 conn=1
+EVENT ekm t=58 side=s conn=1 ekm=e168039bd7f1869f60fe312b41092acd20dae1f55d323753c206e8d91f50e279
+EVENT peer_identity t=58 none conn=1
+EVENT auth_ok t=58 side=s conn=1
+EVENT app_served t=63 conn=1 bytes=1048576
+EVENT conn_end t=64 conn=1
+EVENT incoming t=664 peer=10.77.1.2:55701 validated=0 action=retry
+EVENT incoming t=665 peer=10.77.1.2:55701 validated=1 action=accept
+EVENT server_spki_issued t=665 peer=10.77.1.2:55701 spki=302a300506032b65700321006f8cd11459848b60da90d8f18dedc4199d274ff28af12cb843e0b61b2c131533
+EVENT hs_done t=666 peer=10.77.1.2:55701 conn=2
+EVENT ekm t=666 side=s conn=2 ekm=072cd796061ccd4c26d1a881ca320c3b3ca0df0dd1024a848398217ddf007605
+EVENT peer_identity t=666 none conn=2
+EVENT auth_ok t=666 side=s conn=2
+EVENT app_served t=673 conn=2 bytes=1048576
+EVENT conn_end t=674 conn=2

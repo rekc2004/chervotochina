@@ -1,0 +1,11 @@
+EVENT bound t=0 id=-
+EVENT incoming t=63 peer=10.77.1.2:56011 validated=0 action=retry
+EVENT incoming t=63 peer=10.77.1.2:56011 validated=1 action=accept
+EVENT server_spki_issued t=63 peer=10.77.1.2:56011 spki=302a300506032b6570032100cd45550ea6c11595a44eeae758d78224ee1c9b0f044e3897b69312c96c4320fe
+EVENT hs_done t=64 peer=10.77.1.2:56011 conn=1
+EVENT ekm t=64 side=s conn=1 ekm=491bf2404aa883f91e48a094e4cee56d0ade29881aebccb34207177c656f62bd
+EVENT peer_identity t=64 none conn=1
+EVENT auth_ok t=65 side=s conn=1
+EVENT app_served t=60066 conn=1 bytes=38731776
+EVENT app_served t=90079 conn=1 bytes=15
+EVENT conn_end t=90080 conn=1
