@@ -354,6 +354,8 @@ pub struct RecvFile {
     done: AtomicBool,
     conns: AtomicU64,
     first: Mutex<Option<Instant>>,
+    /// Текущее соединение передачи: новое аутентифицированное соединение с тем же `id` вытесняет старое.
+    cur: Mutex<Option<Connection>>,
 }
 
 impl RecvFile {
@@ -417,6 +419,7 @@ impl RecvState {
             done: AtomicBool::new(false),
             conns: AtomicU64::new(0),
             first: Mutex::new(None),
+            cur: Mutex::new(None),
         });
         m.insert(x.id, f.clone());
         let tick = f.clone();
@@ -487,8 +490,14 @@ async fn recv_data_stream(mut r: RecvStream, f: Arc<RecvFile>) -> Result<(), Box
     let (Some(rec), Some(act)) = (f.recv.get(idx), f.active.get(idx)) else {
         return Err(XferErr::Slice.into());
     };
-    if act.swap(true, Ordering::SeqCst) {
-        return Err(err("доля уже принимается другим потоком"));
+    // Доля может ещё держаться потоком вытесненного соединения: ждём до 2 с.
+    let mut waited = 0;
+    while act.swap(true, Ordering::SeqCst) {
+        waited += 1;
+        if waited > 100 {
+            return Err(err("доля уже принимается другим потоком"));
+        }
+        sleep(Duration::from_millis(20)).await;
     }
     let _guard = ActiveSlice(f.clone(), idx);
     check_data_hdr(&h, f.size, f.n, rec.load(Ordering::SeqCst))?;
@@ -584,6 +593,11 @@ async fn serve_xfer(conn: Connection, mut cs: SendStream, x: Xfer1, st: Arc<Recv
         }
     };
     f.conns.fetch_add(1, Ordering::SeqCst);
+    // Старое соединение (обрыв без закрытия, например смена IP вызываемого) закрываем: иначе его доля занята до тайм-аута простоя.
+    let old = f.cur.lock().ok().and_then(|mut g| g.replace(conn.clone()));
+    if let Some(o) = old {
+        o.close(VarInt::from_u32(4), b"superseded");
+    }
     let rec = f.per_slice();
     ev!(
         "xfer_start",

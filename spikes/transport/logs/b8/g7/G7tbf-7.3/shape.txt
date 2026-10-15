@@ -1,0 +1,2 @@
+qdisc tbf 8011: root refcnt 5 rate 100Mbit burst 64Kb lat 50ms 
+qdisc tbf 8012: root refcnt 5 rate 100Mbit burst 64Kb lat 50ms 

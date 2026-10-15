@@ -1,3 +1,2 @@
-    Checking chervo-spike-transport v0.0.0 (/home/user/chervotochina/spikes/transport)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.31s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.26s
 clippy_rc=0

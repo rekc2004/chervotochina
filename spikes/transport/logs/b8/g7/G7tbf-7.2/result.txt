@@ -1,0 +1,6 @@
+case=7.2 tag=G7tbf mode=tbf size=134217728 timed_out=0 started=1
+arrived=1 recv_bytes=134217728 cmp=OK sha=eq
+total_ms=27270 conns_recv=2 conns_send=2 app_bytes_sent=148827354 ratio=1.11 max_resume_from=48567078
+peer_addr_change=нет stall_ms=15824 reconnects=1
+conn_lost=n=1 t_ms=14062 why=closed: timed out;
+sources_seen_by_w=198.51.100.10(12485) 

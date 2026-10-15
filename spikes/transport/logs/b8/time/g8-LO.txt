@@ -1,2 +1,2 @@
-elapsed_s=35.5
+elapsed_s=29.6
 exit_code=0

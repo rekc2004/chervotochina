@@ -1,8 +1,8 @@
 EVENT bound t=0 id=- local=0.0.0.0:0
 EVENT auth_ok t=2 side=c to=10.77.0.3:4433 hs_ms=1 auth_ms=0
-EVENT xfer_start t=2 id=f2c91beca0f50c68ea4dae4b2d2b7b47 size=536870912 streams=1 resume_from=0
+EVENT xfer_start t=2 id=becae1c9c78ded8c6224644091f600f1 size=536870912 streams=1 resume_from=0
 EVENT cpu_ticks t=2 phase=start ticks=0
-EVENT cpu_ticks t=1552 phase=end ticks=172
-EVENT qstats t=1552 rtt_ms=0 min_rtt_ms=0 cwnd=813199 lost_packets=9957 sent_packets=388105 congestion_events=120 mtu=1452
-EVENT send_done t=1552 app_bytes_sent=536870912 conns=1
-EVENT send_result t=1632 ok=1 size=536870912 app_bytes_sent=536870912 conns=1 first_resume_from=0 max_resume_from=0
+EVENT cpu_ticks t=1662 phase=end ticks=187
+EVENT qstats t=1662 rtt_ms=0 min_rtt_ms=0 cwnd=333199 lost_packets=12073 sent_packets=390222 congestion_events=132 mtu=1452
+EVENT send_done t=1662 app_bytes_sent=536870912 conns=1
+EVENT send_result t=1742 ok=1 size=536870912 app_bytes_sent=536870912 conns=1 first_resume_from=0 max_resume_from=0

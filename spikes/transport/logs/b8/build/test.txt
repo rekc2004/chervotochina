@@ -1,12 +1,12 @@
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.22s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.27s
      Running unittests src/lib.rs (spikes/transport/target/debug/deps/spike-45809d8cf60e369b)
 
 running 22 tests
 test auth::tests::auth_rejects_bad_sig ... ok
 test auth::tests::auth_rejects_unknown_pair ... ok
 test auth::tests::auth_rejects_len_81_and_83 ... ok
-test auth::tests::auth_rejects_bad_auth2 ... ok
 test auth::tests::auth_rejects_wrong_role ... ok
+test auth::tests::auth_rejects_bad_auth2 ... ok
 test natp::tests::probe_rejects_bad_len ... ok
 test natp::tests::rdv_pairs_and_limits_registrations ... ok
 test natp::tests::rdv_rejects_bad_len ... ok
@@ -20,8 +20,8 @@ test auth::tests::auth_rejects_wrong_key ... ok
 test xfer::tests::xfer_rejects_bad_slice ... ok
 test xfer::tests::xfer_rejects_offset_overflow ... ok
 test xfer::tests::xfer_rejects_size_over_max ... ok
-test auth::tests::auth_rejects_other_ekm ... ok
 test xfer::tests::xfer_resume_roundtrip ... ok
+test auth::tests::auth_rejects_other_ekm ... ok
 test auth::tests::auth_roundtrip_ok ... ok
 test xfer::tests::xfer_loopback_resume_after_drop ... ok
 
@@ -44,7 +44,7 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 running 1 test
 test tests::b_loopback_ekm_equal_and_server_keys_differ ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.42s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
 
      Running unittests src/bin/spike8.rs (spikes/transport/target/debug/deps/spike8-80cab201144eda18)
 

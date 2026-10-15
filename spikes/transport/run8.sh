@@ -753,12 +753,177 @@ g5() {
   stand_clean_check "g5" || true
 }
 
+# ---------------------------------------------------------------- часть 3: G7 (смена IP посреди передачи)
+G7D="$L8/g7"
+# Формирование канала: спецификация требует netem (100 Мбит/с, 10 мс) в chv8-i на порту к w и в w на выходе.
+# mode=netem: как в спецификации; mode=tbf: ВНЕ спецификации (в ядре стенда нет netem), только 100 Мбит/с без задержки.
+g7_shape() { # mode out-файл
+  local mode="$1" out="$2" rc=0
+  if [[ $mode == netem ]]; then
+    { nsx8 i tc qdisc replace dev iw root netem delay 10ms rate 100mbit && nsx8 w tc qdisc replace dev eth0 root netem delay 10ms rate 100mbit; } > "$out" 2>&1 || rc=$?
+  else
+    { nsx8 i tc qdisc replace dev iw root tbf rate 100mbit burst 64k latency 50ms && nsx8 w tc qdisc replace dev eth0 root tbf rate 100mbit burst 64k latency 50ms; } > "$out" 2>&1 || rc=$?
+  fi
+  { nsx8 i tc qdisc show dev iw; nsx8 w tc qdisc show dev eth0; } >> "$out" 2>&1
+  return $rc
+}
+
+g7_event() { # случай
+  case "$1" in
+    7.1) ipn ha link set eth1 up; ipn ha route replace default via 192.168.20.1 dev eth1
+         ipn ha addr flush dev eth0; ipn ha link set eth0 down ;;
+    7.2) ipn ha link set eth0 down; sleep 15; ipn ha link set eth0 up; ipn ha route replace default via 192.168.10.1 dev eth0 ;;
+    7.3) ipn w addr add "$CORE.51/24" dev eth0; ipn w addr del "$CORE.50/24" dev eth0 ;;
+    *) : ;;
+  esac
+}
+
+# наибольший простой: максимальный интервал (мс) между изменениями bytes в xfer_progress получателя
+g7_stall() { # recv.log
+  awk '/^EVENT xfer_progress / { t=$3; sub(/t=/,"",t); b=$4; sub(/bytes=/,"",b);
+         if (b+0 > 0 && !st) { st=1; last=t; pb=b; next }
+         if (st) { if (b != pb) { g=t-last; if (g>m) m=g; last=t; pb=b } } }
+       END { if (st) { printf "%d", m } else print "-" }' "$1" | head -1
+}
+
+# один случай: номер tag(G7|G7tbf) mode
+g7_case() {
+  local n="$1" tag="$2" mode="$3"
+  local d="$G7D/$tag-$n"; mkdir -p "$d"
+  local p="$d/run"
+  nat_setup; ensure_keys
+  g7_shape "$mode" "$d/shape.txt" || { echo "shape-fail" > "$d/status.txt"; return 1; }
+  local f; f="$(gen_file 128)"
+  local size; size="$(stat -c %s "$f")"
+  local srcsha; srcsha="$(sha256sum < "$f" | cut -d' ' -f1)"
+  rm -rf "$SHM/g7rx"; mkdir -p "$SHM/g7rx"
+  spk8_bg "$p.recv" w recv --listen 0.0.0.0:4433 --pairs "$STATE" --out-dir "$SHM/g7rx" --max-bytes $((size + 1)) --win W1 --keepalive-s 2 --idle-s 10
+  local rreal="$BG_REAL" rwrap="$BG_WRAP"
+  wait_bound "$p.recv.log" 5
+  bg8 "$p.cap.pid" w sh -c 'exec tcpdump -U -nn -i any -s 128 -w "$0" udp port 4433 2>"$0.err"' "$d/cap-w.pcap"
+  local creal="$BG_REAL" cwrap="$BG_WRAP"
+  sleep 1
+  local conn="$CORE.50:4433"; [[ $n == 7.3 ]] && conn="$CORE.50:4433,$CORE.51:4433"
+  spk8_bg "$p.send" ha send --connect "$conn" --pairs "$STATE" --pair 1 --file "$f" --streams 1 --win W1 --keepalive-s 2 --idle-s 10 --reconnect-deadline-s 60
+  local sreal="$BG_REAL" swrap="$BG_WRAP"
+  local i started=0
+  for i in $(seq 1 400); do grep -q 'phase=start' "$p.recv.log" 2>/dev/null && { started=1; break; }; sleep 0.05; done
+  local t_ev=""
+  if [[ $started == 1 && $n != 7.0 ]]; then
+    sleep 4
+    t_ev="$(awk '{print $1}' /proc/uptime)"
+    echo "event $n at uptime=$t_ev: $(date -u +%T.%N)" > "$d/event.txt"
+    g7_event "$n"
+  fi
+  # ждём завершения отправителя (до 100 с)
+  for i in $(seq 1 1000); do kill -0 "$sreal" 2>/dev/null || break; sleep 0.1; done
+  local timed_out=0
+  if kill -0 "$sreal" 2>/dev/null; then timed_out=1; kill "$sreal" 2>/dev/null; fi
+  { wait "$swrap"; } 2>/dev/null || true
+  for i in $(seq 1 30); do kill -0 "$rreal" 2>/dev/null || break; sleep 0.1; done
+  kill "$rreal" 2>/dev/null || true; { wait "$rwrap"; } 2>/dev/null || true
+  sleep 0.5
+  kill -INT "$creal" 2>/dev/null || true; { wait "$cwrap"; } 2>/dev/null || true
+  tcpdump -nn -q -r "$d/cap-w.pcap" 2>/dev/null | awk '$3=="In" && $4=="IP" { s=$5; k=split(s,a,"."); print a[1]"."a[2]"."a[3]"."a[4]; }' | sort | uniq -c > "$d/w-sources.txt" || true
+  # итог
+  local rx; rx="$(ls "$SHM/g7rx"/rx-*.bin 2>/dev/null | head -1)"
+  local cmpres="-" shaeq="-"
+  local dline; dline="$(evl "$p.recv.log" xfer_done)"
+  if [[ -n "$dline" && -n "$rx" ]]; then
+    cmp -s "$f" "$rx" && cmpres=OK || cmpres=DIFF
+    [[ "$(sha256sum < "$rx" | cut -d' ' -f1)" == "$srcsha" ]] && shaeq=eq || shaeq=NE
+  fi
+  local rcv_bytes; rcv_bytes="$(evl "$p.recv.log" xfer_progress | tail -1 | kv bytes)"
+  rm -rf "$SHM/g7rx"
+  local total_ms conns_r conns_s app resume ratio chg stall nrec lost
+  total_ms="$(echo "$dline" | kv ms)"; conns_r="$(echo "$dline" | kv conns)"
+  local sd; sd="$(evl "$p.send.log" send_done | tail -1)"; conns_s="$(echo "$sd" | kv conns)"; app="$(echo "$sd" | kv app_bytes_sent)"
+  local sr; sr="$(evl "$p.send.log" send_result | tail -1)"; resume="$(echo "$sr" | kv max_resume_from)"
+  ratio="-"; [[ -n "$app" ]] && ratio="$(awk -v a="$app" -v s="$size" 'BEGIN{printf "%.2f", a/s}')"
+  chg="$(grep '^EVENT peer_addr_change ' "$p.recv.log" | sed 's/EVENT peer_addr_change t=[0-9]* //' | tr '\n' ';')"
+  stall="$(g7_stall "$p.recv.log")"
+  nrec="$(grep -c '^EVENT reconnect ' "$p.send.log" || true)"
+  lost="$(grep '^EVENT conn_lost ' "$p.send.log" | sed 's/EVENT conn_lost t=[0-9]* //' | cut -c1-120 | tr '\n' ';')"
+  local srcs; srcs="$(awk '{printf "%s(%s) ", $2, $1}' "$d/w-sources.txt")"
+  {
+    echo "case=$n tag=$tag mode=$mode size=$size timed_out=$timed_out started=$started"
+    echo "arrived=$([[ -n $dline ]] && echo 1 || echo 0) recv_bytes=${rcv_bytes:-0} cmp=$cmpres sha=$shaeq"
+    echo "total_ms=${total_ms:--} conns_recv=${conns_r:--} conns_send=${conns_s:--} app_bytes_sent=${app:--} ratio=$ratio max_resume_from=${resume:--}"
+    echo "peer_addr_change=${chg:-нет} stall_ms=$stall reconnects=$nrec"
+    echo "conn_lost=${lost:-нет}"
+    echo "sources_seen_by_w=$srcs"
+  } > "$d/result.txt"
+  # классификация механизма
+  local mech
+  if [[ -z "$dline" ]]; then mech="файл не дошёл (принято ${rcv_bytes:-0} из $size Б)"
+  elif [[ "${conns_s:-0}" == 1 && -n "$chg" ]]; then mech="миграция QUIC в одном соединении (conns=1, peer_addr_change: $chg)"
+  elif [[ "${conns_s:-0}" == 1 ]]; then mech="одно соединение без смены пути (conns=1)"
+  elif [[ "${conns_s:-0}" -ge 2 && "${resume:-0}" -gt 0 ]] && awk -v r="$ratio" 'BEGIN{exit !(r < 1.5)}'; then mech="докачка (conns=${conns_s}, RESUME=${resume} Б, app/size=$ratio)"
+  else mech="≥2 соединений, но докачка не подтверждена (conns=${conns_s:-?}, RESUME=${resume:--}, app/size=$ratio)"; fi
+  G7_TOTAL[$n]="${total_ms:--}"
+  local v=OK; [[ -n "$dline" && $cmpres == OK && $shaeq == eq ]] || v=NO
+  G7_V[$n]="$v"
+  G7_TXT[$n]="$mech; cmp=$cmpres sha=$shaeq; conns=${conns_s:--}; peer_addr_change=${chg:-нет}; stall=${stall}мс; общее время=${total_ms:--}мс; app/size=$ratio; reconnect=$nrec; источники у w: $srcs"
+  [[ $cmpres == DIFF || $shaeq == NE ]] && G7_STOP=1
+  log "$tag $n: $v $mech | stall=${stall} мс total=${total_ms:--} мс"
+  nat_teardown
+  return 0
+}
+
+g7() {
+  set +e
+  local D="$G7D"; rm -rf "$D"; mkdir -p "$D"
+  [[ -x "$SPK" ]] || do_build
+  header_txt "$D/header.txt"
+  local nftsnap="$D/nft-host-before.txt"; host_nft_snapshot "$nftsnap"
+  trap 'nat_teardown' EXIT
+  declare -gA G7_TOTAL G7_V G7_TXT
+  # какой режим формирования канала доступен
+  nat_setup
+  local mode=netem
+  g7_shape netem "$D/shape-probe.txt" || mode=none
+  if [[ $mode == none ]]; then
+    { cat "$D/shape-probe.txt"; echo "== /proc/config.gz"; zcat /proc/config.gz 2>/dev/null | grep -E 'CONFIG_NET_SCH_NETEM|CONFIG_MODULES( |=)'; } > "$D/netem-unavailable.txt"
+  fi
+  nat_teardown
+  local n tag
+  if [[ $mode == netem ]]; then
+    tag=G7
+    for n in 7.0 7.1 7.2 7.3; do g7_case "$n" G7 netem; done
+  else
+    for n in 7.0 7.1 7.2 7.3; do
+      verdict G7 "$n" INCONCLUSIVE "$D/netem-unavailable.txt" "netem недоступен в ядре стенда (CONFIG_NET_SCH_NETEM не задан, модулей нет): канал 100 Мбит/с с задержкой 10 мс по спецификации не построить, прогон по спецификации не выполнялся"
+    done
+    # ВНЕ СПЕЦИФИКАЦИИ, только для справки и проверки кода: tbf 100 Мбит/с без задержки (RTT около 0)
+    tag=G7tbf
+    for n in 7.0 7.1 7.2 7.3; do g7_case "$n" G7tbf tbf; done
+  fi
+  local base="${G7_TOTAL[7.0]:--}" r
+  for n in 7.0 7.1 7.2 7.3; do
+    [[ -n "${G7_V[$n]:-}" ]] || continue
+    r="-"; [[ "$base" != "-" && "${G7_TOTAL[$n]}" != "-" ]] && r="$(awk -v a="${G7_TOTAL[$n]}" -v b="$base" 'BEGIN{printf "%.2f", a/b}')"
+    local vv="${G7_V[$n]}"
+    if [[ $tag == G7tbf ]]; then
+      verdict G7tbf "$n" "$vv" "$D/$tag-$n/result.txt" "ВНЕ СПЕЦИФИКАЦИИ (tbf 100 Мбит/с без задержки вместо netem 100 Мбит/с + 10 мс; в вердикт G7 не входит): ${G7_TXT[$n]}; время/7.0=$r"
+    else
+      verdict G7 "$n" "$vv" "$D/$tag-$n/result.txt" "${G7_TXT[$n]}; время/7.0=$r"
+    fi
+  done
+  trap - EXIT
+  nat_teardown
+  host_nft_check "$nftsnap" "g7" || true
+  stand_clean_check "g7" || true
+  [[ -z "${G7_STOP:-}" ]] || { log "СТОП: cmp нашёл расхождение"; return 3; }
+  return 0
+}
+
 main() {
   case "$CMD" in
     install) do_install ;;
     build) do_build ;;
     g8) g8 ;;
     g5) g5 ;;
+    g7) g7 ;;
     natup) nat_setup; echo "стенд NAT поднят (отладка)" >&2 ;;
     natdown) nat_teardown ;;
     teardown) bash "$RUNSH" teardown b ;;

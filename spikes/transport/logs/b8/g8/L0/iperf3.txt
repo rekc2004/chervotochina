@@ -1,1 +1,1 @@
-iperf3_receiver_mbps=13783
+iperf3_receiver_mbps=14084
