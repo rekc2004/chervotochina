@@ -1,9 +1,11 @@
 use std::fmt;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use x25519_dalek::StaticSecret;
 use zeroize::ZeroizeOnDrop;
 
 use crate::IdentityError;
+use crate::kx::{KxPublicKey, PairKx};
 
 /// Домены подписи. Тег добавляется перед сообщением и разделяет назначения подписей.
 #[non_exhaustive]
@@ -121,22 +123,43 @@ impl fmt::Debug for PublicKey {
 /// fn needs<T: std::ops::Deref>() {}
 /// needs::<zeroize::Zeroizing<Vec<u8>>>();
 /// ```
-pub struct PairKey(SigningKey);
+pub struct PairKey {
+    ed: SigningKey,
+    x: StaticSecret,
+    x_public: KxPublicKey,
+}
 
 impl PairKey {
-    /// Создаётся только из seed в `store`; seed копируется внутрь и обнуляется там.
-    pub(crate) fn from_seed(seed: &[u8; 32]) -> Self {
-        Self(SigningKey::from_bytes(seed))
+    /// Создаётся только из двух секретов в `store`; они копируются внутрь и обнуляются там.
+    pub(crate) fn from_secrets(ed_seed: &[u8; 32], x_secret: &[u8; 32]) -> Self {
+        let x = StaticSecret::from(*x_secret);
+        let x_public = KxPublicKey::from_derived(x25519_dalek::PublicKey::from(&x).to_bytes());
+        Self {
+            ed: SigningKey::from_bytes(ed_seed),
+            x,
+            x_public,
+        }
     }
 
     pub fn public_key(&self) -> PublicKey {
-        PublicKey(self.0.verifying_key())
+        PublicKey(self.ed.verifying_key())
+    }
+
+    pub fn kx_public(&self) -> KxPublicKey {
+        self.x_public
+    }
+
+    /// Отбрасывает часть Ed25519 (она обнуляется) и оставляет ключ обмена.
+    pub fn into_kx(self) -> PairKx {
+        let Self { ed, x, x_public } = self;
+        drop(ed);
+        PairKx::new(x, x_public)
     }
 
     /// Подпись над `тег домена || msg`.
     pub fn sign(&self, domain: SignDomain, msg: &[u8]) -> Result<[u8; 64], IdentityError> {
         let sig = self
-            .0
+            .ed
             .try_sign(&tagged(domain, msg))
             .map_err(|_| IdentityError::SigningFailed)?;
         Ok(sig.to_bytes())
@@ -149,5 +172,5 @@ impl fmt::Debug for PairKey {
     }
 }
 
-// Единственное поле `SigningKey` обнуляется само при уничтожении (ed25519-dalek, фича zeroize).
+// Поля `SigningKey` и `StaticSecret` обнуляются сами при уничтожении (ed25519-dalek, x25519-dalek, фича zeroize).
 impl ZeroizeOnDrop for PairKey {}

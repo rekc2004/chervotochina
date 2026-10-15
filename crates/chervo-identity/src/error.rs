@@ -17,6 +17,8 @@ pub enum IdentityError {
     InvalidPublicKey,
     BadSignature,
     SigningFailed,
+    InvalidKxPublicKey,
+    AuthFailed,
 }
 
 impl fmt::Display for IdentityError {
@@ -35,6 +37,8 @@ impl fmt::Display for IdentityError {
             Self::InvalidPublicKey => "invalid public key",
             Self::BadSignature => "bad signature",
             Self::SigningFailed => "signing failed",
+            Self::InvalidKxPublicKey => "invalid key-exchange public key",
+            Self::AuthFailed => "connection authentication failed",
         };
         f.write_str(text)
     }

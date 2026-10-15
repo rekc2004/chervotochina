@@ -1,7 +1,14 @@
 use zeroize::Zeroizing;
 
 use crate::keys::PairKey;
+use crate::kx::KxPublicKey;
 use crate::{IdentityError, KEY_BLOB_LEN, KEY_BLOB_VERSION, PairId, PublicKey};
+
+// Раскладка записи v2.
+const ED_SEED: core::ops::Range<usize> = 1..33;
+const ED_PUBLIC: core::ops::Range<usize> = 33..65;
+const X_SECRET: core::ops::Range<usize> = 65..97;
+const X_PUBLIC: core::ops::Range<usize> = 97..129;
 
 /// Хранилище секретов по парам. `read` возвращает `None`, только если записи точно нет.
 pub trait SecretStore: Send + Sync {
@@ -29,21 +36,30 @@ impl SecretStore for UnavailableKeyStore {
     }
 }
 
-/// Новый ключ; запись для хранилища `[версия][seed][публичный ключ]` заполняется
-/// в переданном буфере, чтобы массив с seed не перемещался.
+/// Новый ключ; запись для хранилища `[версия][seed Ed25519][публичный Ed25519][секрет X25519]
+/// [публичный X25519]` заполняется в переданном буфере, чтобы массивы с секретами не перемещались.
 fn fresh_key(blob: &mut Zeroizing<[u8; KEY_BLOB_LEN]>) -> Result<PairKey, IdentityError> {
     let mut seed = Zeroizing::new([0u8; 32]);
     getrandom::fill(seed.as_mut_slice()).map_err(|_| IdentityError::RandomUnavailable)?;
-    let key = PairKey::from_seed(&seed);
+    let mut x_secret = Zeroizing::new([0u8; 32]);
+    getrandom::fill(x_secret.as_mut_slice()).map_err(|_| IdentityError::RandomUnavailable)?;
+    let key = PairKey::from_secrets(&seed, &x_secret);
     let public = key.public_key().to_bytes();
+    let x_public = key.kx_public().to_bytes();
 
     *blob.first_mut().ok_or(IdentityError::CorruptKey)? = KEY_BLOB_VERSION;
-    blob.get_mut(1..33)
+    blob.get_mut(ED_SEED)
         .ok_or(IdentityError::CorruptKey)?
         .copy_from_slice(seed.as_slice());
-    blob.get_mut(33..KEY_BLOB_LEN)
+    blob.get_mut(ED_PUBLIC)
         .ok_or(IdentityError::CorruptKey)?
         .copy_from_slice(public.as_slice());
+    blob.get_mut(X_SECRET)
+        .ok_or(IdentityError::CorruptKey)?
+        .copy_from_slice(x_secret.as_slice());
+    blob.get_mut(X_PUBLIC)
+        .ok_or(IdentityError::CorruptKey)?
+        .copy_from_slice(x_public.as_slice());
     Ok(key)
 }
 
@@ -81,18 +97,24 @@ pub fn load<S: SecretStore + ?Sized>(
     if blob.len() != KEY_BLOB_LEN {
         return Err(IdentityError::CorruptKey);
     }
-    let seed_src = blob.get(1..33).ok_or(IdentityError::CorruptKey)?;
-    let public_src = blob
-        .get(33..KEY_BLOB_LEN)
-        .ok_or(IdentityError::CorruptKey)?;
+    let seed_src = blob.get(ED_SEED).ok_or(IdentityError::CorruptKey)?;
+    let public_src = blob.get(ED_PUBLIC).ok_or(IdentityError::CorruptKey)?;
+    let x_secret_src = blob.get(X_SECRET).ok_or(IdentityError::CorruptKey)?;
+    let x_public_src = blob.get(X_PUBLIC).ok_or(IdentityError::CorruptKey)?;
 
     let mut seed = Zeroizing::new([0u8; 32]);
     seed.copy_from_slice(seed_src);
-    let key = PairKey::from_seed(&seed);
+    let mut x_secret = Zeroizing::new([0u8; 32]);
+    x_secret.copy_from_slice(x_secret_src);
+    let key = PairKey::from_secrets(&seed, &x_secret);
     let public = key.public_key();
     if public.to_bytes().as_slice() != public_src {
         return Err(IdentityError::CorruptKey);
     }
+    if key.kx_public().to_bytes().as_slice() != x_public_src {
+        return Err(IdentityError::CorruptKey);
+    }
+    KxPublicKey::try_from_slice(x_public_src).map_err(|_| IdentityError::CorruptKey)?;
     if public != *expected {
         return Err(IdentityError::KeyMismatch);
     }
