@@ -121,7 +121,6 @@ impl IpLimiter {
     }
 
     #[cfg(test)]
-    #[allow(dead_code)]
     pub(crate) fn len(&self) -> usize {
         self.map.len()
     }

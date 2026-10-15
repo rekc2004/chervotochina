@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use chervo_identity::{KK_MSG2_LEN, KK_MSG3_LEN, KxPeer, kk_respond};
+use chervo_identity::{KK_MSG2_LEN, KK_MSG3_LEN, kk_respond};
 use chervo_transport::{Connection, Transport, TransportError};
 
 use super::kit::*;
@@ -161,21 +161,6 @@ impl PeerAddrBuild {
             addrs: vec![addr],
         }
     }
-}
-
-/// Полное рукопожатие сырым звонящим; возвращает `msg1` и соединение.
-async fn raw_full(
-    ep: &quinn::Endpoint,
-    addr: std::net::SocketAddr,
-    kx: &KxPeer,
-) -> (quinn::Connection, [u8; 49]) {
-    let mut raw = raw_start(ep, addr, kx).await;
-    let mut m2 = [0u8; KK_MSG2_LEN];
-    raw.rx.read_exact(&mut m2).await.unwrap();
-    let m3 = raw.init.finish(&m2).unwrap();
-    raw.tx.write_all(&m3).await.unwrap();
-    raw.tx.finish().unwrap();
-    (raw.conn, raw.msg1)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

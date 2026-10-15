@@ -339,3 +339,18 @@ pub async fn expect_refused_after_msg2(rx: &mut quinn::RecvStream, conn: &quinn:
     assert!(bytes.is_empty(), "после msg2 пришли лишние байты");
     assert_eq!(wait_closed(conn, Duration::from_secs(4)).await, REFUSED);
 }
+
+/// Полное рукопожатие сырым звонящим.
+pub async fn raw_full(
+    ep: &quinn::Endpoint,
+    addr: std::net::SocketAddr,
+    kx: &chervo_identity::KxPeer,
+) -> (quinn::Connection, [u8; 49]) {
+    let mut raw = raw_start(ep, addr, kx).await;
+    let mut m2 = [0u8; chervo_identity::KK_MSG2_LEN];
+    raw.rx.read_exact(&mut m2).await.unwrap();
+    let m3 = raw.init.finish(&m2).unwrap();
+    raw.tx.write_all(&m3).await.unwrap();
+    raw.tx.finish().unwrap();
+    (raw.conn, raw.msg1)
+}
