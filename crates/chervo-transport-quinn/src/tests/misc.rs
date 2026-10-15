@@ -18,6 +18,16 @@ fn cfg() -> QuinnConfig {
     }
 }
 
+async fn replaced(
+    rx: &mut tokio::sync::broadcast::Receiver<TransportEvent>,
+) -> chervo_identity::PairId {
+    loop {
+        if let Ok(TransportEvent::ConnectionReplaced { pair }) = rx.recv().await {
+            return pair;
+        }
+    }
+}
+
 fn alive(c: &QuinnConn) -> bool {
     c.conn.close_reason().is_none()
 }
@@ -125,11 +135,9 @@ async fn same_direction_reconnect_replaces() {
     // Событие шлёт та сторона, которая закрыла старое соединение (если вторая успела раньше, у этой
     // стороны старое уже мертво): ждём его хотя бы у одной.
     let ev = tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            tokio::select! {
-                Ok(TransportEvent::ConnectionReplaced { pair }) = ev_a.recv() => return pair,
-                Ok(TransportEvent::ConnectionReplaced { pair }) = ev_b.recv() => return pair,
-            }
+        tokio::select! {
+            p = replaced(&mut ev_a) => p,
+            p = replaced(&mut ev_b) => p,
         }
     })
     .await

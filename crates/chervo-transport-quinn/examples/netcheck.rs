@@ -88,7 +88,7 @@ fn hex(b: &[u8]) -> String {
 
 fn unhex(s: &str) -> Res<Vec<u8>> {
     let s = s.trim();
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err("hex".into());
     }
     (0..s.len() / 2)
