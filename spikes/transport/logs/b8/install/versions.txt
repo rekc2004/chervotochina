@@ -1,0 +1,7 @@
+iperf 3.16 (cJSON 1.7.15)
+conntrack v1.4.8 (conntrack-tools)
+ethtool version 6.7
+nftables v1.0.9 (Old Doc Yak #3)
+Usage:
+	miniupnpd --version
+	miniupnpd --help
