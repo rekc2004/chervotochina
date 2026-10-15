@@ -12,8 +12,9 @@ pub struct KxPublicKey([u8; 32]);
 
 impl KxPublicKey {
     /// Единственный путь для недоверенных байт ключа обмена. Отвергает неверную длину,
-    /// точки кручения (в том числе u = -1), точки малого порядка и неканоническую
-    /// кодировку (старший бит, u >= p). Только вызовы curve25519-dalek.
+    /// точки кручения (в том числе u = -1), точки малого порядка, точки смешанного
+    /// порядка (с компонентой кручения: у такого ключа несколько кодировок) и
+    /// неканоническую кодировку (старший бит, u >= p). Только вызовы curve25519-dalek.
     pub fn try_from_slice(b: &[u8]) -> Result<Self, IdentityError> {
         let arr: [u8; 32] = b
             .try_into()
@@ -21,7 +22,7 @@ impl KxPublicKey {
         let edwards = MontgomeryPoint(arr)
             .to_edwards(0)
             .ok_or(IdentityError::InvalidKxPublicKey)?;
-        if edwards.is_small_order() {
+        if edwards.is_small_order() || !edwards.is_torsion_free() {
             return Err(IdentityError::InvalidKxPublicKey);
         }
         if edwards.to_montgomery().to_bytes() != arr {

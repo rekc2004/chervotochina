@@ -88,6 +88,13 @@ fn kk_types_are_send() {
 }
 
 #[test]
+fn kx_peer_is_send_sync() {
+    // этапу 9 нужен `Arc<Vec<KxPeer>>` между потоками
+    fn g<T: Send + Sync>() {}
+    g::<KxPeer>();
+}
+
+#[test]
 fn kk_rejects_stranger() {
     let b = binding(3);
     let pairs: Vec<(KxPeer, KxPeer)> = (0..3).map(|_| make_pair()).collect();
@@ -331,6 +338,79 @@ fn kk_empty_peer_set_fails() {
     );
 }
 
+/// Пара, у которой ключ друга равен нашему собственному.
+fn self_peer() -> KxPeer {
+    let pid = PairId::generate().unwrap();
+    let k = create(&MemStore::new(), &pid).unwrap();
+    let own = k.kx_public();
+    KxPeer::new(pid, k.into_kx(), own)
+}
+
+#[test]
+fn kk_rejects_peer_key_equal_to_ours() {
+    let b = binding(30);
+    let (caller, callee) = make_pair();
+    // положительный контроль: обычная пара работает
+    assert!(handshake(&caller, &[&callee], &b, &b).is_ok());
+
+    let bad = self_peer();
+    assert_eq!(bad.theirs(), bad.ours_public());
+    assert_eq!(
+        kk_initiate(&bad, &b).err(),
+        Some(IdentityError::AuthFailed),
+        "звонящий с ключом друга == своему"
+    );
+    // как кандидат вызываемого такая пара не совпадает, остальные работают
+    let (_, m1) = kk_initiate(&caller, &b).unwrap();
+    assert_eq!(
+        kk_respond(&[&bad], &b, &m1).err(),
+        Some(IdentityError::AuthFailed)
+    );
+    assert_eq!(
+        handshake(&caller, &[&bad, &callee], &b, &b),
+        Ok(caller.pair())
+    );
+}
+
+#[test]
+fn kk_rejects_low_order_ephemeral() {
+    let b = binding(31);
+    let (caller, callee) = make_pair();
+    // положительный контроль: честное рукопожатие проходит
+    assert!(handshake(&caller, &[&callee], &b, &b).is_ok());
+
+    let mut points: Vec<[u8; 32]> = vec![[0u8; 32]];
+    points.extend(
+        curve25519_dalek::constants::EIGHT_TORSION
+            .iter()
+            .map(|t| t.to_montgomery().to_bytes()),
+    );
+    for (i, pt) in points.iter().enumerate() {
+        let mut tag = [0u8; 16];
+        getrandom::fill(&mut tag).unwrap();
+        // msg1 = [вид] ++ малая точка ++ случайный тег
+        let mut m1 = vec![KK_KIND_V1];
+        m1.extend_from_slice(pt);
+        m1.extend_from_slice(&tag);
+        assert_eq!(m1.len(), KK_MSG1_LEN);
+        assert_eq!(
+            kk_respond(&[&callee], &b, &m1).err(),
+            Some(IdentityError::AuthFailed),
+            "msg1, точка {i}"
+        );
+        // msg2 = малая точка ++ случайный тег
+        let (init, _) = kk_initiate(&caller, &b).unwrap();
+        let mut m2 = pt.to_vec();
+        m2.extend_from_slice(&tag);
+        assert_eq!(m2.len(), KK_MSG2_LEN);
+        assert_eq!(
+            init.finish(&m2).err(),
+            Some(IdentityError::AuthFailed),
+            "msg2, точка {i}"
+        );
+    }
+}
+
 fn median(v: &mut [u128]) -> u128 {
     v.sort_unstable();
     v[v.len() / 2]
@@ -342,7 +422,7 @@ fn median(v: &mut [u128]) -> u128 {
 fn kk_trial_cost() {
     let b = binding(20);
     let (stranger, _) = make_pair();
-    println!("N | no-match, us | match-first, us | match-last, us | max/min");
+    println!("N | no-match, us | match-first, us | match-last, us | first/last | match/none");
     for n in [1usize, 10, 50, 200] {
         let pairs: Vec<(KxPeer, KxPeer)> = (0..n).map(|_| make_pair()).collect();
         let callee_set: Vec<&KxPeer> = pairs.iter().map(|(_, c)| c).collect();
@@ -360,14 +440,15 @@ fn kk_trial_cost() {
             }
             res.push(median(&mut t));
         }
-        let max = res.iter().max().copied().unwrap();
-        let min = res.iter().min().copied().unwrap().max(1);
+        // позиционная утечка: первым против последним (оба «совпало»);
+        // постоянная добавка совпадения (msg2): совпало против нет совпадения
+        let (first, last) = (res[1].max(1) as f64, res[2].max(1) as f64);
+        let positional = first.max(last) / first.min(last);
+        let matched = (res[1] + res[2]) as f64 / 2.0;
+        let overhead = matched / res[0].max(1) as f64;
         println!(
-            "{n} | {} | {} | {} | {:.2}",
-            res[0],
-            res[1],
-            res[2],
-            max as f64 / min as f64
+            "{n} | {} | {} | {} | {positional:.3} | {overhead:.2}",
+            res[0], res[1], res[2]
         );
     }
 }

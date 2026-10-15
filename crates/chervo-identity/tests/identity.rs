@@ -670,6 +670,26 @@ fn kx_public_rejects_small_order() {
     }
 }
 
+#[test]
+fn kx_public_rejects_mixed_order() {
+    use curve25519_dalek::constants::{ED25519_BASEPOINT_POINT, EIGHT_TORSION};
+    // положительный контроль: чистая точка основной подгруппы принимается
+    let clean = ED25519_BASEPOINT_POINT;
+    assert!(clean.is_torsion_free());
+    assert!(KxPublicKey::try_from_slice(&clean.to_montgomery().to_bytes()).is_ok());
+    // P + T (T порядка 2, 4 и 8): каноническая кодировка, не малый порядок, но не чистая
+    for (i, t) in EIGHT_TORSION.iter().enumerate().skip(1) {
+        let mixed = clean + t;
+        assert!(!mixed.is_small_order(), "точка {i} малого порядка");
+        assert!(!mixed.is_torsion_free(), "точка {i} чистая");
+        assert_eq!(
+            KxPublicKey::try_from_slice(&mixed.to_montgomery().to_bytes()).unwrap_err(),
+            IdentityError::InvalidKxPublicKey,
+            "P + T[{i}]"
+        );
+    }
+}
+
 fn le_u(u: u64) -> [u8; 32] {
     let mut b = [0u8; 32];
     b[..8].copy_from_slice(&u.to_le_bytes());

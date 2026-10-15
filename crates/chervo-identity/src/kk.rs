@@ -26,7 +26,7 @@ pub const KK_MSG3_LEN: usize = 16;
 /// Длина значения экспортёра TLS.
 pub const BINDING_LEN: usize = 32;
 
-const PROLOGUE_LEN: usize = 25 + 1 + BINDING_LEN;
+const PROLOGUE_LEN: usize = KK_PROLOGUE_TAG.len() + 1 + BINDING_LEN;
 
 /// Значение экспортёра TLS, связывающее рукопожатие с каналом.
 #[derive(Clone, Copy)]
@@ -52,6 +52,9 @@ pub struct KxPeer {
 }
 
 impl KxPeer {
+    /// Ключ друга, равный нашему собственному, не отвергается здесь (интерфейс
+    /// остаётся прежним), а делает пару непригодной: `kk_initiate` возвращает
+    /// `AuthFailed`, а `kk_respond` пропускает такого кандидата (защита от отражения).
     pub fn new(pair: PairId, ours: PairKx, theirs: KxPublicKey) -> Self {
         Self { pair, ours, theirs }
     }
@@ -134,6 +137,10 @@ fn build(
     prologue: &[u8],
     initiator: bool,
 ) -> Result<snow::HandshakeState, IdentityError> {
+    // Ключ друга == наш ключ: отражение собственного сообщения прошло бы как «друг».
+    if peer.theirs == peer.ours.public() {
+        return Err(IdentityError::AuthFailed);
+    }
     let params = NOISE_PARAMS.parse().map_err(map_snow)?;
     let theirs: [u8; 32] = peer.theirs.to_bytes();
     let builder = snow::Builder::new(params)
@@ -192,13 +199,21 @@ impl KkInitiator {
 }
 
 /// Попытка одного кандидата: без раннего выхода наружу; любая ошибка = «не совпало».
-fn try_peer(peer: &KxPeer, prologue: &[u8], body: &[u8]) -> Option<snow::HandshakeState> {
-    build(peer, prologue, false)
-        .ok()
-        .and_then(|mut hs| hs.read_message(body, &mut []).ok().map(|_| hs))
+/// `reached` вызывается непосредственно перед `read_message` (для теста «дошли до дешифровки»).
+fn try_peer<F: FnMut()>(
+    peer: &KxPeer,
+    prologue: &[u8],
+    body: &[u8],
+    reached: &mut F,
+) -> Option<snow::HandshakeState> {
+    build(peer, prologue, false).ok().and_then(|mut hs| {
+        reached();
+        hs.read_message(body, &mut []).ok().map(|_| hs)
+    })
 }
 
-/// Перебор всех кандидатов; `on_try` вызывается на каждую попытку (для теста «посещены все»).
+/// Перебор всех кандидатов; `on_try` вызывается на каждую попытку, дошедшую до
+/// `read_message` (для теста «посещены все»).
 fn respond_with<F: FnMut()>(
     peers: &[&KxPeer],
     binding: &ChannelBinding,
@@ -213,8 +228,7 @@ fn respond_with<F: FnMut()>(
 
     let mut found: Option<(snow::HandshakeState, PairId)> = None;
     for peer in peers {
-        on_try();
-        let attempt = try_peer(peer, &prologue, body);
+        let attempt = try_peer(peer, &prologue, body, &mut on_try);
         if found.is_none()
             && let Some(hs) = attempt
         {
