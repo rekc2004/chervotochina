@@ -1,0 +1,1 @@
+hc: ssdp=6 gw=42 peer=0 dns=0 other=0

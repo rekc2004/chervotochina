@@ -401,13 +401,369 @@ g8() {
 }
 ensure_stand_g8() { [[ -x "$SPK" ]] || do_build; }
 
+# ---------------------------------------------------------------- стенд NAT (части 2-5), все ns с префиксом chv8-
+NS8=(i na na2 nb cg nc w m ha ha2 hb hc)
+nsx8() { local ns="$1"; shift; ip netns exec "chv8-$ns" "$@"; }
+spk8() { local ns="$1"; shift; nsx8 "$ns" env -i PATH="$PATH" RUST_LOG=warn "$@"; }
+ipn() { local ns="$1"; shift; ip -n "chv8-$ns" "$@"; }
+# bg-запуск в ns chv8-*
+bg8() { # pidfile ns cmd...
+  local pf="$1" ns="$2"; shift 2
+  rm -f "$pf"
+  nsx8 "$ns" sh -c 'echo $$ > "$1"; shift; exec "$@"' sh "$pf" "$@" &
+  BG_WRAP=$!
+  local i; for i in $(seq 1 50); do [[ -s "$pf" ]] && break; sleep 0.05; done
+  BG_REAL="$(cat "$pf" 2>/dev/null || true)"
+}
+spk8_bg() { # префикс ns args...
+  local p="$1" ns="$2"; shift 2
+  bg8 "$p.pid" "$ns" sh -c 'exec env -i PATH="$PATH" RUST_LOG=warn "$@" >"$0.log" 2>"$0.err"' "$p" "$SPK" "$@"
+}
+
+nat_teardown() {
+  local _e=0; [[ $- == *e* ]] && _e=1
+  set +e
+  local n
+  for n in "${NS8[@]}"; do
+    if ip netns list 2>/dev/null | grep -q "^chv8-$n\b"; then ip netns pids "chv8-$n" 2>/dev/null | xargs -r kill 2>/dev/null; fi
+  done
+  sleep 0.5
+  for n in "${NS8[@]}"; do ip netns del "chv8-$n" 2>/dev/null; rm -rf "/etc/netns/chv8-$n"; done
+  rmdir /etc/netns 2>/dev/null
+  [[ $_e == 1 ]] && set -e
+  return 0
+}
+
+vl() { # ns1 if1 ns2 if2
+  ip link add "$2" netns "chv8-$1" type veth peer name "$4" netns "chv8-$3"
+}
+
+nat_setup() {
+  nat_teardown
+  local n; for n in "${NS8[@]}"; do ip netns add "chv8-$n"; ipn "$n" link set lo up; done
+  ipn i link add core0 type bridge
+  vl na wan i ia;   vl na2 wan i ia2;  vl nb wan i ib;  vl cg wan i icg;  vl w eth0 i iw;  vl m eth0 i im
+  local p; for p in ia ia2 ib icg iw im; do ipn i link set "$p" master core0; ipn i link set "$p" up; done
+  ipn i link set core0 up
+  ipn na addr add "$CORE.10/24" dev wan; ipn na2 addr add "$CORE.20/24" dev wan; ipn nb addr add "$CORE.30/24" dev wan
+  ipn cg addr add "$CORE.40/24" dev wan; ipn w addr add "$CORE.50/24" dev eth0
+  ipn m addr add "$CORE.100/24" dev eth0; ipn m addr add "$CORE.101/24" dev eth0
+  # LAN за na: мост lan с ha и ha2; за na2: прямой линк к eth1 ноутбука; за nb: hb; CGNAT: cg - nc - hc
+  ipn na link add lan type bridge
+  vl na lna ha eth0;  vl na lna2 ha2 eth0
+  ipn na link set lna master lan; ipn na link set lna2 master lan
+  vl na2 lan ha eth1
+  vl nb lan hb eth0
+  vl cg lan nc wan
+  vl nc lan hc eth0
+  ipn na addr add 192.168.10.1/24 dev lan; ipn na2 addr add 192.168.20.1/24 dev lan; ipn nb addr add 192.168.30.1/24 dev lan
+  ipn cg addr add 100.64.0.1/10 dev lan; ipn nc addr add 100.64.0.2/10 dev wan; ipn nc addr add 192.168.40.1/24 dev lan
+  ipn ha addr add 192.168.10.2/24 dev eth0; ipn ha2 addr add 192.168.10.3/24 dev eth0
+  ipn ha addr add 192.168.20.2/24 dev eth1
+  ipn hb addr add 192.168.30.2/24 dev eth0; ipn hc addr add 192.168.40.2/24 dev eth0
+  for n in na na2 nb cg nc w m ha ha2 hb hc; do
+    local ifs; ifs="$(ipn "$n" -o link show | awk -F': ' '{print $2}' | sed 's/@.*//' | grep -v '^lo$')"
+    for p in $ifs; do ipn "$n" link set "$p" up; done
+  done
+  ipn ha link set eth1 down   # второй интерфейс ноутбука выключен до G7
+  ipn ha route add default via 192.168.10.1; ipn ha2 route add default via 192.168.10.1
+  ipn hb route add default via 192.168.30.1; ipn hc route add default via 192.168.40.1
+  ipn nc route add default via 100.64.0.1
+  for n in na na2 nb cg nc; do nsx8 "$n" sysctl -qw net.ipv4.ip_forward=1; done
+  nsx8 ha sysctl -qw net.ipv4.conf.all.promote_secondaries=1 net.ipv4.conf.eth0.promote_secondaries=1
+  nsx8 w sysctl -qw net.ipv4.conf.all.promote_secondaries=1 net.ipv4.conf.eth0.promote_secondaries=1
+  for n in ha ha2 hb hc w; do mkdir -p "/etc/netns/chv8-$n"; echo "nameserver 192.0.2.53" > "/etc/netns/chv8-$n/resolv.conf"; done
+  nat_flush_all
+}
+
+# Правила NAT для ns. Типы: PR AR FC SYM; параметры: ns тип L(lan-подсеть) H(внутренний host:port для dnat) [upnp]
+nat_load() {
+  local ns="$1" type="$2" L="$3" H="$4" upnp="${5:-}"
+  local masq="masquerade" set_decl="" fwd_upd="" pre_rule="" jumps_f="" jumps_p="" jumps_q="" extra=""
+  case "$type" in
+    PR) ;;
+    AR)
+      set_decl='set seen { type ipv4_addr; flags dynamic,timeout; timeout 120s; }'
+      fwd_upd='iifname "lan" oifname "wan" udp sport 4433 update @seen { ip daddr }'
+      pre_rule="iifname \"wan\" udp dport 4433 ip saddr @seen dnat ip to $H" ;;
+    FC) pre_rule="iifname \"wan\" udp dport 4433 dnat ip to $H" ;;
+    SYM) masq="masquerade fully-random" ;;
+    *) echo "тип NAT: $type" >&2; return 1 ;;
+  esac
+  if [[ -n "$upnp" ]]; then
+    # miniupnpd (nft-бэкенд): таблица nat8, цепочки miniupnpd / prerouting_miniupnpd / postrouting_miniupnpd, вызываются через jump
+    jumps_f='jump miniupnpd'; jumps_p='jump prerouting_miniupnpd'; jumps_q='jump postrouting_miniupnpd'
+    extra=$'chain miniupnpd {\n  }\n  chain prerouting_miniupnpd {\n  }\n  chain postrouting_miniupnpd {\n  }'
+  fi
+  nsx8 "$ns" nft flush ruleset
+  nsx8 "$ns" nft -f - <<NFT
+table $UPNP_FAMILY nat8 {
+  $set_decl
+  chain pre {
+    type nat hook prerouting priority dstnat;
+    $jumps_p
+    $pre_rule
+  }
+  chain post {
+    type nat hook postrouting priority srcnat;
+    $jumps_q
+    oifname "wan" ip saddr $L $masq
+  }
+  chain fwd8 {
+    type filter hook forward priority filter; policy drop;
+    $jumps_f
+    $fwd_upd
+    iifname "lan" oifname "wan" accept
+    iifname "wan" ct state established,related accept
+    iifname "wan" ct status dnat accept
+  }
+  chain inp8 {
+    type filter hook input priority filter;
+    iifname "wan" drop
+  }
+  $extra
+}
+NFT
+}
+
+UPNP_FAMILY="${UPNP_FAMILY:-inet}"   # miniupnpd 2.3.4 (nft) работает с таблицей семейства inet; в ip-таблице add_port даёт 501
+# Тип по умолчанию на каждом NAT (свежее состояние); conntrack -F во всех NAT-ns
+nat_flush_all() {
+  nat_load na PR 192.168.10.0/24 192.168.10.2:4433
+  nat_load na2 PR 192.168.20.0/24 192.168.20.2:4433
+  nat_load nb PR 192.168.30.0/24 192.168.30.2:4433
+  nat_load cg PR 100.64.0.0/10 100.64.0.2:4433
+  nat_load nc PR 192.168.40.0/24 192.168.40.2:4433
+  nat_ct_flush
+}
+nat_ct_flush() { local n; for n in na na2 nb cg nc; do nsx8 "$n" conntrack -F >/dev/null 2>&1 || true; done; }
+
+# nft-счётчики выхода хоста (как nft_host этапа 7): ssdp, gw, peer, dns, other
+nft_host8() { # ns gw peer-ip
+  nsx8 "$1" nft -f - <<NFT
+table inet chv8h {
+  counter ssdp { }
+  counter gw { }
+  counter peer { }
+  counter dns { }
+  counter mcast_kernel { }
+  counter other { }
+  chain output {
+    type filter hook output priority 0; policy accept;
+    th dport { 53, 853 } counter name "dns"
+    oifname "lo" accept
+    ip daddr 239.255.255.250 udp dport 1900 counter name "ssdp" accept
+    ip daddr $2 counter name "gw" accept
+    ip daddr $3 counter name "peer" accept
+    ip protocol igmp counter name "mcast_kernel" accept
+    counter name "other" accept
+  }
+}
+NFT
+}
+cnt() { # файл-счётчиков имя
+  awk -v n="$2" '$1 == "counter" && $2 == n { f = 1 } f && $1 == "packets" { print $2; exit }' "$1"
+}
+
+nat_clean() { # вызывается в конце части
+  nat_teardown
+}
+# ---------------------------------------------------------------- часть 2: G5 (UPnP, igd-next против miniupnpd)
+G5D="$L8/g5"
+g5_conf() { # файл ext lan-ip/маска lan-подсеть lease_file uuid
+  cat > "$1" <<CONF
+# G5: miniupnpd 2.3.4 (nft-бэкенд), конфиг вне /etc; PCP/NAT-PMP не включаем (enable_pcp_pmp по умолчанию no)
+ext_ifname=wan
+listening_ip=$2
+http_port=5000
+uuid=$5
+enable_upnp=yes
+secure_mode=yes
+system_uptime=yes
+upnp_table_name=nat8
+upnp_nat_table_name=nat8
+lease_file=$4
+allow 1024-65535 $3 1024-65535
+deny 0-65535 0.0.0.0/0 0-65535
+CONF
+}
+
+upnp_up() { # ns conf log   → MPD_REAL/MPD_WRAP
+  local ns="$1" conf="$2" lg="$3"
+  bg8 "$lg.pid" "$ns" sh -c 'exec miniupnpd -d -f "$1" -P "$2" >"$3" 2>&1' sh "$conf" "$lg.mpid" "$lg"
+  MPD_REAL="$BG_REAL"; MPD_WRAP="$BG_WRAP"
+  local i; for i in $(seq 1 50); do grep -qiE 'HTTP listening on port|SSDP|listening' "$lg" 2>/dev/null && break; kill -0 "$MPD_REAL" 2>/dev/null || break; sleep 0.1; done
+  sleep 0.5
+}
+upnp_down() { kill "$MPD_REAL" 2>/dev/null || true; { wait "$MPD_WRAP"; } 2>/dev/null || true; }
+
+# recv в ns на 4433; send из ns на адрес с дедлайном; результат: SEND_RC, лог-префикс p
+g5_try() { # префикс recv_ns send_ns адрес file deadline
+  local p="$1" rns="$2" sns="$3" to="$4" f="$5" dl="$6" rc=0
+  rm -rf "$SHM/g5rx"; mkdir -p "$SHM/g5rx"
+  spk8_bg "$p.recv" "$rns" recv --listen 0.0.0.0:4433 --pairs "$STATE" --out-dir "$SHM/g5rx" --max-bytes 17000000
+  local rr="$BG_REAL" rw="$BG_WRAP"
+  wait_bound "$p.recv.log" 5 || true
+  timeout $((dl + 20)) ip netns exec "chv8-$sns" env -i PATH="$PATH" RUST_LOG=warn "$SPK" send --connect "$to" --pairs "$STATE" --pair 1 --file "$f" \
+    --streams 1 --reconnect-deadline-s "$dl" > "$p.send.log" 2> "$p.send.err" || rc=$?
+  SEND_RC=$rc
+  local i; for i in $(seq 1 20); do kill -0 "$rr" 2>/dev/null || break; sleep 0.1; done
+  kill "$rr" 2>/dev/null || true; { wait "$rw"; } 2>/dev/null || true
+  RX_CMP="-"
+  local rx; rx="$(ls "$SHM/g5rx"/rx-*.bin 2>/dev/null | head -1)"
+  if [[ $rc == 0 && -n "$rx" ]]; then cmp -s "$f" "$rx" && RX_CMP=OK || RX_CMP=DIFF; fi
+  rm -rf "$SHM/g5rx"
+  RX_INCOMING="$(grep -c '^EVENT server_spki_issued ' "$p.recv.log" 2>/dev/null || true)"
+}
+
+g5() {
+  set +e   # серия измерений: сбой отдельной команды фиксируется в строке, а не прерывает часть
+  local D="$G5D"; rm -rf "$D"; mkdir -p "$D"
+  [[ -x "$SPK" ]] || do_build
+  header_txt "$D/header.txt"
+  local nftsnap="$D/nft-host-before.txt"; host_nft_snapshot "$nftsnap"
+  trap 'nat_teardown' EXIT
+  local uuid1="81c5ab36-606c-44f1-a3b0-5814b1dd5001" uuid2="81c5ab36-606c-44f1-a3b0-5814b1dd5002"
+  local core_note="CORE=$CORE"
+  # miniupnpd отказывается работать с «зарезервированным» внешним адресом (TEST-NET-2): разрешённая спецификацией замена CORE на 11.0.0 (в netns, наружу не маршрутизируется)
+  g5_stand_up() { # → поднимает стенд и miniupnpd на na
+    nat_setup
+    ensure_keys
+    nft_host8 ha 192.168.10.1 "$CORE.50"
+    g5_conf "$D/miniupnpd.conf" 192.168.10.1/24 192.168.10.0/24 "$D/upnp.leases" "$uuid1"
+    nat_load na PR 192.168.10.0/24 192.168.10.2:4433 upnp
+    nsx8 na nft list ruleset > "$D/nft-na-initial.txt"
+    upnp_up na "$D/miniupnpd.conf" "$D/miniupnpd.log"
+  }
+  g5_stand_up
+  if grep -q 'Reserved / private IP address' "$D/miniupnpd.log"; then
+    cp "$D/miniupnpd.log" "$D/attempt1-core-${CORE}-refused.log"
+    log "miniupnpd отказал для CORE=$CORE: $(grep -m1 'Reserved / private' "$D/miniupnpd.log")"
+    upnp_down
+    CORE_FIRST="$CORE"; CORE="11.0.0"
+    core_note="CORE=$CORE (замена: miniupnpd 2.3.4 отказал при $CORE_FIRST.x: 'Reserved / private IP address', лог attempt1-core-${CORE_FIRST}-refused.log)"
+    g5_stand_up
+  fi
+  echo "$core_note" > "$D/core.txt"
+  local f16; f16="$(gen_file 16)"
+  if ! kill -0 "$MPD_REAL" 2>/dev/null; then
+    local why; why="$(tr '\n' ' ' < "$D/miniupnpd.log" | cut -c1-300)"
+    verdict G5 open INCONCLUSIVE "$D/miniupnpd.log" "miniupnpd не завёлся ($core_note): $why"
+    for k in reach close lease traffic cgnat; do verdict G5 "$k" INCONCLUSIVE "$D/miniupnpd.log" "miniupnpd не завёлся"; done
+    nat_teardown; trap - EXIT; return 0
+  fi
+  # захват и счётчики в ha
+  bg8 "$D/cap-ha.pid" ha sh -c 'exec tcpdump -U -nn -i any -s 128 -w "$0" 2>"$0.err"' "$D/cap-ha.pcap"
+  local cap_real="$BG_REAL" cap_wrap="$BG_WRAP"
+  sleep 1
+  nsx8 ha nft reset counters > /dev/null
+  # (1) open
+  nsx8 na nft list ruleset > "$D/nft-na-before-map.txt"
+  spk8 ha "$SPK" upnp map --internal 192.168.10.2:4433 --ext-port 4433 --lease 120 > "$D/map.log" 2> "$D/map.err" || true
+  nsx8 na nft list ruleset > "$D/nft-na-after-map.txt"
+  spk8 ha "$SPK" upnp info --internal 192.168.10.2:4433 > "$D/info-after-map.log" 2> "$D/info-after-map.err" || true
+  local mapped gw extip nat_added
+  mapped="$(grep -c '^EVENT upnp_mapped ' "$D/map.log" || true)"
+  gw="$(grep '^EVENT upnp_gateway ' "$D/map.log" | kv addr)"; extip="$(grep '^EVENT upnp_ext_ip ' "$D/map.log" | kv ip)"
+  nat_added="$(diff "$D/nft-na-before-map.txt" "$D/nft-na-after-map.txt" | grep -c '^>' || true)"
+  local lease_seen; lease_seen="$(grep '^EVENT upnp_entry ' "$D/info-after-map.log" | head -1)"
+  if [[ "$mapped" == 1 && "$nat_added" -gt 0 ]]; then
+    verdict G5 open OK "$D/map.log" "igd-next нашёл шлюз $gw, внешний IP $extip, add_port UDP 4433->192.168.10.2:4433 lease 120 принят; в na добавлено строк nft: $nat_added (nft-na-after-map.txt); запись: ${lease_seen#EVENT }"
+  else
+    verdict G5 open NO "$D/map.log" "mapped=$mapped nft_added=$nat_added: $(grep -h 'upnp_error' "$D/map.log" | head -2 | tr '\n' ' ')"
+  fi
+  # (2) reach
+  g5_try "$D/reach" ha w "$CORE.10:4433" "$f16" 15
+  local peer_ok; peer_ok="$(grep -c "^EVENT auth_ok .*side=s peer=$CORE.50:" "$D/reach.recv.log" || true)"
+  if [[ $SEND_RC == 0 && $RX_CMP == OK && $peer_ok -ge 1 ]]; then
+    verdict G5 reach OK "$D/reach.send.log" "w ($CORE.50) -> $CORE.10:4433 дошло до ha по маппингу: 16 МиБ, cmp OK, auth_ok у ha от $CORE.50; $(grep '^EVENT send_result' "$D/reach.send.log" | sed 's/EVENT //')"
+  else
+    verdict G5 reach NO "$D/reach.send.log" "send_rc=$SEND_RC cmp=$RX_CMP peer_auth=$peer_ok"
+  fi
+  # (3) close
+  spk8 ha "$SPK" upnp unmap --internal 192.168.10.2:4433 --ext-port 4433 > "$D/unmap.log" 2> "$D/unmap.err" || true
+  nsx8 na nft list ruleset > "$D/nft-na-after-unmap.txt"
+  g5_try "$D/closed" ha w "$CORE.10:4433" "$f16" 10
+  local unm; unm="$(grep -c '^EVENT upnp_unmapped ' "$D/unmap.log" || true)"
+  local nat_left; nat_left="$(diff "$D/nft-na-before-map.txt" "$D/nft-na-after-unmap.txt" | grep -c '^[<>]' || true)"
+  if [[ "$unm" == 1 && $SEND_RC != 0 && "$RX_INCOMING" == 0 ]]; then
+    verdict G5 close OK "$D/closed.send.log" "remove_port принят, правила na вернулись к исходным (отличий nft: $nat_left), send с дедлайном 10 с не прошёл (rc=$SEND_RC), у ha входящих рукопожатий: $RX_INCOMING"
+  else
+    verdict G5 close NO "$D/closed.send.log" "unmapped=$unm send_rc=$SEND_RC incoming=$RX_INCOMING nft_diff=$nat_left"
+  fi
+  # (4) lease: аренда 30 с, процесс убит без unmap, ждём 90 с
+  local mp_pre="$D/lease-map"
+  bg8 "$mp_pre.pid" ha sh -c 'exec env -i PATH="$PATH" "$@" >"$0.log" 2>"$0.err"' "$mp_pre" "$SPK" upnp map --internal 192.168.10.2:4433 --ext-port 4433 --lease 30 --hold-s 600
+  local mp_real="$BG_REAL" mp_wrap="$BG_WRAP"
+  sleep 3
+  nsx8 na nft list ruleset > "$D/nft-na-lease-t3.txt"
+  spk8 ha "$SPK" upnp info --internal 192.168.10.2:4433 > "$D/info-lease-t3.log" 2> /dev/null || true
+  kill -9 "$mp_real" 2>/dev/null || true; { wait "$mp_wrap"; } 2>/dev/null || true
+  local t_kill; t_kill="$(date +%s)"
+  sleep 90
+  nsx8 na nft list ruleset > "$D/nft-na-lease-t90.txt"
+  spk8 ha "$SPK" upnp info --internal 192.168.10.2:4433 > "$D/info-lease-t90.log" 2> /dev/null || true
+  g5_try "$D/lease" ha w "$CORE.10:4433" "$f16" 10
+  local e3 e90 r3 r90
+  e3="$(grep -c '^EVENT upnp_entry ' "$D/info-lease-t3.log" || true)"; e90="$(grep -c '^EVENT upnp_entry ' "$D/info-lease-t90.log" || true)"
+  r3="$(diff "$D/nft-na-before-map.txt" "$D/nft-na-lease-t3.txt" | grep -c '^>' || true)"; r90="$(diff "$D/nft-na-before-map.txt" "$D/nft-na-lease-t90.txt" | grep -c '^[<>]' || true)"
+  local lease_entry; lease_entry="$(grep '^EVENT upnp_entry ' "$D/info-lease-t3.log" | head -1 | sed 's/EVENT //')"
+  if [[ "$e3" -ge 1 && "$r3" -gt 0 && "$e90" == 0 && "$r90" == 0 && $SEND_RC != 0 && "$RX_INCOMING" == 0 ]]; then
+    verdict G5 lease OK "$D/info-lease-t90.log" "аренда 30 с, процесс убит без unmap: через 3 с запись есть (${lease_entry}), через 90 с записей get_generic_port_mapping_entry: $e90, правил nft добавлено/осталось: $r3/$r90, send не прошёл (rc=$SEND_RC)"
+  else
+    verdict G5 lease NO "$D/info-lease-t90.log" "entries_t3=$e3 nft_added_t3=$r3 entries_t90=$e90 nft_diff_t90=$r90 send_rc=$SEND_RC incoming=$RX_INCOMING (${lease_entry:-нет записи})"
+  fi
+  # трафик ha
+  cap_stop8() { kill -INT "$cap_real" 2>/dev/null || true; { wait "$cap_wrap"; } 2>/dev/null || true; }
+  sleep 0.7; cap_stop8
+  nsx8 ha nft list counters > "$D/nft-ha.txt"
+  tcpdump -nn -q -r "$D/cap-ha.pcap" 2>/dev/null | awk '$3=="Out" && $4=="IP" { d=$7; sub(/:$/,"",d); n=split(d,b,"."); dip=b[1]"."b[2]"."b[3]"."b[4]; pr=$8; sub(/,$/,"",pr); print "-> " dip ":" b[n] " " pr }' | sort | uniq -c | sort -rn > "$D/ha-tuples.txt" || true
+  local c_ssdp c_gw c_peer c_dns c_other c_mc
+  c_ssdp="$(cnt "$D/nft-ha.txt" ssdp)"; c_gw="$(cnt "$D/nft-ha.txt" gw)"; c_peer="$(cnt "$D/nft-ha.txt" peer)"
+  c_dns="$(cnt "$D/nft-ha.txt" dns)"; c_other="$(cnt "$D/nft-ha.txt" other)"; c_mc="$(cnt "$D/nft-ha.txt" mcast_kernel)"
+  if [[ "$c_dns" == 0 && "$c_other" == 0 ]]; then v=OK; else v=NO; fi
+  verdict G5 traffic "$v" "$D/nft-ha.txt" "пакеты ha за шаги 1-4: ssdp=$c_ssdp gw=$c_gw peer=$c_peer dns=$c_dns other=$c_other mcast_kernel=$c_mc (ssdp: 239.255.255.250:1900, gw: 192.168.10.1, peer: $CORE.50); кортежи в ha-tuples.txt"
+  upnp_down
+  nsx8 na nft list ruleset > "$D/nft-na-final.txt"
+  # (5) G5.5: miniupnpd на nc (домашний роутер за CGNAT)
+  g5_conf "$D/miniupnpd-nc.conf" 192.168.40.1/24 192.168.40.0/24 "$D/upnp-nc.leases" "$uuid2"
+  nat_load nc PR 192.168.40.0/24 192.168.40.2:4433 upnp
+  nsx8 nc nft list ruleset > "$D/nft-nc-initial.txt"
+  nsx8 cg nft list ruleset > "$D/nft-cg-initial.txt"
+  nft_host8 hc 192.168.40.1 "$CORE.50"
+  upnp_up nc "$D/miniupnpd-nc.conf" "$D/miniupnpd-nc.log"
+  local nc_alive=0; kill -0 "$MPD_REAL" 2>/dev/null && nc_alive=1
+  spk8 hc "$SPK" upnp info --internal 192.168.40.2:4433 > "$D/cg-info.log" 2> "$D/cg-info.err" || true
+  spk8 hc "$SPK" upnp map --internal 192.168.40.2:4433 --ext-port 4433 --lease 120 > "$D/cg-map.log" 2> "$D/cg-map.err" || true
+  nsx8 nc nft list ruleset > "$D/nft-nc-after-map.txt"
+  nsx8 cg nft list ruleset > "$D/nft-cg-after-map.txt"
+  g5_try "$D/cgnat" hc w "$CORE.40:4433" "$f16" 10
+  local cg_gw cg_ip cg_mapped cg_err
+  cg_gw="$(grep -h '^EVENT upnp_gateway ' "$D/cg-info.log" | kv addr)"; cg_ip="$(grep -h '^EVENT upnp_ext_ip ' "$D/cg-info.log" | kv ip)"
+  cg_mapped="$(grep -c '^EVENT upnp_mapped ' "$D/cg-map.log" || true)"
+  cg_err="$(grep -h '^EVENT upnp_error' "$D/cg-info.log" "$D/cg-map.log" | sed 's/EVENT upnp_error t=[0-9]* //; s/msg=Request Error. Invalid response from gateway:.*/msg=пустой NewExternalIPAddress (XML в cg-info.log)/' | awk '!s[$0]++' | tr '\n' ';')"
+  nsx8 hc nft list counters > "$D/nft-hc.txt"
+  local hc_c; hc_c="ssdp=$(cnt "$D/nft-hc.txt" ssdp) gw=$(cnt "$D/nft-hc.txt" gw) peer=$(cnt "$D/nft-hc.txt" peer) dns=$(cnt "$D/nft-hc.txt" dns) other=$(cnt "$D/nft-hc.txt" other)"
+  echo "hc: $hc_c" > "$D/hc-counters.txt"
+  verdict G5 cgnat DONE "$D/cg-info.log" "miniupnpd на nc (WAN 100.64.0.2): igd-next шлюз=${cg_gw:-нет}, внешний IP по UPnP=${cg_ip:-нет}, add_port принят=$cg_mapped, ошибки: ${cg_err:-нет}; send из w на $CORE.40:4433 rc=$SEND_RC (входящих у hc: $RX_INCOMING), nc_alive=$nc_alive; счётчики hc: $hc_c"
+  upnp_down
+  nat_teardown; trap - EXIT
+  rm -f "$f16.tmp"
+  host_nft_check "$nftsnap" "g5" || true
+  stand_clean_check "g5" || true
+}
+
 main() {
   case "$CMD" in
     install) do_install ;;
     build) do_build ;;
     g8) g8 ;;
+    g5) g5 ;;
+    natup) nat_setup; echo "стенд NAT поднят (отладка)" >&2 ;;
+    natdown) nat_teardown ;;
     teardown) bash "$RUNSH" teardown b ;;
     *) echo "использование: run8.sh <install|build|g8 СЦЕНАРИЙ|g5|g7|natcheck|g6|g4a|g4b|teardown>" >&2; exit 2 ;;
   esac
 }
+[[ -n "${RUN8_SOURCE:-}" ]] && return 0
 main

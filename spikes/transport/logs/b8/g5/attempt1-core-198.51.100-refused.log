@@ -1,0 +1,12 @@
+miniupnpd[17083]: it is advised to use network interface name instead of 192.168.10.1/24
+miniupnpd[17083]: system uptime is 2603 seconds
+miniupnpd[17083]: mnl_socket bound, port_id=17083
+miniupnpd[17083]: Reloading rules from lease file
+miniupnpd[17083]: could not open lease file: /home/user/chervotochina/spikes/transport/logs/b8/g5/upnp.leases
+miniupnpd[17083]: version 2.3.4 starting UPnP-IGD ext if wan BOOTID=1792080041
+miniupnpd[17083]: Reserved / private IP address 198.51.100.10 on ext interface wan: Port forwarding is impossible
+miniupnpd[17083]: You are probably behind NAT, enable option ext_perform_stun=yes to detect public IP address
+miniupnpd[17083]: Or use ext_ip= / -o option to declare public IP address
+miniupnpd[17083]: Public IP address is required by UPnP/PCP/PMP protocols and clients do not work without it
+miniupnpd[17083]: socket(PF_INET6, ...) failed with EAFNOSUPPORT, disabling IPv6
+miniupnpd[17083]: HTTP listening on port 5000

@@ -1,0 +1,5 @@
+EVENT bound t=0 id=- local=0.0.0.0:0
+EVENT dial_fail t=3000 to=11.0.0.10:4433 msg=timeout
+EVENT dial_fail t=6002 to=11.0.0.10:4433 msg=timeout
+EVENT dial_fail t=9003 to=11.0.0.10:4433 msg=timeout
+EVENT dial_fail t=12003 to=11.0.0.10:4433 msg=timeout
