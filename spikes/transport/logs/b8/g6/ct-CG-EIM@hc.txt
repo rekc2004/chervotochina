@@ -1,0 +1,2 @@
+conntrack v1.4.8 (conntrack-tools): 1 flow entries have been shown.
+udp      17 29 src=100.64.0.2 dst=198.51.100.50 sport=4433 dport=4433 src=198.51.100.50 dst=198.51.100.40 sport=4433 dport=4433 mark=0 use=1
