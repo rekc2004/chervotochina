@@ -1,0 +1,6 @@
+EVENT punch_start t=0 epoch_ms=1792081738493 mode=sync
+EVENT punch_go t=0 epoch_ms=1792081738493 peer=198.51.100.40:32908 delay_ms=500
+EVENT punch_attempt_start t=501 epoch_ms=1792081738994
+EVENT bound t=502 id=- local=0.0.0.0:4433
+EVENT punch_attempt t=502 to=198.51.100.40:32908 epoch_ms=1792081738995
+EVENT punch_fail t=16513 reason=deadline

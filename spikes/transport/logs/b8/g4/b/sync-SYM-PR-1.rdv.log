@@ -1,0 +1,11 @@
+EVENT rdv_bound t=0 addr=198.51.100.100:7100
+EVENT rdv_reg t=66 side=1 from=198.51.100.10:47788
+EVENT rdv_reg t=1090 side=1 from=198.51.100.10:47788
+EVENT rdv_reg t=2114 side=1 from=198.51.100.10:47788
+EVENT rdv_reg t=3138 side=1 from=198.51.100.10:47788
+EVENT rdv_reg t=4162 side=1 from=198.51.100.10:47788
+EVENT rdv_reg t=5186 side=1 from=198.51.100.10:47788
+EVENT rdv_reg t=6210 side=1 from=198.51.100.10:47788
+EVENT rdv_reg t=7131 side=2 from=198.51.100.30:4433
+EVENT rdv_go t=7131 to=198.51.100.10:47788
+EVENT rdv_go t=7131 to=198.51.100.30:4433
