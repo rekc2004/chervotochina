@@ -182,6 +182,9 @@ impl QuinnTransport {
         cfg: QuinnConfig,
         filter: Arc<dyn PeerFilter>,
     ) -> Result<Self, TransportError> {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return Err(TransportError::Io);
+        }
         sock.set_nonblocking(true).map_err(|_| TransportError::Io)?;
         let base = tls::base_server_config(&cfg).map_err(|_| TransportError::Io)?;
         let endpoint = quinn::Endpoint::new(

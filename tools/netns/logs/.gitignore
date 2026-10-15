@@ -1,0 +1,6 @@
+*
+!.gitignore
+!summary.txt
+!*/
+!result.txt
+!observe.txt

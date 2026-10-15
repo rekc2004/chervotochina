@@ -54,7 +54,7 @@ fn src_guard() {
         "eprintln!",
         "print!",
         "dbg!",
-        "DeviceId",
+        concat!("Device", "Id"),
         "QuicServerConfig::new",
         ".refuse(",
         "into_0rtt",

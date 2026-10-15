@@ -4,11 +4,12 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use chervo_identity::{KK_MSG2_LEN, KK_MSG3_LEN, kk_respond};
+use chervo_identity::{KK_MSG2_LEN, KK_MSG3_LEN};
 use chervo_transport::{Connection, Transport, TransportError};
 
 use super::kit::*;
 use crate::conn::binding;
+use crate::limits::{Counters, KkGate};
 use crate::{QuinnConfig, QuinnTransport};
 
 fn rt_cfg() -> QuinnConfig {
@@ -220,7 +221,12 @@ async fn bad_msg2_rejected() {
         let (mut tx, mut rx) = conn.accept_bi().await.unwrap();
         let mut m1 = [0u8; 49];
         rx.read_exact(&mut m1).await.unwrap();
-        let (_resp, mut m2) = kk_respond(&[&peer_b], &bind_, &m1).unwrap();
+        let gate = KkGate::new(&ecfg, Arc::new(Counters::default()));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let (_resp, mut m2) = gate
+            .respond(deadline, Arc::new(vec![peer_b]), vec![0], bind_, m1)
+            .await
+            .unwrap();
         m2[10] ^= 0x01; // портим бит
         tx.write_all(&m2).await.unwrap();
         tx.finish().unwrap();
