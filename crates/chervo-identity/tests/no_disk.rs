@@ -111,6 +111,7 @@ fn key_bytes_not_written_to_data_dir() {
         expected.verify(SignDomain::Invite, b"msg", &sig).unwrap();
         let blob = store.raw(&p).unwrap();
         secrets.push(blob[1..33].to_vec());
+        secrets.push(blob[65..97].to_vec());
         secrets.push(blob);
         drop(key);
         drop(loaded);
@@ -118,10 +119,11 @@ fn key_bytes_not_written_to_data_dir() {
         let new = rekey(&store, &p).unwrap();
         let blob = store.raw(&p).unwrap();
         secrets.push(blob[1..33].to_vec());
+        secrets.push(blob[65..97].to_vec());
         secrets.push(blob);
         drop(new);
     }
-    assert_eq!(secrets.len(), 20);
+    assert_eq!(secrets.len(), 30);
 
     std::env::set_current_dir(&old).unwrap();
     let found = scan(&d, &secrets);
@@ -137,10 +139,12 @@ fn scan_detects_planted_key() {
     create(&store, &p).unwrap();
     let blob = store.raw(&p).unwrap();
     let seed = blob[1..33].to_vec();
+    let x_secret = blob[65..97].to_vec();
+    assert_eq!(blob.len(), 129);
 
-    for secret in [&seed, &blob] {
+    for (i, secret) in [&seed, &x_secret, &blob].into_iter().enumerate() {
         for (name, bytes) in forms(secret) {
-            let dir = d2.join(format!("{}-{name}", secret.len()));
+            let dir = d2.join(format!("{i}-{}-{name}", secret.len()));
             std::fs::create_dir_all(&dir).unwrap();
             let mut data = b"prefix-".to_vec();
             data.extend_from_slice(&bytes);
@@ -148,7 +152,7 @@ fn scan_detects_planted_key() {
             let found = scan(&dir, std::slice::from_ref(secret));
             assert!(
                 found.iter().any(|(_, n)| *n == name),
-                "сканер не нашёл форму {name} для длины {}",
+                "сканер не нашёл форму {name} для секрета {i} длины {}",
                 secret.len()
             );
         }
