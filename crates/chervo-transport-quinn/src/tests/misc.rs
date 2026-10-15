@@ -132,17 +132,14 @@ async fn same_direction_reconnect_replaces() {
         }
         _ => panic!("неожиданная причина закрытия"),
     }
-    // Событие шлёт та сторона, которая закрыла старое соединение (если вторая успела раньше, у этой
-    // стороны старое уже мертво): ждём его хотя бы у одной.
-    let ev = tokio::time::timeout(Duration::from_secs(2), async {
-        tokio::select! {
-            p = replaced(&mut ev_a) => p,
-            p = replaced(&mut ev_b) => p,
-        }
-    })
-    .await
-    .expect("событие ConnectionReplaced хотя бы у одной стороны");
-    assert_eq!(ev, k.pid);
+    // События симметричны: ConnectionReplaced приходит у обеих сторон (у закрывшей старое
+    // соединение сама и у той, которую вытеснил собеседник).
+    for (name, ev) in [("A", &mut ev_a), ("B", &mut ev_b)] {
+        let pair = tokio::time::timeout(Duration::from_secs(2), replaced(ev))
+            .await
+            .unwrap_or_else(|_| panic!("нет ConnectionReplaced у стороны {name}"));
+        assert_eq!(pair, k.pid);
+    }
     // у вызываемого тоже ровно одно живое
     let sb = survivors(&acc_b.lock().unwrap().clone());
     assert_eq!(sb.len(), 1);
@@ -242,4 +239,71 @@ async fn duplicate_closed_with_code_for_authenticated_peer() {
     .expect("событие ConnectionReplaced");
     assert_eq!(pair, k.pid);
     assert_eq!(b.stats().auth_ok, 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn busy_semaphore_does_not_charge_limiter() {
+    // Занятый семафор: повторы Initial с того же адреса отбрасываются без списания квоты лимитера,
+    // и после освобождения слота друг с этого адреса проходит.
+    let k = Keys::new();
+    let c = QuinnConfig {
+        max_preauth: 1,
+        per_ip_max: 5,
+        auth_deadline: Duration::from_secs(2),
+        ..test_cfg()
+    };
+    let b = Arc::new(bind(c, vec![k.peer_b()]));
+    let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+    let charged = |t: &QuinnTransport| t.inner.limiter.lock().unwrap().charged(ip);
+    let ep = raw_endpoint();
+    let silent = raw_tls(&ep, addr_of(&b)).await.unwrap();
+    assert_eq!(charged(&b), 1, "молчащий клиент списывает ровно одну квоту");
+    let addr = addr_of(&b);
+    let attempts: Vec<_> = (0..8)
+        .map(|_| {
+            let e = ep.clone();
+            tokio::spawn(async move {
+                tokio::time::timeout(Duration::from_millis(500), raw_tls(&e, addr))
+                    .await
+                    .is_err()
+            })
+        })
+        .collect();
+    for t in attempts {
+        assert!(t.await.unwrap(), "соединение прошло при занятом слоте");
+    }
+    assert!(b.stats().ignored_busy >= 1, "{:?}", b.stats());
+    assert_eq!(b.stats().ignored_rate, 0, "{:?}", b.stats());
+    assert_eq!(
+        charged(&b),
+        1,
+        "повторы при занятом семафоре растят счётчик лимитера"
+    );
+    // слот освободился по дедлайну молчащего: друг с того же адреса проходит
+    assert_eq!(wait_closed(&silent, Duration::from_secs(4)).await, REFUSED);
+    let a = bind(
+        QuinnConfig {
+            auth_deadline: Duration::from_secs(5),
+            ..test_cfg()
+        },
+        vec![k.peer_a()],
+    );
+    let r = a.connect(&peer_addr(k.pid, &b)).await;
+    assert!(r.is_ok(), "друг не прошёл после освобождения слота");
+    assert_eq!(b.stats().ignored_rate, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unrepresentable_idle_timeout_is_error() {
+    // idle_timeout вне VarInt в мс: ошибка конфигурации, а не молчаливое «без таймаута»
+    let c = QuinnConfig {
+        idle_timeout: Duration::MAX,
+        ..test_cfg()
+    };
+    assert!(QuinnTransport::bind(lo(), c, Arc::new(AllowAll)).is_err());
+    let ok = QuinnConfig {
+        idle_timeout: Duration::from_secs(30),
+        ..test_cfg()
+    };
+    assert!(QuinnTransport::bind(lo(), ok, Arc::new(AllowAll)).is_ok());
 }

@@ -371,11 +371,12 @@ async fn silent_callee_times_out() {
     let evil = server_endpoint(&cfg);
     let evil_addr = ep_addr(&evil);
     let ecfg = cfg.clone();
-    let _task = tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let conn = serve_one(&evil, &ecfg).await;
-        // принимает поток и молчит
+        // принимает поток и молчит; потом смотрит, чем звонящий закрылся
         let _s = conn.accept_bi().await;
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        let seen = wait_closed(&conn, Duration::from_secs(5)).await;
+        (seen, frames(&conn))
     });
     let started = Instant::now();
     let r = a.connect(&PeerAddrBuild::one(k.pid, evil_addr)).await;
@@ -385,6 +386,12 @@ async fn silent_callee_times_out() {
         elapsed < Duration::from_millis(2000),
         "дольше дедлайна и секунды: {elapsed:?}"
     );
+    // Отмена future рукопожатия по дедлайну: защитник владеет потоками, отказ уходит раньше
+    // их сброса, то есть без STOP_SENDING и RESET_STREAM.
+    let (seen, fr) = task.await.unwrap();
+    assert_eq!(seen, REFUSED);
+    assert_eq!(fr.stop_sending, 0, "{fr:?}");
+    assert_eq!(fr.reset_stream, 0, "{fr:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

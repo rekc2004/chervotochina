@@ -30,17 +30,35 @@ pub(crate) fn refuse(conn: &quinn::Connection) {
     conn.close(VarInt::from_u32(crate::CLOSE_REFUSED), b"");
 }
 
-/// Закрывает соединение отказом при любом выходе до `disarm`, раньше, чем освободятся потоки:
-/// сброшенный без `finish` поток quinn завершает штатно (FIN), а непрочитанный отправляет STOP_SENDING,
-/// и это опередило бы закрытие и стало бы видимым отличием причин отказа. Объявлять после потоков.
+/// Закрытие всего гнезда (`shutdown`): тот же код и пустая причина, что у отказа.
+pub(crate) fn close_endpoint(endpoint: &quinn::Endpoint) {
+    endpoint.close(VarInt::from_u32(crate::CLOSE_REFUSED), b"");
+}
+
+/// Владеет потоками рукопожатия и закрывает соединение отказом при любом выходе до `disarm`
+/// (в том числе при отмене future): `Drop::drop` защитника идёт раньше сброса его полей, то есть
+/// раньше, чем освободятся потоки. Сброшенный без `finish` поток quinn завершает штатно (FIN), а
+/// непрочитанный отправляет STOP_SENDING, и это опередило бы закрытие и стало бы видимым
+/// отличием причин отказа; после `close` потоки при сбросе ничего не шлют.
 pub(crate) struct RefuseGuard<'a> {
     conn: &'a quinn::Connection,
     armed: bool,
+    pub(crate) tx: quinn::SendStream,
+    pub(crate) rx: quinn::RecvStream,
 }
 
 impl<'a> RefuseGuard<'a> {
-    pub(crate) fn new(conn: &'a quinn::Connection) -> Self {
-        Self { conn, armed: true }
+    pub(crate) fn new(
+        conn: &'a quinn::Connection,
+        tx: quinn::SendStream,
+        rx: quinn::RecvStream,
+    ) -> Self {
+        Self {
+            conn,
+            armed: true,
+            tx,
+            rx,
+        }
     }
 
     pub(crate) fn disarm(&mut self) {

@@ -324,3 +324,16 @@ async fn no_new_token() {
     .await;
     assert!(tokens > 0, "контроль: NEW_TOKEN должны были прийти");
 }
+
+#[test]
+fn harden_sets_expected_values() {
+    let mut sc = crate::tls::ephemeral_rustls().unwrap();
+    // исходные значения rustls отличаются от нужных: контроль, что `harden` что-то меняет
+    assert_ne!(sc.send_tls13_tickets, 0);
+    assert!(sc.alpn_protocols.is_empty());
+    crate::tls::harden(&mut sc);
+    assert_eq!(sc.max_early_data_size, 0);
+    assert_eq!(sc.send_tls13_tickets, 0);
+    assert_eq!(sc.alpn_protocols, vec![crate::ALPN.to_vec()]);
+    assert!(!sc.session_storage.can_cache());
+}

@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use chervo_identity::PairId;
 use quinn::VarInt;
 
+use crate::CLOSE_DUPLICATE;
 use crate::conn::{QuinnConn, close_duplicate};
 use crate::{Inner, TransportEvent};
 
@@ -145,9 +146,9 @@ fn spawn_monitor(inner: &Arc<Inner>, conn: quinn::Connection, pair: PairId) {
         let mut last = conn.remote_address();
         let mut tick =
             tokio::time::interval(inner.cfg.addr_poll.max(std::time::Duration::from_millis(1)));
-        loop {
+        let reason = loop {
             tokio::select! {
-                _ = conn.closed() => break,
+                e = conn.closed() => break e,
                 _ = tick.tick() => {
                     let now = conn.remote_address();
                     if now != last {
@@ -156,6 +157,15 @@ fn spawn_monitor(inner: &Arc<Inner>, conn: quinn::Connection, pair: PairId) {
                     }
                 }
             }
+        };
+        // Нас вытеснила другая сторона (аутентифицированный собеседник закрыл кодом дубликата):
+        // событие такое же, как у стороны, закрывшей старое соединение сама.
+        if let quinn::ConnectionError::ApplicationClosed(ac) = &reason
+            && ac.error_code == VarInt::from_u32(CLOSE_DUPLICATE)
+        {
+            let _ = inner
+                .events
+                .send(TransportEvent::ConnectionReplaced { pair });
         }
         inner.registry.remove(&pair, conn.stable_id());
     });

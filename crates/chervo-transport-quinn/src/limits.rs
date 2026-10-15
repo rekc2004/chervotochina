@@ -93,6 +93,17 @@ impl IpLimiter {
         }
     }
 
+    /// Допустила бы `allow` это рукопожатие сейчас. Ничего не списывает и не вытесняет.
+    pub(crate) fn would_allow(&self, ip: IpAddr, now: Instant) -> bool {
+        if self.max == 0 {
+            return false;
+        }
+        match self.map.get(&ip_key(ip)) {
+            Some(e) => now.saturating_duration_since(e.0) >= self.window || e.1 < self.max,
+            None => true,
+        }
+    }
+
     /// Можно ли принять ещё одно рукопожатие с этого адреса; учитывает попытку.
     pub(crate) fn allow(&mut self, ip: IpAddr, now: Instant) -> bool {
         if self.max == 0 {
@@ -124,6 +135,12 @@ impl IpLimiter {
     pub(crate) fn len(&self) -> usize {
         self.map.len()
     }
+
+    /// Списано рукопожатий в текущем окне (0, если ключа нет).
+    #[cfg(test)]
+    pub(crate) fn charged(&self, ip: IpAddr) -> u32 {
+        self.map.get(&ip_key(ip)).map_or(0, |e| e.1)
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -144,13 +161,16 @@ pub(crate) enum GateError {
 struct Bucket {
     tokens: f64,
     last: Instant,
+    /// Действующая ёмкость: не меньше `base_cap` и не меньше числа пар.
+    cap: u32,
 }
 
 pub(crate) struct KkGate {
     sem: Arc<Semaphore>,
     bucket: Mutex<Bucket>,
     rate: u32,
-    cap: u32,
+    /// Ёмкость ведра из конфигурации (не меньше 1).
+    base_cap: u32,
     counters: Arc<Counters>,
 }
 
@@ -172,11 +192,25 @@ impl KkGate {
             bucket: Mutex::new(Bucket {
                 tokens: f64::from(cap),
                 last: Instant::now(),
+                cap,
             }),
             rate: cfg.kk_budget_per_sec,
-            cap,
+            base_cap: cap,
             counters,
         }
+    }
+
+    /// Ёмкость ведра не меньше числа пар `n`: иначе стоимость перебора обрезалась бы до ёмкости, и
+    /// реальная нагрузка превышала бы заданный `kk_budget_per_sec`. При росте добавленная часть
+    /// выдаётся сразу; при уменьшении лишнее срезается. Ниже `kk_budget_burst` не опускается.
+    pub(crate) fn set_min_burst(&self, n: usize) {
+        let want = u32::try_from(n).unwrap_or(u32::MAX).max(self.base_cap);
+        let mut b = self.bucket.lock().unwrap_or_else(PoisonError::into_inner);
+        if want > b.cap {
+            b.tokens += f64::from(want - b.cap);
+        }
+        b.cap = want;
+        b.tokens = b.tokens.min(f64::from(want));
     }
 
     fn deny(&self) -> GateError {
@@ -186,18 +220,19 @@ impl KkGate {
 
     /// Списывает `cost` кандидатов (не больше ёмкости ведра) или решает, что ждать нельзя.
     async fn take_budget(&self, deadline: Instant, cost: usize) -> Result<u64, GateError> {
-        let c = u32::try_from(cost).unwrap_or(u32::MAX).min(self.cap);
-        let need = f64::from(c);
-        loop {
+        let cost = u32::try_from(cost).unwrap_or(u32::MAX);
+        let c = loop {
             let wait = {
                 let mut b = self.bucket.lock().unwrap_or_else(PoisonError::into_inner);
+                let c = cost.min(b.cap);
+                let need = f64::from(c);
                 let now = Instant::now();
                 let elapsed = now.saturating_duration_since(b.last).as_secs_f64();
                 b.last = now;
-                b.tokens = (b.tokens + elapsed * f64::from(self.rate)).min(f64::from(self.cap));
+                b.tokens = (b.tokens + elapsed * f64::from(self.rate)).min(f64::from(b.cap));
                 if b.tokens >= need {
                     b.tokens -= need;
-                    break;
+                    break c;
                 }
                 if self.rate == 0 {
                     return Err(self.deny());
@@ -209,7 +244,7 @@ impl KkGate {
                 w
             };
             sleep(wait).await;
-        }
+        };
         self.counters
             .kk_candidates
             .fetch_add(u64::from(c), Ordering::Relaxed);

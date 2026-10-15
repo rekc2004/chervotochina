@@ -10,15 +10,16 @@ use chervo_identity::KK_MSG2_LEN;
 use super::kit::*;
 use crate::QuinnConfig;
 
-/// Незнакомец: TLS, первый поток, `msg1` вида 1 со случайными байтами; что получено в ответ.
-async fn stranger_probe(ep: &quinn::Endpoint, addr: SocketAddr, kind: u8) -> (usize, Seen) {
+/// Незнакомец: TLS, первый поток, `msg1` вида 1 со случайными байтами; что получено в ответ
+/// (байты, вид закрытия, принятые кадры STOP_SENDING, RESET_STREAM и STREAM).
+async fn stranger_probe(ep: &quinn::Endpoint, addr: SocketAddr, kind: u8) -> (usize, Seen, Frames) {
     let conn = raw_tls(ep, addr).await.unwrap();
     let (mut tx, mut rx) = conn.open_bi().await.unwrap();
     let mut m = random_msg1();
     m[0] = kind;
     tx.write_all(&m).await.unwrap();
     let (bytes, seen) = drain(&mut rx, Duration::from_secs(30)).await;
-    (bytes.len(), seen)
+    (bytes.len(), seen, frames(&conn))
 }
 
 fn many_keys(n: usize) -> Vec<Keys> {
@@ -36,26 +37,26 @@ fn base(n_preauth: usize) -> QuinnConfig {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn refusals_indistinguishable() {
     let ep = raw_endpoint();
-    let mut outcomes: Vec<(&str, usize, Seen)> = Vec::new();
+    let mut outcomes: Vec<(&str, usize, Seen, Frames)> = Vec::new();
 
     // 1. незнакомец
     {
         let keys = many_keys(5);
         let b = bind(base(32), keys.iter().map(Keys::peer_b).collect());
-        let (n, seen) = stranger_probe(&ep, addr_of(&b), 0x01).await;
+        let (n, seen, fr) = stranger_probe(&ep, addr_of(&b), 0x01).await;
         sleep_ms(100).await;
         assert_eq!(
             b.stats().auth_failed,
             1,
             "причина не воспроизведена: незнакомец"
         );
-        outcomes.push(("незнакомец", n, seen));
+        outcomes.push(("незнакомец", n, seen, fr));
     }
     // 2. неизвестный вид 0x02
     {
         let keys = many_keys(5);
         let b = bind(base(32), keys.iter().map(Keys::peer_b).collect());
-        let (n, seen) = stranger_probe(&ep, addr_of(&b), 0x02).await;
+        let (n, seen, fr) = stranger_probe(&ep, addr_of(&b), 0x02).await;
         sleep_ms(100).await;
         assert_eq!(
             b.stats().auth_failed,
@@ -63,7 +64,7 @@ async fn refusals_indistinguishable() {
             "причина не воспроизведена: вид 0x02"
         );
         assert_eq!(b.stats().kk_trials, 0);
-        outcomes.push(("вид 0x02", n, seen));
+        outcomes.push(("вид 0x02", n, seen, fr));
     }
     // 3. PeerFilter запрещает
     {
@@ -80,7 +81,7 @@ async fn refusals_indistinguishable() {
             "причина не воспроизведена: PeerFilter"
         );
         assert_eq!(b.stats().kk_trials, 0);
-        outcomes.push(("PeerFilter", bytes.len(), seen));
+        outcomes.push(("PeerFilter", bytes.len(), seen, frames(&raw.conn)));
     }
     // 4. бюджет исчерпан: первый незнакомец съедает ведро
     {
@@ -91,13 +92,13 @@ async fn refusals_indistinguishable() {
             ..base(32)
         };
         let b = bind(cfg, keys.iter().map(Keys::peer_b).collect());
-        let (n0, s0) = stranger_probe(&ep, addr_of(&b), 0x01).await;
+        let (n0, s0, _) = stranger_probe(&ep, addr_of(&b), 0x01).await;
         assert_eq!((n0, s0), (0, REFUSED));
         assert_eq!(b.stats().kk_denied, 0);
-        let (n, seen) = stranger_probe(&ep, addr_of(&b), 0x01).await;
+        let (n, seen, fr) = stranger_probe(&ep, addr_of(&b), 0x01).await;
         sleep_ms(100).await;
         assert_eq!(b.stats().kk_denied, 1, "причина не воспроизведена: бюджет");
-        outcomes.push(("бюджет", n, seen));
+        outcomes.push(("бюджет", n, seen, fr));
     }
     // 5. ворота заняты до дедлайна: 200 пар, один перебор, короткий дедлайн, параллельные незнакомцы
     {
@@ -127,8 +128,8 @@ async fn refusals_indistinguishable() {
             b.stats().kk_denied >= 1,
             "причина не воспроизведена: ворота заняты"
         );
-        for (n, seen) in results {
-            outcomes.push(("ворота заняты", n, seen));
+        for (n, seen, fr) in results {
+            outcomes.push(("ворота заняты", n, seen, fr));
         }
     }
     // 6. неверный msg3: прочитаны ровно 48 байт msg2 и больше ничего
@@ -147,10 +148,12 @@ async fn refusals_indistinguishable() {
         assert_eq!(b.stats().auth_failed, 1, "причина не воспроизведена: msg3");
     }
 
-    // У всех причин, кроме msg3: 0 байт и отказ приложения с кодом 0 и пустой причиной.
-    for (why, n, seen) in &outcomes {
+    // У всех причин, кроме msg3: 0 байт и отказ приложения с кодом 0 и пустой причиной, а у
+    // сырого клиента ни STOP_SENDING, ни RESET_STREAM, ни одного кадра STREAM от вызываемого.
+    for (why, n, seen, fr) in &outcomes {
         assert_eq!(*n, 0, "{why}: прочитаны байты");
         assert_eq!(*seen, REFUSED, "{why}: иной вид закрытия");
+        assert_eq!(*fr, Frames::default(), "{why}: кадры потока от вызываемого");
     }
 }
 
@@ -176,7 +179,7 @@ async fn kk_trials_bounded_under_strangers() {
         ));
     }
     for t in tasks {
-        let (n, seen) = t.await.unwrap();
+        let (n, seen, _) = t.await.unwrap();
         assert_eq!(n, 0, "у незнакомца прочитаны байты");
         assert_eq!(seen, REFUSED);
     }
@@ -195,4 +198,23 @@ async fn kk_trials_bounded_under_strangers() {
     // (в debug-сборке перебор ~70 раз медленнее release, часть не успевает в дедлайн)
     assert_eq!(st.kk_trials + st.kk_denied, 30, "{st:?}");
     assert!(st.kk_trials >= 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn burst_below_pair_count_is_raised() {
+    // burst 3 при 10 парах: ёмкость поднимается до числа пар, стоимость не обрезается
+    let keys = many_keys(10);
+    let cfg = QuinnConfig {
+        kk_budget_per_sec: 0,
+        kk_budget_burst: 3,
+        ..base(32)
+    };
+    let b = bind(cfg, keys.iter().map(Keys::peer_b).collect());
+    let ep = raw_endpoint();
+    let (n, seen, _) = stranger_probe(&ep, addr_of(&b), 0x01).await;
+    sleep_ms(100).await;
+    assert_eq!((n, seen), (0, REFUSED));
+    let st = b.stats();
+    assert_eq!(st.kk_candidates, 10, "стоимость обрезана до burst: {st:?}");
+    assert_eq!(st.kk_denied, 0, "{st:?}");
 }

@@ -101,15 +101,15 @@ async fn caller_handshake(
         .ok_or(Fail::Failed)?;
     let (initiator, msg1) = kk_initiate(kx, &bind).map_err(|_| Fail::Failed)?;
     let ours_public = kx.ours_public().to_bytes();
-    let (mut tx, mut rx) = conn.open_bi().await.map_err(|_| Fail::Failed)?;
-    // объявлен после потоков: при любом выходе отказ уходит раньше FIN/STOP_SENDING потоков
-    let mut guard = RefuseGuard::new(conn);
-    tx.write_all(&msg1).await.map_err(|_| Fail::Failed)?;
-    let msg2: [u8; KK_MSG2_LEN] = read_exact_n(&mut rx).await?;
-    expect_eof(&mut rx).await?;
+    let (tx, rx) = conn.open_bi().await.map_err(|_| Fail::Failed)?;
+    // защитник владеет потоками: при любом выходе или отмене отказ уходит раньше FIN/STOP_SENDING
+    let mut guard = RefuseGuard::new(conn, tx, rx);
+    guard.tx.write_all(&msg1).await.map_err(|_| Fail::Failed)?;
+    let msg2: [u8; KK_MSG2_LEN] = read_exact_n(&mut guard.rx).await?;
+    expect_eof(&mut guard.rx).await?;
     let msg3 = initiator.finish(&msg2).map_err(|_| Fail::Failed)?;
-    tx.write_all(&msg3).await.map_err(|_| Fail::Failed)?;
-    tx.finish().map_err(|_| Fail::Failed)?;
+    guard.tx.write_all(&msg3).await.map_err(|_| Fail::Failed)?;
+    guard.tx.finish().map_err(|_| Fail::Failed)?;
     guard.disarm();
     Ok(ours_public)
 }

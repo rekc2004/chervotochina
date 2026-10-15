@@ -63,7 +63,7 @@ pub struct QuinnConfig {
     pub max_kk_trials: usize,
     /// Кандидатов в секунду (глобально).
     pub kk_budget_per_sec: u32,
-    /// Кандидатов в ведре; при использовании не меньше 1.
+    /// Кандидатов в ведре; не меньше 1 и не меньше числа пар в `set_peers`.
     pub kk_budget_burst: u32,
     pub max_incoming: usize,
     pub incoming_buffer: u64,
@@ -195,7 +195,8 @@ impl QuinnTransport {
         )
         .map_err(|_| TransportError::Io)?;
         let client_quic = tls::client_quic().map_err(|_| TransportError::Io)?;
-        let client_transport = tls::pre_auth_transport(&cfg, tls::Role::Client);
+        let client_transport =
+            tls::pre_auth_transport(&cfg, tls::Role::Client).map_err(|_| TransportError::Io)?;
         let counters = Arc::new(Counters::default());
         let (queue_tx, queue_rx) = mpsc::channel(cfg.accept_queue.max(1));
         let (events, _) = broadcast::channel(64);
@@ -228,8 +229,10 @@ impl QuinnTransport {
         Ok(Self { inner })
     }
 
-    /// Атомарная замена набора пар.
+    /// Атомарная замена набора пар. Ёмкость бюджета перебора не меньше числа пар
+    /// (`kk_budget_burst` меньше этого числа поднимается, иначе стоимость обрезалась бы).
     pub fn set_peers(&self, peers: Vec<KxPeer>) {
+        self.inner.gate.set_min_burst(peers.len());
         *self
             .inner
             .peers
@@ -254,8 +257,8 @@ impl QuinnTransport {
     }
 
     pub fn shutdown(&self) {
-        // Обычное закрытие: код 0, тот же, что у отказа (сверяется тестом `config_defaults_match_spec`).
-        self.inner.endpoint.close(quinn::VarInt::from_u32(0), b"");
+        // Обычное закрытие: тот же код и пустая причина, что у отказа.
+        conn::close_endpoint(&self.inner.endpoint);
     }
 }
 

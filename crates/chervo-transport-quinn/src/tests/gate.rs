@@ -234,3 +234,43 @@ fn limiter_bounded() {
     // окно истекло: снова можно
     assert!(lim.allow(v4, now + Duration::from_secs(11)));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn burst_raised_to_pair_count() {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    // контроль: без подъёма стоимость обрезается до burst
+    let (g, c) = gate(&gate_cfg(1, 0, 5));
+    assert_eq!(g.run(deadline, 20, || 1u8).await, Ok(1));
+    assert_eq!(c.kk_candidates.load(Ordering::SeqCst), 5);
+    // с подъёмом до числа пар списывается полная стоимость; пополнения нет (rate 0)
+    let (g, c) = gate(&gate_cfg(1, 0, 5));
+    g.set_min_burst(20);
+    assert_eq!(g.run(deadline, 20, || 1u8).await, Ok(1));
+    assert_eq!(c.kk_candidates.load(Ordering::SeqCst), 20);
+    assert_eq!(g.run(deadline, 20, || 1u8).await, Err(GateError::Denied));
+    // уменьшение числа пар возвращает ёмкость к burst из конфигурации и срезает лишнее
+    let (g, c) = gate(&gate_cfg(1, 0, 5));
+    g.set_min_burst(20);
+    g.set_min_burst(0);
+    assert_eq!(g.run(deadline, 20, || 1u8).await, Ok(1));
+    assert_eq!(c.kk_candidates.load(Ordering::SeqCst), 5);
+}
+
+#[tokio::test]
+async fn would_allow_does_not_charge() {
+    let mut lim = IpLimiter::new(2, Duration::from_secs(10), 16);
+    let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let now = Instant::now();
+    for _ in 0..10 {
+        assert!(lim.would_allow(ip, now));
+    }
+    assert_eq!(lim.charged(ip), 0);
+    assert_eq!(lim.len(), 0);
+    assert!(lim.allow(ip, now));
+    assert!(lim.allow(ip, now));
+    assert_eq!(lim.charged(ip), 2);
+    assert!(!lim.would_allow(ip, now));
+    assert!(!lim.allow(ip, now));
+    assert_eq!(lim.charged(ip), 2);
+    assert!(lim.would_allow(ip, now + Duration::from_secs(11)));
+}

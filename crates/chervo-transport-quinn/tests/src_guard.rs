@@ -102,7 +102,8 @@ fn src_guard() {
         }
     }
 
-    // CLOSE_REFUSED: единственное использование (не объявление и не комментарий) внутри fn refuse
+    // CLOSE_REFUSED: ровно два использования (не объявление и не комментарий), оба в conn.rs:
+    // внутри fn refuse и внутри fn close_endpoint (закрытие гнезда при shutdown)
     let mut uses = Vec::new();
     for (name, s) in &srcs {
         for (i, line) in s.lines().enumerate() {
@@ -117,17 +118,28 @@ fn src_guard() {
     }
     assert_eq!(
         uses.len(),
-        1,
-        "CLOSE_REFUSED используется не только в refuse"
+        2,
+        "CLOSE_REFUSED используется не только в refuse и close_endpoint"
     );
-    let (name, line_no, text) = &uses[0];
-    assert_eq!(name, "conn.rs");
-    let start = text.find("fn refuse(").expect("fn refuse");
-    let end = start + text[start..].find("\n}\n").expect("конец refuse");
-    let line_start: usize = text.lines().take(*line_no).map(|l| l.len() + 1).sum();
-    assert!(
-        line_start > start && line_start < end,
-        "CLOSE_REFUSED вне тела refuse"
+    let mut covered = Vec::new();
+    for (name, line_no, text) in &uses {
+        assert_eq!(name, "conn.rs");
+        let line_start: usize = text.lines().take(*line_no).map(|l| l.len() + 1).sum();
+        let fn_name = ["fn refuse(", "fn close_endpoint("]
+            .into_iter()
+            .find(|f| {
+                let start = text.find(f).expect("функция есть");
+                let end = start + text[start..].find("\n}\n").expect("конец функции");
+                line_start > start && line_start < end
+            })
+            .expect("CLOSE_REFUSED вне тел refuse и close_endpoint");
+        covered.push(fn_name);
+    }
+    covered.sort_unstable();
+    assert_eq!(
+        covered,
+        ["fn close_endpoint(", "fn refuse("],
+        "по одному использованию в каждой из двух функций"
     );
 
     // accept() только как endpoint.accept()

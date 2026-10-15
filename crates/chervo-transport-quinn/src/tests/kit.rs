@@ -184,7 +184,7 @@ pub fn raw_endpoint() -> quinn::Endpoint {
 
 pub fn raw_client_cfg() -> quinn::ClientConfig {
     let quic = client_quic().unwrap();
-    let transport = pre_auth_transport(&QuinnConfig::default(), Role::Client);
+    let transport = pre_auth_transport(&QuinnConfig::default(), Role::Client).unwrap();
     client_config(&quic, &transport)
 }
 
@@ -333,11 +333,33 @@ pub async fn sleep_ms(ms: u64) {
     tokio::time::sleep(Duration::from_millis(ms)).await;
 }
 
-/// После `msg2`: из потока больше ничего, соединение закрыто отказом.
+/// Кадры от собеседника, по которым видна причина отказа (до закрытия соединения).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Frames {
+    pub stop_sending: u64,
+    pub reset_stream: u64,
+    pub stream: u64,
+}
+
+/// Принятые кадры по статистике соединения (на уровне пакетов, не потоков).
+pub fn frames(conn: &quinn::Connection) -> Frames {
+    let f = conn.stats().frame_rx;
+    Frames {
+        stop_sending: f.stop_sending,
+        reset_stream: f.reset_stream,
+        stream: f.stream,
+    }
+}
+
+/// После `msg2`: из потока больше ничего, соединение закрыто отказом, а STOP_SENDING и
+/// RESET_STREAM от вызываемого не приходили.
 pub async fn expect_refused_after_msg2(rx: &mut quinn::RecvStream, conn: &quinn::Connection) {
     let (bytes, _) = drain(rx, Duration::from_secs(4)).await;
     assert!(bytes.is_empty(), "после msg2 пришли лишние байты");
     assert_eq!(wait_closed(conn, Duration::from_secs(4)).await, REFUSED);
+    let f = frames(conn);
+    assert_eq!(f.stop_sending, 0, "STOP_SENDING от вызываемого: {f:?}");
+    assert_eq!(f.reset_stream, 0, "RESET_STREAM от вызываемого: {f:?}");
 }
 
 /// Полное рукопожатие сырым звонящим.

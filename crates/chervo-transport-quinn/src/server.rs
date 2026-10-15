@@ -5,7 +5,6 @@ use std::sync::atomic::Ordering;
 
 use chervo_identity::{KK_KIND_V1, KK_MSG1_LEN, KK_MSG3_LEN, PairId};
 use tokio::sync::OwnedSemaphorePermit;
-use tokio::sync::mpsc::error::TrySendError;
 use tokio::time::{Instant, timeout_at};
 
 use crate::Inner;
@@ -23,14 +22,17 @@ pub(crate) fn admit(inner: &Arc<Inner>, incoming: quinn::Incoming) {
         }
         return;
     }
-    let allowed = {
-        let mut lim = inner
+    let ip = incoming.remote_address().ip();
+    // Порядок: проверка лимита без списания, семафор, и только потом списание квоты. Иначе повторы
+    // Initial под занятым семафором тратили бы квоту друга (за общим адресом она общая).
+    let permitted = {
+        let lim = inner
             .limiter
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        lim.allow(incoming.remote_address().ip(), Instant::now())
+        lim.would_allow(ip, Instant::now())
     };
-    if !allowed {
+    if !permitted {
         incoming.ignore();
         Counters::bump(&inner.counters.ignored_rate);
         return;
@@ -40,6 +42,18 @@ pub(crate) fn admit(inner: &Arc<Inner>, incoming: quinn::Incoming) {
         Counters::bump(&inner.counters.ignored_busy);
         return;
     };
+    let charged = {
+        let mut lim = inner
+            .limiter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        lim.allow(ip, Instant::now())
+    };
+    if !charged {
+        incoming.ignore();
+        Counters::bump(&inner.counters.ignored_rate);
+        return;
+    }
     let Ok(server_cfg) = ephemeral_server_config(&inner.cfg) else {
         incoming.ignore();
         return;
@@ -92,15 +106,16 @@ async fn serve(
         }
     };
     Counters::bump(&inner.counters.auth_ok);
+    // Место в очереди резервируется до `promote`: победитель, не помещающийся в очередь, не должен
+    // вытеснить старое соединение пары и сам тут же закрыться.
+    let Ok(slot) = inner.queue_tx.try_reserve() else {
+        inner.counters.queue_full.fetch_add(1, Ordering::Relaxed);
+        refuse(&conn);
+        return;
+    };
     match promote(&inner, conn.clone(), authed.pair, false, authed.caller_pub) {
         Promoted::Lost(_) => {}
-        Promoted::Winner(qc) => match inner.queue_tx.try_send(qc) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) | Err(TrySendError::Closed(_)) => {
-                inner.counters.queue_full.fetch_add(1, Ordering::Relaxed);
-                refuse(&conn);
-            }
-        },
+        Promoted::Winner(qc) => slot.send(qc),
     }
 }
 
@@ -110,10 +125,10 @@ async fn callee_handshake(
     deadline: Instant,
 ) -> Result<Authed, Fail> {
     let bind = binding(conn).map_err(|_| Fail::Failed)?;
-    let (mut tx, mut rx) = conn.accept_bi().await.map_err(|_| Fail::Failed)?;
-    // объявлен после потоков: при любом выходе отказ уходит раньше FIN/STOP_SENDING потоков
-    let mut guard = RefuseGuard::new(conn);
-    let msg1: [u8; KK_MSG1_LEN] = read_exact_n(&mut rx).await?;
+    let (tx, rx) = conn.accept_bi().await.map_err(|_| Fail::Failed)?;
+    // защитник владеет потоками: при любом выходе или отмене отказ уходит раньше FIN/STOP_SENDING
+    let mut guard = RefuseGuard::new(conn, tx, rx);
+    let msg1: [u8; KK_MSG1_LEN] = read_exact_n(&mut guard.rx).await?;
     if msg1.first() != Some(&KK_KIND_V1) {
         return Err(Fail::Failed);
     }
@@ -131,10 +146,10 @@ async fn callee_handshake(
         .gate
         .respond(deadline, snapshot.clone(), allowed, bind, msg1)
         .await?;
-    tx.write_all(&msg2).await.map_err(|_| Fail::Failed)?;
-    tx.finish().map_err(|_| Fail::Failed)?;
-    let msg3: [u8; KK_MSG3_LEN] = read_exact_n(&mut rx).await?;
-    expect_eof(&mut rx).await?;
+    guard.tx.write_all(&msg2).await.map_err(|_| Fail::Failed)?;
+    guard.tx.finish().map_err(|_| Fail::Failed)?;
+    let msg3: [u8; KK_MSG3_LEN] = read_exact_n(&mut guard.rx).await?;
+    expect_eof(&mut guard.rx).await?;
     let pair = responder.finish(&msg3).map_err(|_| Fail::Failed)?;
     if !inner.filter.is_allowed(&pair) {
         return Err(Fail::Failed);

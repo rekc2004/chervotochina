@@ -43,7 +43,11 @@ pub(crate) enum Role {
 
 /// Транспортные параметры до конца KK: сервер принимает один двунаправленный поток,
 /// клиент не принимает потоков; однонаправленных и датаграмм нет; окно соединения мало.
-pub(crate) fn pre_auth_transport(cfg: &QuinnConfig, role: Role) -> Arc<quinn::TransportConfig> {
+/// Непредставимый `idle_timeout` это ошибка конфигурации, а не молчаливое «без таймаута».
+pub(crate) fn pre_auth_transport(
+    cfg: &QuinnConfig,
+    role: Role,
+) -> Result<Arc<quinn::TransportConfig>, TlsError> {
     let mut t = quinn::TransportConfig::default();
     let bidi = match role {
         Role::Server => 1,
@@ -53,9 +57,10 @@ pub(crate) fn pre_auth_transport(cfg: &QuinnConfig, role: Role) -> Arc<quinn::Tr
     t.max_concurrent_uni_streams(VarInt::from_u32(0));
     t.datagram_receive_buffer_size(None);
     t.receive_window(VarInt::from_u32(cfg.preauth_receive_window));
-    t.max_idle_timeout(IdleTimeout::try_from(cfg.idle_timeout).ok());
+    let idle = IdleTimeout::try_from(cfg.idle_timeout).map_err(|_| TlsError)?;
+    t.max_idle_timeout(Some(idle));
     t.keep_alive_interval(Some(cfg.keep_alive));
-    Arc::new(t)
+    Ok(Arc::new(t))
 }
 
 /// Резолвер базового конфига гнезда: всегда отказ. Случайный `Incoming::accept()` даёт
@@ -89,7 +94,7 @@ pub(crate) fn quic_server(
 ) -> Result<quinn::ServerConfig, TlsError> {
     let quic = QuicServerConfig::try_from(Arc::new(sc)).map_err(|_| TlsError)?;
     let mut server = quinn::ServerConfig::with_crypto(Arc::new(quic));
-    server.transport_config(pre_auth_transport(cfg, Role::Server));
+    server.transport_config(pre_auth_transport(cfg, Role::Server)?);
     let mut tokens = ValidationTokenConfig::default();
     tokens.sent(sent).log(Arc::new(NoneTokenLog));
     server.validation_token_config(tokens);
