@@ -1,0 +1,10 @@
+FC@na host=ha expected=EIM/EIF got=EIM/EIF ok=1 attempts=1 ext=198.51.100.10:4433 ext_r1b=198.51.100.10:4433 ext_r2=198.51.100.10:4433 r1b_reply=1 r2_reply=1
+AR@na host=ha expected=EIM/ADF got=EIM/ADF ok=1 attempts=1 ext=198.51.100.10:4433 ext_r1b=198.51.100.10:4433 ext_r2=198.51.100.10:4433 r1b_reply=1 r2_reply=0
+PR@na host=ha expected=EIM/APDF got=EIM/APDF ok=1 attempts=1 ext=198.51.100.10:4433 ext_r1b=198.51.100.10:4433 ext_r2=198.51.100.10:4433 r1b_reply=0 r2_reply=0
+SYM@na host=ha expected=EDM/APDF got=EDM/APDF ok=1 attempts=1 ext=198.51.100.10:39738 ext_r1b=198.51.100.10:54291 ext_r2=198.51.100.10:6117 r1b_reply=0 r2_reply=0
+FC@nb host=hb expected=EIM/EIF got=EIM/EIF ok=1 attempts=1 ext=198.51.100.30:4433 ext_r1b=198.51.100.30:4433 ext_r2=198.51.100.30:4433 r1b_reply=1 r2_reply=1
+AR@nb host=hb expected=EIM/ADF got=EIM/ADF ok=1 attempts=1 ext=198.51.100.30:4433 ext_r1b=198.51.100.30:4433 ext_r2=198.51.100.30:4433 r1b_reply=1 r2_reply=0
+PR@nb host=hb expected=EIM/APDF got=EIM/APDF ok=1 attempts=1 ext=198.51.100.30:4433 ext_r1b=198.51.100.30:4433 ext_r2=198.51.100.30:4433 r1b_reply=0 r2_reply=0
+SYM@nb host=hb expected=EDM/APDF got=EDM/APDF ok=1 attempts=1 ext=198.51.100.30:34051 ext_r1b=198.51.100.30:13951 ext_r2=198.51.100.30:33002 r1b_reply=0 r2_reply=0
+CG-EIM@hc host=hc expected=EIM/APDF got=EIM/APDF ok=1 attempts=1 ext=198.51.100.40:4433 ext_r1b=198.51.100.40:4433 ext_r2=198.51.100.40:4433 r1b_reply=0 r2_reply=0
+CG-SYM@hc host=hc expected=EDM/APDF got=EDM/APDF ok=1 attempts=1 ext=198.51.100.40:30455 ext_r1b=198.51.100.40:63948 ext_r2=198.51.100.40:3113 r1b_reply=0 r2_reply=0

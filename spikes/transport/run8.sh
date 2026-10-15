@@ -917,6 +917,292 @@ g7() {
   return 0
 }
 
+# ---------------------------------------------------------------- части 4-5: типы NAT, G6, G4
+NATD="$L8/natcheck"
+G6D="$L8/g6"
+G4D="$L8/g4"
+
+wait_ev() { # лог имя-события [сек]
+  local i; for i in $(seq 1 $((${3:-5} * 10))); do grep -q "^EVENT $2 " "$1" 2>/dev/null && return 0; sleep 0.1; done; return 1
+}
+
+nat_lh() { # ns → NAT_L NAT_H (lan-подсеть, внутренний хост:порт)
+  case "$1" in
+    na) NAT_L=192.168.10.0/24; NAT_H=192.168.10.2:4433 ;;
+    nb) NAT_L=192.168.30.0/24; NAT_H=192.168.30.2:4433 ;;
+    *) NAT_L=; NAT_H= ;;
+  esac
+}
+
+# Применить тип к NAT: тип (FC|AR|PR|SYM|CG-EIM|CG-SYM|-) ns. Остальные NAT остаются PR (nat_flush_all).
+nat_apply() {
+  local t="$1" ns="$2"
+  case "$t" in
+    -) : ;;
+    CG-EIM) nat_load cg PR 100.64.0.0/10 100.64.0.2:4433 ;;
+    CG-SYM) nat_load cg SYM 100.64.0.0/10 100.64.0.2:4433 ;;
+    *) nat_lh "$ns"; nat_load "$ns" "$t" "$NAT_L" "$NAT_H" ;;
+  esac
+}
+
+nat_expect() {
+  case "$1" in
+    FC) echo EIM/EIF ;; AR) echo EIM/ADF ;; PR) echo EIM/APDF ;; SYM) echo EDM/APDF ;;
+    CG-EIM) echo EIM/APDF ;; CG-SYM) echo EDM/APDF ;; *) echo "?" ;;
+  esac
+}
+
+# ключ типа: ТИП@узел; узел: na|nb (хост ha|hb) или hc (CG: тип на cg, зонд из hc)
+key_host() { case "$1" in *@na) echo ha ;; *@nb) echo hb ;; *@hc) echo hc ;; esac; }
+key_type() { echo "${1%@*}"; }
+key_ns() { local n="${1#*@}"; [[ "$n" == hc ]] && echo cg || echo "$n"; }
+
+nat8_prepare() { # каталог логов
+  nat_setup; ensure_keys
+  spk8_bg "$1/reflect" m reflect --bind "$CORE.100:7001,$CORE.100:7002,$CORE.101:7001"
+  REFL_REAL="$BG_REAL"; REFL_WRAP="$BG_WRAP"
+  wait_ev "$1/reflect.log" reflect_bound 5 || log "отражатель не поднялся: $(cat "$1/reflect.err" 2>/dev/null)"
+}
+nat8_finish() { # nftsnap метка
+  kill "$REFL_REAL" 2>/dev/null || true; { wait "$REFL_WRAP"; } 2>/dev/null || true
+  nat_teardown; trap - EXIT
+  host_nft_check "$1" "$2" || true
+  stand_clean_check "$2" || true
+}
+
+types_get() { # ключ поле
+  grep "^$1 " "$NATD/types.txt" 2>/dev/null | sed -n "s/.* $2=\([^ ]*\).*/\1/p" | head -n1
+}
+
+# ---- часть 4a: контроль эмуляции типов NAT
+natcheck() {
+  set +e
+  local D="$NATD"; rm -rf "$D"; mkdir -p "$D"
+  [[ -x "$SPK" ]] || do_build
+  header_txt "$D/header.txt"
+  local nftsnap="$D/nft-host-before.txt"; host_nft_snapshot "$nftsnap"
+  trap 'nat_teardown' EXIT
+  nat8_prepare "$D"
+  : > "$D/types.txt"
+  local key
+  for key in FC@na AR@na PR@na SYM@na FC@nb AR@nb PR@nb SYM@nb CG-EIM@hc CG-SYM@hc; do
+    local t ns host exp got ok=0 att line mapping filtering
+    t="$(key_type "$key")"; ns="$(key_ns "$key")"; host="$(key_host "$key")"; exp="$(nat_expect "$t")"
+    got="-"; line=""
+    for att in 1 2; do
+      nat_flush_all; nat_apply "$t" "$ns"
+      nsx8 "$ns" nft list ruleset > "$D/nft-$key-$att.txt" 2>&1
+      spk8 "$host" "$SPK" natprobe --local 0.0.0.0:4433 --r1a "$CORE.100:7001" --r1b "$CORE.100:7002" --r2 "$CORE.101:7001" > "$D/probe-$key-$att.log" 2> "$D/probe-$key-$att.err"
+      line="$(grep '^EVENT nat_probe ' "$D/probe-$key-$att.log" | head -1)"
+      mapping="$(echo "$line" | kv mapping)"; filtering="$(echo "$line" | kv filtering)"
+      got="${mapping:--}/${filtering:--}"
+      # правда с NAT: conntrack (внешний NAT) после зонда
+      nsx8 "$ns" conntrack -L -p udp > "$D/ct-$key-$att.txt" 2>&1
+      if [[ "$got" == "$exp" ]]; then ok=1; break; fi
+    done
+    local ext r1b r2 rb r2r
+    ext="$(echo "$line" | kv ext)"; r1b="$(echo "$line" | kv ext_r1b)"; r2="$(echo "$line" | kv ext_r2)"
+    rb="$(echo "$line" | kv r1b_reply)"; r2r="$(echo "$line" | kv r2_reply)"
+    echo "$key host=$host expected=$exp got=$got ok=$ok attempts=$att ext=${ext:--} ext_r1b=${r1b:--} ext_r2=${r2:--} r1b_reply=${rb:--} r2_reply=${r2r:--}" >> "$D/types.txt"
+    local note="ожидали $exp, получили $got, попыток $att; внешний адрес хоста по R1a: ${ext:--} (R1b ${r1b:--}, R2 ${r2:--}); ответ с R1b: ${rb:--}, с R2: ${r2r:--}"
+    if [[ $key == FC@* ]]; then note+="; FC = проброс одного порта на одного хоста (не общий full cone)"; fi
+    if [[ $ok == 1 ]]; then verdict NAT "$key" OK "$D/probe-$key-$att.log" "контроль типа прошёл: $note"
+    else verdict NAT "$key" INCONCLUSIVE "$D/probe-$key-$att.log" "контроль типа НЕ прошёл дважды, строки G4/G6 с этим типом INCONCLUSIVE: $note"; fi
+  done
+  cp "$D/types.txt" "$D/types.final.txt"
+  nat8_finish "$nftsnap" natcheck
+}
+
+# ---- часть 4b: G6 наблюдаемый адрес
+ct_reply_ext() { # файл conntrack, внешний-адрес-пира → ip:port адрес, под которым пир видит хоста (reply dst:dport)
+  awk -v peer="$2" '
+    { n=0; m=0; split("",D); split("",P);
+      for (i=1;i<=NF;i++) { if ($i ~ /^dst=/) { n++; D[n]=substr($i,5) } if ($i ~ /^dport=/) { m++; P[m]=substr($i,7) } }
+      if (n>=2 && D[1]==peer && P[1]==4433) { print D[2] ":" P[2]; exit } }' "$1"
+}
+
+g6() {
+  set +e
+  local D="$G6D"; rm -rf "$D"; mkdir -p "$D"
+  [[ -x "$SPK" ]] || do_build
+  [[ -s "$NATD/types.txt" ]] || { log "нет $NATD/types.txt: сначала run8.sh natcheck"; return 1; }
+  header_txt "$D/header.txt"
+  local nftsnap="$D/nft-host-before.txt"; host_nft_snapshot "$nftsnap"
+  trap 'nat_teardown' EXIT
+  nat8_prepare "$D"
+  mkdir -p "$SHM/g6rx"
+  spk8_bg "$D/recv" w recv --listen 0.0.0.0:4433 --pairs "$STATE" --out-dir "$SHM/g6rx" --max-bytes 1000000
+  local rr="$BG_REAL" rw="$BG_WRAP"
+  wait_bound "$D/recv.log" 5 || log "recv не поднялся"
+  local key
+  for key in FC@na AR@na PR@na SYM@na CG-EIM@hc CG-SYM@hc; do
+    local t ns host ok M
+    t="$(key_type "$key")"; ns="$(key_ns "$key")"; host="$(key_host "$key")"
+    ok="$(types_get "$key" ok)"; M="$(types_get "$key" ext)"
+    if [[ "$ok" != 1 ]]; then
+      verdict G6 "$key" INCONCLUSIVE "$NATD/types.txt" "контроль типа NAT $key не прошёл (natcheck), G6 для него не оценивается"; continue
+    fi
+    nat_flush_all; nat_apply "$t" "$ns"
+    spk8 "$host" "$SPK" hello --connect "$CORE.50:4433" --local 0.0.0.0:4433 --pairs "$STATE" --pair 1 > "$D/hello-$key.log" 2> "$D/hello-$key.err"
+    local O; O="$(grep '^EVENT observed_by_peer ' "$D/hello-$key.log" | kv addr)"
+    nsx8 "$ns" conntrack -L -p udp > "$D/ct-$key.txt" 2>&1
+    local E; E="$(ct_reply_ext "$D/ct-$key.txt" "$CORE.50")"
+    local iface_addr="192.168.10.2" wan_home="-" ct_in=""
+    if [[ $host == hc ]]; then
+      iface_addr="192.168.40.2"; wan_home="100.64.0.2"
+      nsx8 nc conntrack -L -p udp > "$D/ct-$key-nc.txt" 2>&1
+      ct_in="$(ct_reply_ext "$D/ct-$key-nc.txt" "$CORE.50")"
+    fi
+    local om="нет"; [[ -n "$O" && "$O" == "$M" ]] && om="да"
+    local txt="O (адрес хоста, как видит пир w)=${O:--}; E (conntrack внешнего NAT ${ns})=${E:--}; M (маппинг к отражателю m, из natcheck)=${M:--}; O=M: $om; адрес интерфейса хоста $iface_addr"
+    [[ $host == hc ]] && txt+="; WAN домашнего роутера nc=$wan_home (conntrack nc: ответный адрес ${ct_in:--})"
+    if [[ -n "$O" && "$O" == "$E" ]]; then verdict G6 "$key" OK "$D/hello-$key.log" "$txt"
+    else verdict G6 "$key" INCONCLUSIVE "$D/hello-$key.log" "O != E (или нет данных), доклад: $txt"; fi
+  done
+  kill "$rr" 2>/dev/null || true; { wait "$rw"; } 2>/dev/null || true
+  rm -rf "$SHM/g6rx"
+  nat8_finish "$nftsnap" g6
+}
+
+# ---- часть 5: G4 одновременное открытие
+# Описание строки: A (звонящий первым, t0) и B (старт на 7 с позже). Поля: хост, ns NAT, тип, порт, ключ типа.
+g4_def() {
+  AH=ha; AN=na; AT=PR; AP=4433; AK=PR@na; BH=hb; BN=nb; BT=PR; BP=4433; BK=PR@nb; B_EXT_FIXED=""; NEED=""
+  case "$1" in
+    PR-W) BH=w; BN=-; BT=-; BK=W@w; B_EXT_FIXED="$CORE.50:4433" ;;
+    FC-FC) AT=FC; AK=FC@na; BT=FC; BK=FC@nb ;;
+    AR-AR) AT=AR; AK=AR@na; BT=AR; BK=AR@nb ;;
+    PR-PR) : ;;
+    PR-FC) BT=FC; BK=FC@nb ;;
+    CGEIM-PR) AH=hc; AN=cg; AT=CG-EIM; AK=CG-EIM@hc ;;
+    SYM-FC) AT=SYM; AK=SYM@na; BT=FC; BK=FC@nb ;;
+    SYM-AR) AT=SYM; AK=SYM@na; BT=AR; BK=AR@nb ;;
+    SYM-PR) AT=SYM; AK=SYM@na; BT=PR; BK=PR@nb ;;
+    SYM-SYM) AT=SYM; AK=SYM@na; BT=SYM; BK=SYM@nb ;;
+    CGSYM-PR) AH=hc; AN=cg; AT=CG-SYM; AK=CG-SYM@hc ;;
+    hairpin) BH=ha2; BN=na; BT=PR; BP=4434; BK=PR@na; B_EXT_FIXED="HAIRPIN" ;;
+    *) return 1 ;;
+  esac
+  NEED="$AK"; [[ "$BK" != W@w ]] && NEED="$NEED $BK"
+}
+
+g4_attempt() { # режим строка повтор → G4_ST G4_MS G4_DIR G4_NOTE
+  local mode="$1" row="$2" rep="$3" p="$G4D/$mode-$row-$rep"
+  nat_flush_all; nat_apply "$AT" "$AN"
+  [[ $row == hairpin ]] || nat_apply "$BT" "$BN"
+  local aext bext
+  aext="$(types_get "$AK" ext)"; bext="$(types_get "$BK" ext)"
+  [[ -n "$B_EXT_FIXED" && "$B_EXT_FIXED" != HAIRPIN ]] && bext="$B_EXT_FIXED"
+  [[ "$B_EXT_FIXED" == HAIRPIN ]] && bext="$CORE.10:4434"
+  local ahostlabel="$AH" aargs bargs tag rdvr="" rdvw=""
+  tag="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  if [[ $mode == sync ]]; then
+    spk8_bg "$p.rdv" m rdv --listen "$CORE.100:7100"
+    rdvr="$BG_REAL"; rdvw="$BG_WRAP"
+    wait_ev "$p.rdv.log" rdv_bound 5 || true
+    aargs=(--mode sync --rdv "$CORE.100:7100" --tag "$tag" --side 1)
+    bargs=(--mode sync --rdv "$CORE.100:7100" --tag "$tag" --side 2)
+  else
+    aargs=(--mode periodic --peer "$bext" --interval-s 5 --attempt-s 10 --deadline-s 40)
+    bargs=(--mode periodic --peer "$aext" --interval-s 5 --attempt-s 10 --deadline-s 40)
+  fi
+  : > "$p.cap-note"
+  spk8_bg "$p.A" "$AH" punch --local "0.0.0.0:$AP" --pairs "$STATE" --pair 1 "${aargs[@]}"
+  local areal="$BG_REAL" awrap="$BG_WRAP"
+  sleep 7
+  spk8_bg "$p.B" "$BH" punch --local "0.0.0.0:$BP" --pairs "$STATE" --pair 2 "${bargs[@]}"
+  local breal="$BG_REAL" bwrap="$BG_WRAP" i
+  for i in $(seq 1 800); do
+    kill -0 "$areal" 2>/dev/null || kill -0 "$breal" 2>/dev/null || break
+    sleep 0.1
+  done
+  kill "$areal" "$breal" 2>/dev/null || true
+  { wait "$awrap"; } 2>/dev/null || true; { wait "$bwrap"; } 2>/dev/null || true
+  if [[ -n "$rdvr" ]]; then kill "$rdvr" 2>/dev/null || true; { wait "$rdvw"; } 2>/dev/null || true; fi
+  nsx8 na conntrack -L -p udp > "$p.ct-na.txt" 2>&1; nsx8 nb conntrack -L -p udp > "$p.ct-nb.txt" 2>&1
+  local aok bok afail bfail as bs
+  aok="$(grep '^EVENT punch_ok ' "$p.A.log" | head -1)"; bok="$(grep '^EVENT punch_ok ' "$p.B.log" | head -1)"
+  afail="$(grep -c '^EVENT punch_fail ' "$p.A.log")"; bfail="$(grep -c '^EVENT punch_fail ' "$p.B.log")"
+  as="$(grep '^EVENT punch_start ' "$p.A.log" | kv epoch_ms)"; bs="$(grep '^EVENT punch_start ' "$p.B.log" | kv epoch_ms)"
+  local att_a att_b; att_a="$(grep -c '^EVENT punch_attempt ' "$p.A.log")"; att_b="$(grep -c '^EVENT punch_attempt ' "$p.B.log")"
+  G4_NOTE="известные адреса: A видит B как $bext, B видит A как $aext; попыток A/B: $att_a/$att_b"
+  if [[ -n "$aok" || -n "$bok" ]]; then
+    local ams adir bms bdir
+    ams="$(echo "$aok" | kv ms)"; adir="$(echo "$aok" | kv dir)"; bms="$(echo "$bok" | kv ms)"; bdir="$(echo "$bok" | kv dir)"
+    if [[ $mode == periodic ]]; then
+      # от старта B: первый auth_ok с любой стороны
+      G4_MS="$(awk -v as="${as:-0}" -v am="${ams:--1}" -v bs="${bs:-0}" -v bm="${bms:--1}" 'BEGIN{ best=-1;
+        if (am>=0) { t=as+am-bs; best=t } if (bm>=0) { t=bm; if (best<0 || t<best) best=t } printf "%d", best }')"
+    else
+      local ga gb da db
+      da="$(grep '^EVENT punch_go ' "$p.A.log" | kv delay_ms)"; db="$(grep '^EVENT punch_go ' "$p.B.log" | kv delay_ms)"
+      G4_MS="$(awk -v am="${ams:--1}" -v bm="${bms:--1}" -v da="${da:-0}" -v db="${db:-0}" 'BEGIN{ best=-1;
+        if (am>=0) best=am+da; if (bm>=0 && (best<0 || bm+db<best)) best=bm+db; printf "%d", best }')"
+    fi
+    local ab=0 ba=0
+    [[ "$adir" == out || "$adir" == both || "$bdir" == in || "$bdir" == both ]] && ab=1
+    [[ "$bdir" == out || "$bdir" == both || "$adir" == in || "$adir" == both ]] && ba=1
+    if [[ $ab == 1 && $ba == 1 ]]; then G4_DIR=both; elif [[ $ab == 1 ]]; then G4_DIR=AB; else G4_DIR=BA; fi
+    G4_ST=OK; G4_NOTE="$G4_NOTE; A dir=${adir:--} ms=${ams:--}, B dir=${bdir:--} ms=${bms:--}"
+  elif [[ $afail -ge 1 && $bfail -ge 1 ]]; then
+    G4_ST=NO; G4_MS="-"; G4_DIR="-"
+  else
+    G4_ST=ERR; G4_MS="-"; G4_DIR="-"
+    G4_NOTE="$G4_NOTE; сбой запуска: A.err=$(head -c 150 "$p.A.err" | tr '\n' ' ') B.err=$(head -c 150 "$p.B.err" | tr '\n' ' ')"
+  fi
+}
+
+# serie: список строк, повторы, режимы periodic и sync
+g4_run() { # часть(a|b) повторы строки...
+  set +e
+  local part="$1" reps="$2"; shift 2
+  local rows=("$@")
+  local D="$G4D/$part"; G4D_BASE="$G4D"; rm -rf "$D"; mkdir -p "$D"
+  [[ -x "$SPK" ]] || do_build
+  [[ -s "$NATD/types.txt" ]] || { log "нет $NATD/types.txt: сначала run8.sh natcheck"; return 1; }
+  header_txt "$D/header.txt"
+  local nftsnap="$D/nft-host-before.txt"; host_nft_snapshot "$nftsnap"
+  trap 'nat_teardown' EXIT
+  local t_all0; t_all0="$(date +%s)"
+  nat8_prepare "$D"
+  local saveG4D="$G4D"; G4D="$D"
+  : > "$D/results.tsv"
+  local row mode rep
+  for row in "${rows[@]}"; do
+    g4_def "$row" || { log "строка $row?"; continue; }
+    local gate="" k
+    for k in $NEED; do [[ "$(types_get "$k" ok)" == 1 ]] || gate+="$k "; done
+    for mode in periodic sync; do
+      if [[ -n "$gate" ]]; then
+        verdict G4 "$mode/$row" INCONCLUSIVE "$NATD/types.txt" "контроль типа NAT не прошёл: $gate(natcheck), строка не прогонялась"; continue
+      fi
+      local elapsed=$(( $(date +%s) - t_all0 ))
+      if [[ $elapsed -gt 520 ]]; then
+        verdict G4 "$mode/$row" INCONCLUSIVE "$D/results.tsv" "не уложились в 600 с подкоманды (прошло $elapsed с): строка не прогонялась"; continue
+      fi
+      local st_list="" ms_list="" dir_list="" nok=0 nno=0 nerr=0 note=""
+      for rep in $(seq 1 "$reps"); do
+        g4_attempt "$mode" "$row" "$rep"
+        if [[ $G4_ST == ERR ]]; then nat_flush_all >/dev/null 2>&1; g4_attempt "$mode" "$row" "${rep}r"; fi
+        echo -e "$mode\t$row\t$rep\t$G4_ST\t$G4_MS\t$G4_DIR" >> "$D/results.tsv"
+        case "$G4_ST" in OK) nok=$((nok+1)); ms_list+="${G4_MS}мс/${G4_DIR} " ;; NO) nno=$((nno+1)); ms_list+="NO " ;; *) nerr=$((nerr+1)); ms_list+="ERR " ;; esac
+        note="$G4_NOTE"
+        log "G4 $mode/$row #$rep: $G4_ST $G4_MS $G4_DIR"
+      done
+      local unit="от старта B"; [[ $mode == sync ]] && unit="от GO (с задержкой 500 мс)"
+      local path="$D/$mode-$row-1.A.log"
+      if [[ $nerr -gt 0 ]]; then verdict G4 "$mode/$row" INCONCLUSIVE "$path" "сбой стенда в $nerr из $reps; результаты: $ms_list| $note"
+      elif [[ $nok == "$reps" ]]; then verdict G4 "$mode/$row" OK "$path" "OK [$ms_list] время $unit; повторов $reps; $note"
+      elif [[ $nno == "$reps" ]]; then verdict G4 "$mode/$row" NO "$path" "NO во всех $reps; $note"
+      else verdict G4 "$mode/$row" DONE "$path" "нестабильно: OK $nok из $reps [$ms_list] время $unit; $note"; fi
+    done
+  done
+  G4D="$saveG4D"
+  nat8_finish "$nftsnap" "g4$part"
+}
+g4a() { g4_run a 2 PR-W FC-FC AR-AR PR-PR PR-FC CGEIM-PR; }
+g4b() { g4_run b 1 SYM-FC SYM-AR SYM-PR SYM-SYM CGSYM-PR hairpin; }
+
 main() {
   case "$CMD" in
     install) do_install ;;
@@ -924,6 +1210,10 @@ main() {
     g8) g8 ;;
     g5) g5 ;;
     g7) g7 ;;
+    natcheck) natcheck ;;
+    g6) g6 ;;
+    g4a) g4a ;;
+    g4b) g4b ;;
     natup) nat_setup; echo "стенд NAT поднят (отладка)" >&2 ;;
     natdown) nat_teardown ;;
     teardown) bash "$RUNSH" teardown b ;;

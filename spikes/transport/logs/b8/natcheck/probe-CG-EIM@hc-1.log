@@ -1,0 +1,1 @@
+EVENT nat_probe t=6011 mapping=EIM filtering=APDF ext=198.51.100.40:4433 ext_r1b=198.51.100.40:4433 ext_r2=198.51.100.40:4433 r1b_reply=0 r2_reply=0
