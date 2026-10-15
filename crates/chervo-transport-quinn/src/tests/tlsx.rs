@@ -99,7 +99,13 @@ fn verifier_ed25519_only() {
     ));
     // непустая цепочка отвергается
     let name = ServerName::try_from(crate::SERVER_NAME).unwrap();
-    let r = v.verify_server_cert(&cert, &[cert.clone()], &name, &[], UnixTime::now());
+    let r = v.verify_server_cert(
+        &cert,
+        std::slice::from_ref(&cert),
+        &name,
+        &[],
+        UnixTime::now(),
+    );
     assert!(r.is_err());
     let r = v.verify_server_cert(&cert, &[], &name, &[], UnixTime::now());
     assert!(r.is_ok());

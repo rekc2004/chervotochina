@@ -251,9 +251,8 @@ impl QuinnTransport {
     }
 
     pub fn shutdown(&self) {
-        self.inner
-            .endpoint
-            .close(quinn::VarInt::from_u32(CLOSE_REFUSED), b"");
+        // Обычное закрытие: код 0, тот же, что у отказа (сверяется тестом `config_defaults_match_spec`).
+        self.inner.endpoint.close(quinn::VarInt::from_u32(0), b"");
     }
 }
 

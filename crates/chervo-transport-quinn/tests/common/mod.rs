@@ -156,3 +156,13 @@ pub fn pattern(n: usize) -> Vec<u8> {
         .map(|i| (i.wrapping_mul(31) ^ (i >> 8)) as u8)
         .collect()
 }
+
+/// Незнакомец, выдающий себя за пару `pid`: свои секреты.
+pub fn stranger_peer(pid: PairId) -> KxPeer {
+    make_pair_with(pid).0
+}
+
+pub fn median<T: Ord + Copy>(v: &mut [T]) -> T {
+    v.sort();
+    v[v.len() / 2]
+}

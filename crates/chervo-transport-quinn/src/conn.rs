@@ -8,7 +8,7 @@ use chervo_transport::{Connection, RecvStream, SendStream, TransportError};
 use quinn::VarInt;
 use zeroize::Zeroizing;
 
-use crate::{CLOSE_DUPLICATE, CLOSE_REFUSED, EKM_CONTEXT, EKM_LABEL};
+use crate::{CLOSE_DUPLICATE, EKM_CONTEXT, EKM_LABEL};
 
 /// Значение экспортёра TLS этого соединения. Единственное место вызова экспортёра.
 pub(crate) fn ekm(conn: &quinn::Connection) -> Result<Zeroizing<[u8; BINDING_LEN]>, ()> {
@@ -27,7 +27,7 @@ pub(crate) fn binding(conn: &quinn::Connection) -> Result<ChannelBinding, ()> {
 
 /// Единый отказ на любую неудачу до подтверждения пары: код и пустая причина, ни одного байта.
 pub(crate) fn refuse(conn: &quinn::Connection) {
-    conn.close(VarInt::from_u32(CLOSE_REFUSED), b"");
+    conn.close(VarInt::from_u32(crate::CLOSE_REFUSED), b"");
 }
 
 /// Проигравшее дубликат соединение (только аутентифицированному собеседнику).
