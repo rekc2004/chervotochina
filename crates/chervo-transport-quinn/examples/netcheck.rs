@@ -52,9 +52,7 @@ impl SecretStore for FileStore {
     }
 
     fn write(&self, pair: &PairId, blob: &[u8]) -> Result<(), IdentityError> {
-        let p = self.path(pair);
-        fs::write(&p, blob).map_err(|_| IdentityError::StorageUnavailable)?;
-        private(&p).map_err(|_| IdentityError::StorageUnavailable)
+        write_secret(&self.path(pair), blob).map_err(|_| IdentityError::StorageUnavailable)
     }
 
     fn delete(&self, pair: &PairId) -> Result<(), IdentityError> {
@@ -66,20 +64,34 @@ impl SecretStore for FileStore {
     }
 }
 
-#[cfg(unix)]
-fn private(p: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(p, fs::Permissions::from_mode(0o600))
-}
-
-#[cfg(not(unix))]
-fn private(_p: &Path) -> std::io::Result<()> {
-    Ok(())
+/// Секрет сразу с правами 0600 (unix): файл создаётся новым (`create_new`) с этим режимом, без
+/// окна, когда он читаем всеми. Запись идёт во временный файл рядом и переименовывается поверх.
+fn write_secret(p: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut tmp = p.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    match fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(&tmp)?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    drop(f);
+    fs::rename(&tmp, p)
 }
 
 fn write_private(p: &Path, text: &str) -> Res<()> {
-    fs::write(p, text).map_err(|e| format!("write: {e}"))?;
-    private(p).map_err(|e| format!("chmod: {e}"))
+    write_secret(p, text.as_bytes()).map_err(|e| format!("write: {e}"))
 }
 
 fn hex(b: &[u8]) -> String {
@@ -127,7 +139,8 @@ fn keygen(dir: &Path) -> Res<()> {
         }
     }
     needles.push("server_name str chervo.invalid".to_string());
-    write_private(&dir.join("needles.txt"), &needles.join("\n"))?;
+    // завершающий перевод строки обязателен: иначе построчный разбор склеит последнюю иглу
+    write_private(&dir.join("needles.txt"), &(needles.join("\n") + "\n"))?;
     ev("keygen_ok", &format!("pairs={PAIRS}"));
     Ok(())
 }
