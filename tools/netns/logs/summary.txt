@@ -1,2 +1,3 @@
 G1 PASS logs/g1 dns=0 other=0 portmap=0 fwd_drop=0, кортежи вне списка пусты, peer>0 у обеих сторон, auth_ok side=c, app_ok echo_eq=1, after_idle conn_alive=1 probe_ok=1, addr_changed>=1 у сервера
 G12 PASS logs/g12/observe.txt совпадений нет; положительные контроли выполнены
+KNOCK PASS logs/knock/result.txt ноль пакетов с адреса сервера при noise, stranger, stale, replay, flood (захват на veth b); друг: auth_ok side=c, app_ok echo_eq=1; контроль при --no-knock: ответы есть

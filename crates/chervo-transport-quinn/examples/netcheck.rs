@@ -6,7 +6,8 @@
 //!   connect --dir D --to ADDR [--pair N] [--bytes N] [--duration S] [--idle-s S] [--change-addr-at S]
 //!   probe   --dir D --to ADDR --mode noise|stranger|stale|replay|flood
 //!   timesync [--servers a,b,c] [--timeout-ms N]   (только по явному запуску; сеть не нужна стенду)
-//! К `listen` и `connect` добавляется `--clock-offset-ms N` (поправка часов для стука).
+//! К `listen` и `connect` добавляется `--clock-offset-ms N` (поправка часов для стука);
+//! `listen --no-knock` только для положительного контроля стенда.
 //!
 //! Печатает только строки `EVENT <имя> key=value` без IP, ключей, PairId и экспортёра.
 //! Файловое хранилище секретов здесь допустимо только как часть инструмента: файлы 0600
@@ -198,11 +199,14 @@ async fn echo(conn: QuinnConn) {
     }
 }
 
-async fn listen(dir: &Path, addr: SocketAddr, offset_ms: i64) -> Res<()> {
-    let t = Arc::new(
-        QuinnTransport::bind(addr, QuinnConfig::default(), Arc::new(AllowAll))
-            .map_err(|e| e.to_string())?,
-    );
+async fn listen(dir: &Path, addr: SocketAddr, offset_ms: i64, no_knock: bool) -> Res<()> {
+    // `--no-knock` только для положительного контроля стенда: порт отвечает всем
+    let cfg = QuinnConfig {
+        knock_required: !no_knock,
+        ..QuinnConfig::default()
+    };
+    let t =
+        Arc::new(QuinnTransport::bind(addr, cfg, Arc::new(AllowAll)).map_err(|e| e.to_string())?);
     t.set_clock_offset(offset_ms);
     let mut peers = Vec::new();
     for n in 1..=PAIRS {
@@ -326,23 +330,38 @@ async fn probe(conn: &QuinnConn) -> bool {
 }
 
 async fn client(dir: &Path, o: Opts) -> Res<()> {
-    let t = QuinnTransport::bind(
-        "0.0.0.0:0".parse().map_err(|_| "addr".to_string())?,
-        QuinnConfig::default(),
-        Arc::new(AllowAll),
-    )
-    .map_err(|e| e.to_string())?;
+    let t = Arc::new(
+        QuinnTransport::bind(
+            "0.0.0.0:0".parse().map_err(|_| "addr".to_string())?,
+            QuinnConfig::default(),
+            Arc::new(AllowAll),
+        )
+        .map_err(|e| e.to_string())?,
+    );
     t.set_clock_offset(o.offset_ms);
     t.set_peers(vec![load_peer(dir, 'a', o.pair)?]);
     let pid = pair_id(dir, o.pair)?;
     let started = Instant::now();
     if let Some(s) = o.change_addr_at {
+        // Приложение, заметив смену адреса, переходит на новое гнездо (`rebind`): при включённом
+        // стуке собеседник отбрасывает пакеты с нового адреса, пока не получит стук (его шлёт
+        // `rebind`). Без `rebind` соединение рвётся по idle (остаток спецификации 9б, U25).
+        let t = t.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(s)).await;
             ev(
                 "addr_change_mark",
                 &format!("t={}", started.elapsed().as_millis()),
             );
+            // сценарий меняет адрес сразу после метки; запас на применение
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            match std::net::UdpSocket::bind("0.0.0.0:0") {
+                Ok(sock) => match t.rebind(sock) {
+                    Ok(()) => ev("rebind_done", ""),
+                    Err(_) => ev("rebind_failed", ""),
+                },
+                Err(_) => ev("rebind_failed", ""),
+            }
         });
     }
     let conn = match t
@@ -571,7 +590,7 @@ async fn main() {
                 let a: SocketAddr = req(&args, "--listen")?
                     .parse()
                     .map_err(|_| "--listen".to_string())?;
-                listen(&dir, a, offset_ms).await
+                listen(&dir, a, offset_ms, args.iter().any(|x| x == "--no-knock")).await
             }
             "probe" => {
                 let to: SocketAddr = req(&args, "--to")?

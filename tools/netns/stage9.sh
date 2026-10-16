@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Стенд netns этапа 9: повтор G1 (нет трафика к третьим сторонам) и G12 (что видит наблюдатель) на адаптере
-# chervo-transport-quinn. Использование: sudo bash tools/netns/stage9.sh <g1|g12|all|teardown>
+# Стенд netns этапов 9 и 9б: повтор G1 (нет трафика к третьим сторонам) и G12 (что видит наблюдатель) на адаптере
+# chervo-transport-quinn, сценарий knock (порт молчит для чужих). Использование:
+#   sudo bash tools/netns/stage9.sh <g1|g12|knock|all|teardown>
+# Каталог логов можно сменить: CHV_LOGS=/путь (по умолчанию tools/netns/logs).
 # Функции стенда (do_teardown, veth, addr4, addr6, route6, do_setup, nft_router, nft_host, bg_start, bg_stop,
 # cap_start, cap_stop, gate_begin, gate_end, cnt, evl, evn, kv, net_fail, peer_zero, verdict) скопированы из
 # spikes/transport/run.sh@1528c43 без изменений, кроме пути к analyze_g1.sh ($ANALYZE вместо $ROOT/analyze_g1.sh).
@@ -15,7 +17,7 @@ SPIKE="$REPO/spikes/transport"
 ANALYZE="$SPIKE/analyze_g1.sh"
 OBS="$SPIKE/target/spike-bin/g12-observe"
 STATE="${CHV_STATE:-/tmp/chervo-stage9-state}"
-LOGS="$ROOT/logs"
+LOGS="${CHV_LOGS:-$ROOT/logs}"
 BIN="$STATE/bin"
 NETCHECK="$BIN/netcheck"
 PORT=4433
@@ -269,6 +271,15 @@ verdict() { # G1 PASS evidence reason
 }
 
 # ---------------------------------------------------------------- общие помощники этапа 9
+ensure_ready_knock() {
+  [[ -x "$NETCHECK" ]] || do_build
+  ip netns list | grep -q '^chv-r\b' || do_setup
+  if [[ ! -f "$STATE/needles.txt" ]]; then
+    mkdir -p "$STATE"; chmod 700 "$STATE"
+    spk_in a "$NETCHECK" keygen --dir "$STATE" > /dev/null
+  fi
+}
+
 ensure_ready() {
   [[ -x "$NETCHECK" ]] || do_build
   [[ -x "$OBS" ]] || { log "нет $OBS: g12-observe собирается в spikes/transport (cargo build --release --locked)"; exit 3; }
@@ -373,6 +384,71 @@ g12() {
   esac
 }
 
+# ---------------------------------------------------------------- KNOCK (этап 9б)
+# Захват на veth b0: пакеты с адреса сервера B (udp, src host B) за время действий «чужого» и друга.
+B_IP="10.77.2.2"
+srv_start_opts() { # лог ns [доп. аргументы listen]
+  local lf="$1" ns="$2" i; shift 2
+  bg_start "$lf.pid" "$ns" sh -c 'exec env -i PATH="$PATH" "$@" >"$0" 2>"$0.err"' "$lf" "$NETCHECK" listen --dir "$STATE" --listen "$LISTEN" "$@"
+  SRV_PID="$BG_REAL"; SRV_WRAP="$BG_WRAP"
+  for i in $(seq 1 100); do
+    grep -q '^EVENT bound' "$lf" 2>/dev/null && return 0
+    kill -0 "$SRV_PID" 2>/dev/null || { log "сервер завершился: $(cat "$lf.err" 2>/dev/null)"; return 1; }
+    sleep 0.1
+  done
+  log "сервер не поднялся"; return 1
+}
+
+b_packets() { # pcap → число пакетов udp с адреса B
+  tcpdump -r "$1" -nn "udp and src host $B_IP" 2>/dev/null | wc -l
+}
+
+knock() {
+  ensure_ready_knock
+  KD="$LOGS/knock"; rm -rf "$KD"; mkdir -p "$KD"
+  local tgt="$B_IP:$PORT" mode n f="" z="" cap
+  # 1. сервер со стуком; чужой по очереди во всех режимах, на каждый режим свой захват
+  srv_start_opts "$KD/server.log" b
+  for mode in noise stranger stale replay flood; do
+    cap="$KD/cap-$mode.pcap"
+    cap_start b "$cap" -i b0 -s 128 udp
+    spk_in a "$NETCHECK" probe --dir "$STATE" --to "$tgt" --mode "$mode" > "$KD/probe-$mode.log" 2> "$KD/probe-$mode.err" || true
+    cap_stop
+    n="$(b_packets "$cap")"
+    echo "mode=$mode b_packets=$n" >> "$KD/result.txt"
+    [[ "$n" == 0 ]] || f+="${mode}_b_packets=$n "
+    evl "$KD/probe-$mode.log" probe_done | grep -q "connect=TimedOut" || f+="${mode}_connect_not_timedout "
+  done
+  # 2. друг соединяется (он же положительный контроль захвата: пакеты B видны)
+  cap="$KD/cap-friend.pcap"
+  cap_start b "$cap" -i b0 -s 128 udp
+  cli "$KD/friend.log" a --to "$tgt" --pair 1 --bytes 4096 --duration 1
+  sleep 0.5
+  cap_stop
+  n="$(b_packets "$cap")"
+  echo "friend b_packets=$n" >> "$KD/result.txt"
+  [[ "$n" -gt 0 ]] || z+="friend_capture_empty "
+  evl "$KD/friend.log" auth_ok | grep -q 'side=c' || f+="friend_no_auth_ok "
+  evl "$KD/friend.log" app_ok | grep -q 'echo_eq=1' || f+="friend_no_echo_eq "
+  sleep 1
+  { evl "$KD/server.log" stats | tail -n 1; } > "$KD/server-stats-last.txt"
+  srv_stop
+  # 3. положительный контроль: при --no-knock те же действия получают ответ
+  srv_start_opts "$KD/server-noknock.log" b --no-knock
+  cap="$KD/cap-control.pcap"
+  cap_start b "$cap" -i b0 -s 128 udp
+  spk_in a "$NETCHECK" probe --dir "$STATE" --to "$tgt" --mode noise > "$KD/probe-control.log" 2> "$KD/probe-control.err" || true
+  cap_stop
+  n="$(b_packets "$cap")"
+  echo "control(no-knock, noise) b_packets=$n" >> "$KD/result.txt"
+  [[ "$n" -gt 0 ]] || z+="control_no_reply "
+  srv_stop
+  if [[ -n "${f// /}" ]]; then verdict KNOCK FAIL "$KD/result.txt" "$f"
+  elif [[ -n "${z// /}" ]]; then verdict KNOCK INCONCLUSIVE "$KD/result.txt" "$z"
+  else verdict KNOCK PASS "$KD/result.txt" "ноль пакетов с адреса сервера при noise, stranger, stale, replay, flood (захват на veth b); друг: auth_ok side=c, app_ok echo_eq=1; контроль при --no-knock: ответы есть"
+  fi
+}
+
 # ---------------------------------------------------------------- вход
 need_privs() {
   [[ "$(id -u)" == 0 ]] || { echo "INCONCLUSIVE: нужен root (netns, nftables)" >&2; exit 3; }
@@ -385,6 +461,7 @@ case "$CMD" in
   teardown) need_privs; do_teardown ;;
   g1) need_privs; g1 ;;
   g12) need_privs; g12 ;;
-  all) need_privs; g1; g12; echo "--- $SUMMARY"; cat "$SUMMARY" ;;
-  *) echo "использование: stage9.sh <g1|g12|all|teardown>" >&2; exit 2 ;;
+  knock) need_privs; mkdirs; knock ;;
+  all) need_privs; g1; g12; knock; echo "--- $SUMMARY"; cat "$SUMMARY" ;;
+  *) echo "использование: stage9.sh <g1|g12|knock|all|teardown>" >&2; exit 2 ;;
 esac
