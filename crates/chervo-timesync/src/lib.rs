@@ -15,8 +15,10 @@
     clippy::todo
 )]
 
+use std::collections::HashSet;
 use std::fmt;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
+use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Серверы по умолчанию. `ru.pool.ntp.org`: [П] по ntppool.org/zone/ru; `vniiftri.ru`: [НП],
@@ -229,6 +231,14 @@ fn resolve_v4(name: &str) -> Option<SocketAddr> {
         .find(std::net::SocketAddr::is_ipv4)
 }
 
+/// Занять адрес сервера; `false`, если другое имя уже дало тот же адрес.
+fn claim(claimed: &Mutex<HashSet<SocketAddr>>, addr: SocketAddr) -> bool {
+    claimed
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(addr)
+}
+
 /// Свёртка ответов: допустимых не меньше порога, медиана, разброс, предел.
 fn aggregate(
     mut values: Vec<i64>,
@@ -270,7 +280,8 @@ fn aggregate(
 }
 
 /// Блокирующая синхронизация: параллельный опрос серверов (первый IPv4 каждого имени),
-/// медиана, проверки. Вызывать только по явному действию пользователя.
+/// медиана, проверки; повторяющиеся адреса считаются одним сервером (порог `min_valid` при этом
+/// считается по настроенным именам). Вызывать только по явному действию пользователя.
 pub fn sync_clock(cfg: &SyncConfig) -> Result<ClockOffset, SyncError> {
     let names: Vec<&str> = cfg
         .servers
@@ -282,13 +293,16 @@ pub fn sync_clock(cfg: &SyncConfig) -> Result<ClockOffset, SyncError> {
     if names.is_empty() {
         return Err(SyncError::NoServers);
     }
+    // Разные имена пула могут дать один сервер: каждый адрес опрашивается и учитывается один раз.
+    let claimed: Mutex<HashSet<SocketAddr>> = Mutex::new(HashSet::new());
     let results: Vec<(bool, Option<i64>)> = std::thread::scope(|scope| {
         let handles: Vec<_> = names
             .iter()
             .map(|name| {
+                let claimed = &claimed;
                 scope.spawn(move || match resolve_v4(name) {
-                    Some(addr) => (true, query_one(addr, cfg.timeout)),
-                    None => (false, None),
+                    Some(addr) if claim(claimed, addr) => (true, query_one(addr, cfg.timeout)),
+                    _ => (false, None),
                 })
             })
             .collect();

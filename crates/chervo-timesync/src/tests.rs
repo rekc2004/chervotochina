@@ -277,6 +277,65 @@ fn fake_server(
     (addr.to_string(), h)
 }
 
+/// Фиктивный сервер, отвечающий верно на `count` запросов подряд.
+fn fake_server_multi(ahead_ms: i64, count: usize) -> (String, thread::JoinHandle<usize>) {
+    let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+    sock.set_read_timeout(Some(Duration::from_millis(1500)))
+        .unwrap();
+    let addr = sock.local_addr().unwrap();
+    let h = thread::spawn(move || {
+        let mut answered = 0usize;
+        let mut buf = [0u8; 64];
+        while answered < count {
+            let Ok((n, from)) = sock.recv_from(&mut buf) else {
+                break;
+            };
+            assert_eq!(n, 48);
+            let mut b = [0u8; 48];
+            b[0] = 0x24;
+            b[1] = 2;
+            b[24..32].copy_from_slice(&buf[40..48]);
+            let t = ntp_now().wrapping_add(d_ms(ahead_ms));
+            b[32..40].copy_from_slice(&t.to_be_bytes());
+            b[40..48].copy_from_slice(&t.to_be_bytes());
+            let _ = sock.send_to(&b, from);
+            answered += 1;
+        }
+        answered
+    });
+    (addr.to_string(), h)
+}
+
+#[test]
+fn duplicate_server_addresses_count_once() {
+    // одно имя дважды: опрашивается и учитывается один раз
+    let (a1, h1) = fake_server_multi(1000, 2);
+    let cfg = SyncConfig {
+        servers: vec![a1.clone(), a1.clone()],
+        min_valid: 1,
+        timeout: Duration::from_millis(800),
+        ..SyncConfig::default()
+    };
+    let r = sync_clock(&cfg).unwrap();
+    assert_eq!((r.valid, r.queried), (1, 1), "дубликат учтён дважды");
+    assert_eq!(
+        h1.join().unwrap(),
+        1,
+        "сервер получил больше одного запроса"
+    );
+
+    // порог «два сервера» не выполняется одним сервером под двумя именами
+    let (a1, h1) = fake_server_multi(1000, 2);
+    let cfg = SyncConfig {
+        servers: vec![a1.clone(), a1],
+        min_valid: 2,
+        timeout: Duration::from_millis(800),
+        ..SyncConfig::default()
+    };
+    assert_eq!(sync_clock(&cfg).err(), Some(SyncError::TooFewValid));
+    assert_eq!(h1.join().unwrap(), 1);
+}
+
 #[test]
 fn sync_clock_loopback() {
     // два сервера впереди на 3 с (один сначала шлёт чужой ответ), допустимых 2
