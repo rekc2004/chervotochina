@@ -73,11 +73,12 @@ pub fn decode(text: &str) -> Result<Token, TokenError> {
         return Err(TokenError::BadEncoding);
     }
     // текст приглашения несёт гостевой секрет: копии обнуляются при выходе
-    let norm: Zeroizing<Vec<u8>> = Zeroizing::new(
+    // ёмкость задана заранее: collect() из фильтра перевыделял бы буфер и оставлял копии
+    let mut norm: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(text.len()));
+    norm.extend(
         text.bytes()
             .filter(|b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
-            .map(|b| b.to_ascii_uppercase())
-            .collect(),
+            .map(|b| b.to_ascii_uppercase()),
     );
     let (prefix, rest) = norm.split_at_checked(4).ok_or(TokenError::BadPrefix)?;
     let want_kind = if prefix == INVITE_PREFIX.as_bytes() {
