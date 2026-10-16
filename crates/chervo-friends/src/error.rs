@@ -18,6 +18,12 @@ pub enum FriendsError {
     KeyNeedsDecision,
     RandomUnavailable,
     BadRevocation,
+    StaleSeq,
+    BadAddrUpdate,
+    NoAddresses,
+    SeqExhausted,
+    RateLimited,
+    NotActive,
 }
 
 impl fmt::Display for FriendsError {
@@ -37,6 +43,12 @@ impl fmt::Display for FriendsError {
             Self::KeyNeedsDecision => "pair key needs a decision",
             Self::RandomUnavailable => "os random source unavailable",
             Self::BadRevocation => "bad revocation",
+            Self::StaleSeq => "address update is stale",
+            Self::BadAddrUpdate => "bad address update",
+            Self::NoAddresses => "no addresses to publish",
+            Self::SeqExhausted => "address update numbers exhausted",
+            Self::RateLimited => "address update rate limited",
+            Self::NotActive => "friend is not active",
         };
         f.write_str(text)
     }

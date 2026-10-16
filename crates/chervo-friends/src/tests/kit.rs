@@ -67,15 +67,18 @@ pub fn friend(i: u8) -> Friend {
                 source: AddrSource::Invite,
                 last_seen_unix: 11,
                 short_lived: false,
+                hint: false,
             },
             KnownAddr {
                 addr: addr("[2001:db8::1]:9"),
                 source: AddrSource::ObservedByFriend,
                 last_seen_unix: 22,
                 short_lived: true,
+                hint: false,
             },
         ],
         last_addr_seq: 7,
+        addr_seq_out: 9,
         added_at_unix: 1000 + u64::from(i),
     }
 }
@@ -118,6 +121,7 @@ pub fn same_friend(a: &Friend, b: &Friend) -> bool {
         && a.permission == b.permission
         && a.known_addrs == b.known_addrs
         && a.last_addr_seq == b.last_addr_seq
+        && a.addr_seq_out == b.addr_seq_out
         && a.added_at_unix == b.added_at_unix
 }
 

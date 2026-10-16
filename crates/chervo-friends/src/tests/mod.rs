@@ -9,4 +9,5 @@
 mod fuzz;
 mod kit;
 mod plain;
+mod seq;
 mod vault;

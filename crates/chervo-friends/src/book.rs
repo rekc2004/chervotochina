@@ -25,14 +25,18 @@
 use std::ffi::OsString;
 use std::fmt;
 use std::io::{ErrorKind, Write};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-use chervo_addr::KnownAddr;
+use chervo_addr::{Findability, KnownAddr, PublishSet};
 use chervo_identity::{
     IdentityError, KxPeer, KxPublicKey, LIST_KEY_LEN, ListKeyStore, PairId, PairKey, PublicKey,
     SecretStore, create, load,
 };
-use chervo_token::{RevocationReason, Token, decode, issue_revocation};
+use chervo_token::{
+    AddrUpdate, IssuedAddrUpdate, RevocationReason, SignedAddrUpdate, Token, TokenError, decode,
+    issue_addr_update, issue_revocation,
+};
 use zeroize::Zeroizing;
 
 use crate::plain::name_ok;
@@ -49,6 +53,37 @@ pub struct FriendBook {
     /// Подписанные отзывы, чей ключ пары уже удалён, а запись списка сохранить не удалось
     /// (по одному на пару). Повтор `remove`/`rekey` отдаёт этот текст. Только в памяти.
     unsent: Vec<(PairId, String)>,
+    /// Время последнего применённого обновления адреса по соединению (на пару). Только в памяти.
+    inband: Vec<(PairId, u64)>,
+}
+
+/// Минимальный интервал между принятыми обновлениями адреса по соединению для одной пары.
+pub const MIN_INBAND_UPDATE_INTERVAL_SECS: u64 = 10;
+/// Множитель времени в номере обновления: `seq >= now_unix * SEQ_TIME_SCALE` (номер переживает
+/// откат файла списка к копии, пока часы не ушли назад).
+const SEQ_TIME_SCALE: u64 = 1000;
+
+/// Следующий номер обновления: `max(prev + 1, now * 1000)`; `None` при переполнении `prev + 1`.
+pub(crate) fn next_seq(prev: u64, now_unix: u64) -> Option<u64> {
+    let step = prev.checked_add(1)?;
+    Some(step.max(now_unix.saturating_mul(SEQ_TIME_SCALE)))
+}
+
+/// Не больше `MAX_ADDRS_PER_FRIEND` записей: лишние (самые давние по `last_seen`) убираются.
+fn trim_addrs(addrs: &mut Vec<KnownAddr>) {
+    while addrs.len() > MAX_ADDRS_PER_FRIEND {
+        let oldest = addrs
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, k)| k.last_seen_unix)
+            .map(|(i, _)| i);
+        match oldest {
+            Some(i) => {
+                addrs.remove(i);
+            }
+            None => break,
+        }
+    }
 }
 
 impl fmt::Debug for FriendBook {
@@ -134,6 +169,7 @@ impl FriendBook {
                 key,
                 data: BookData::default(),
                 unsent: Vec::new(),
+                inband: Vec::new(),
             }),
             Some(file) => {
                 let k = key.ok_or(FriendsError::ListKeyMissing)?;
@@ -143,6 +179,7 @@ impl FriendBook {
                     key: Some(k),
                     data,
                     unsent: Vec::new(),
+                    inband: Vec::new(),
                 })
             }
         }
@@ -171,6 +208,7 @@ impl FriendBook {
             key,
             data: BookData::default(),
             unsent: Vec::new(),
+            inband: Vec::new(),
         })
     }
 
@@ -400,6 +438,7 @@ impl FriendBook {
             permission: Permission::Ask,
             known_addrs: addrs,
             last_addr_seq: 0,
+            addr_seq_out: 0,
             added_at_unix: f.now_unix,
         };
         self.commit(store, |d| {
@@ -643,5 +682,206 @@ impl FriendBook {
             }
         }
         Ok((peers, bad))
+    }
+
+    /// Друг есть и его состояние `Active`.
+    pub fn is_active(&self, pair: &PairId) -> bool {
+        self.get(pair)
+            .is_some_and(|f| f.state == FriendState::Active)
+    }
+
+    /// Друг `Active`: иначе `UnknownPair` (такой пары нет) или `NotActive`.
+    fn active(&self, pair: &PairId) -> Result<&Friend, FriendsError> {
+        let fr = self.get(pair).ok_or(FriendsError::UnknownPair)?;
+        if fr.state != FriendState::Active {
+            return Err(FriendsError::NotActive);
+        }
+        Ok(fr)
+    }
+
+    /// Токен обновления адреса для друга `pair` (только `Active`, набор не пуст). Порядок
+    /// (критично): загрузить ключ пары, посчитать `seq`, СОХРАНИТЬ `addr_seq_out = seq` в файле
+    /// списка и только потом подписать и вернуть токен. Ошибка сохранения: токена нет, значение
+    /// в памяти прежнее. Номер, потраченный на неудавшуюся подпись, не возвращается.
+    pub fn issue_addr_update<S: SecretStore + ListKeyStore + ?Sized>(
+        &mut self,
+        store: &S,
+        pair: &PairId,
+        set: &PublishSet,
+        now_unix: u64,
+    ) -> Result<IssuedAddrUpdate, FriendsError> {
+        let fr = self.active(pair)?;
+        if set.is_empty() {
+            return Err(FriendsError::NoAddresses);
+        }
+        let (friend_ed, prev) = (fr.friend_ed, fr.addr_seq_out);
+        let key = match load(store, pair, &fr.our_ed) {
+            Ok(k) => k,
+            Err(IdentityError::UnsupportedKeyVersion) => {
+                return Err(FriendsError::KeyNeedsDecision);
+            }
+            Err(
+                IdentityError::KeyMissing | IdentityError::KeyMismatch | IdentityError::CorruptKey,
+            ) => return Err(FriendsError::KeyMissingOrChanged),
+            Err(e) => return Err(map_identity(e)),
+        };
+        let seq = next_seq(prev, now_unix).ok_or(FriendsError::SeqExhausted)?;
+        self.commit(store, |d| {
+            let fr = d
+                .friends
+                .iter_mut()
+                .find(|x| x.pair == *pair && x.state == FriendState::Active)
+                .ok_or(FriendsError::UnknownPair)?;
+            fr.addr_seq_out = seq;
+            Ok(())
+        })?;
+        // номер уже на диске: теперь подпись
+        issue_addr_update(&key, &friend_ed, seq, set).map_err(|e| match e {
+            TokenError::RandomUnavailable => FriendsError::RandomUnavailable,
+            _ => FriendsError::BadAddrUpdate,
+        })
+    }
+
+    /// Применить проверенное обновление: номер строго больше `last_addr_seq` (`StaleSeq`),
+    /// слияние, `prune`, лимит записей, сохранение; при ошибке откат в памяти (`commit`).
+    fn apply_verified<K: ListKeyStore + ?Sized>(
+        &mut self,
+        keys: &K,
+        pair: &PairId,
+        update: &AddrUpdate,
+        now_unix: u64,
+    ) -> Result<(), FriendsError> {
+        let seq = update.seq();
+        let addrs = update.addrs();
+        self.commit(keys, |d| {
+            let fr = d
+                .friends
+                .iter_mut()
+                .find(|x| x.pair == *pair && x.state == FriendState::Active)
+                .ok_or(FriendsError::UnknownPair)?;
+            if seq <= fr.last_addr_seq {
+                return Err(FriendsError::StaleSeq);
+            }
+            chervo_addr::merge_update(&mut fr.known_addrs, addrs, now_unix);
+            chervo_addr::prune(&mut fr.known_addrs, now_unix);
+            trim_addrs(&mut fr.known_addrs);
+            fr.last_addr_seq = seq;
+            Ok(())
+        })
+    }
+
+    /// Вставленный текст `CHA1...`: `decode` должен дать `Token::AddrUpdate`; подпись
+    /// проверяется с каждым `Active` другом (`friend_ed`, `our_ed`), совпасть должен ровно
+    /// один (иначе `BadAddrUpdate`); `seq <= last_addr_seq`: `StaleSeq`. Блокированные и чужие
+    /// пары не принимаются. Возвращает пару.
+    pub fn apply_addr_update_text<K: ListKeyStore + ?Sized>(
+        &mut self,
+        keys: &K,
+        text: &str,
+        now_unix: u64,
+    ) -> Result<PairId, FriendsError> {
+        let signed = match decode(text) {
+            Ok(Token::AddrUpdate(s)) => s,
+            _ => return Err(FriendsError::BadAddrUpdate),
+        };
+        let mut found: Option<(PairId, AddrUpdate)> = None;
+        for fr in self
+            .data
+            .friends
+            .iter()
+            .filter(|f| f.state == FriendState::Active)
+        {
+            if let Ok(u) = signed.verify(&fr.friend_ed, &fr.our_ed) {
+                if found.is_some() {
+                    return Err(FriendsError::BadAddrUpdate);
+                }
+                found = Some((fr.pair, u));
+            }
+        }
+        let (pair, update) = found.ok_or(FriendsError::BadAddrUpdate)?;
+        self.apply_verified(keys, &pair, &update, now_unix)?;
+        Ok(pair)
+    }
+
+    /// Обновление по проверенному соединению (`pair = conn.remote_pair()`): только `Active`;
+    /// подпись только с ключами этого друга (иначе `BadAddrUpdate`); `StaleSeq`; не чаще одного
+    /// принятого обновления на пару за `MIN_INBAND_UPDATE_INTERVAL_SECS` (`RateLimited`,
+    /// счётчик в памяти). Время фиксируется только после успешного сохранения.
+    pub fn apply_addr_update<K: ListKeyStore + ?Sized>(
+        &mut self,
+        keys: &K,
+        pair: &PairId,
+        update: &SignedAddrUpdate,
+        now_unix: u64,
+    ) -> Result<(), FriendsError> {
+        let fr = self.active(pair)?;
+        let verified = update
+            .verify(&fr.friend_ed, &fr.our_ed)
+            .map_err(|_| FriendsError::BadAddrUpdate)?;
+        if verified.seq() <= fr.last_addr_seq {
+            return Err(FriendsError::StaleSeq);
+        }
+        if let Some((_, at)) = self.inband.iter().find(|(p, _)| p == pair)
+            && now_unix >= *at
+            && now_unix - *at < MIN_INBAND_UPDATE_INTERVAL_SECS
+        {
+            return Err(FriendsError::RateLimited);
+        }
+        self.apply_verified(keys, pair, &verified, now_unix)?;
+        // записи удалённых друзей в памяти не копятся
+        let friends = &self.data.friends;
+        self.inband
+            .retain(|(p, _)| p != pair && friends.iter().any(|f| f.pair == *p));
+        self.inband.push((*pair, now_unix));
+        Ok(())
+    }
+
+    /// Адрес, с которого друг подключился по проверенному соединению. Только `Active`;
+    /// сохранение только если `chervo_addr::note_contact` изменил запись.
+    pub fn note_contact<K: ListKeyStore + ?Sized>(
+        &mut self,
+        keys: &K,
+        pair: &PairId,
+        addr: SocketAddr,
+        now_unix: u64,
+    ) -> Result<(), FriendsError> {
+        let fr = self.active(pair)?;
+        let mut probe = fr.known_addrs.clone();
+        if !chervo_addr::note_contact(&mut probe, addr, now_unix) {
+            return Ok(());
+        }
+        self.commit(keys, |d| {
+            let fr = d
+                .friends
+                .iter_mut()
+                .find(|x| x.pair == *pair && x.state == FriendState::Active)
+                .ok_or(FriendsError::UnknownPair)?;
+            chervo_addr::note_contact(&mut fr.known_addrs, addr, now_unix);
+            trim_addrs(&mut fr.known_addrs);
+            Ok(())
+        })
+    }
+
+    /// Адреса для набора (очищенные, по порядку). Неизвестная пара: пусто.
+    pub fn usable_addrs(&self, pair: &PairId, now_unix: u64) -> Vec<SocketAddr> {
+        match self.get(pair) {
+            Some(f) => chervo_addr::usable(&f.known_addrs, now_unix),
+            None => Vec::new(),
+        }
+    }
+
+    /// `Findability::NeedToken`, если нет постоянного адреса ни у нас (`own_stable`), ни у друга.
+    pub fn findability(
+        &self,
+        pair: &PairId,
+        own_stable: bool,
+        now_unix: u64,
+    ) -> Result<Findability, FriendsError> {
+        let f = self.get(pair).ok_or(FriendsError::UnknownPair)?;
+        Ok(chervo_addr::findability(
+            own_stable,
+            &f.known_addrs,
+            now_unix,
+        ))
     }
 }

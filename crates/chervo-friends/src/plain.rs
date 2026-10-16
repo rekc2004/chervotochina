@@ -1,10 +1,14 @@
-//! Открытый текст v1 (внутри AEAD, числа big-endian).
+//! Открытый текст v2 (внутри AEAD, числа big-endian); читается и v1, пишется всегда v2.
 //!
-//! `[0x01][n_friends u16]`, на друга: `[pair 16][name_len u8][name][friend_ed 32][friend_x 32]`
+//! `[0x02][n_friends u16]`, на друга: `[pair 16][name_len u8][name][friend_ed 32][friend_x 32]`
 //! `[our_ed 32][state u8 0|1|2][perm u8 0|1 (+ max_total_bytes u64 + max_files u32 при 1)]`
-//! `[last_addr_seq u64][added_at u64][n_addrs u8]`, на адрес: `[семейство 0x04|0x06][IP]`
-//! `[порт u16][source u8 0..=5][last_seen u64][short_lived u8 0|1]`; затем `[n_pending u16]`,
-//! на запись: `[pair 16][role u8 0|1][expires_at u64]`.
+//! `[last_addr_seq u64][addr_seq_out u64][added_at u64][n_addrs u8]`, на адрес:
+//! `[семейство 0x04|0x06][IP][порт u16][source u8 0..=6][last_seen u64][flags u8]`, где
+//! flags: бит 0 short_lived, бит 1 hint, остальные 0; затем `[n_pending u16]`, на запись:
+//! `[pair 16][role u8 0|1][expires_at u64]`.
+//!
+//! v1 (только чтение): нет `addr_seq_out` (при чтении 0), `source` 0..=5, байт после
+//! `last_seen` это short_lived 0|1 (hint = false). Любая другая версия: `Corrupt`.
 //!
 //! Разбор строгий: счётчики против остатка буфера, лимиты, дубликаты `pair`, неизвестные
 //! значения перечислений, имена, ключи через `try_from_slice`, лишние байты в конце.
@@ -21,9 +25,13 @@ use crate::{
     MAX_FRIENDS, MAX_NAME_BYTES, MAX_PENDING, PendingEntry, PendingRole, Permission,
 };
 
-pub(crate) const PLAIN_VERSION: u8 = 0x01;
+pub(crate) const PLAIN_VERSION: u8 = 0x02;
+const PLAIN_V1: u8 = 0x01;
 /// Минимальный размер записи друга (имя из 0 байт, 0 адресов, `Ask`): для проверки счётчика.
-const MIN_FRIEND_LEN: usize = 16 + 1 + 32 * 3 + 1 + 1 + 8 + 8 + 1;
+const MIN_FRIEND_LEN_V1: usize = 16 + 1 + 32 * 3 + 1 + 1 + 8 + 8 + 1;
+const MIN_FRIEND_LEN_V2: usize = MIN_FRIEND_LEN_V1 + 8;
+const FLAG_SHORT_LIVED: u8 = 0x01;
+const FLAG_HINT: u8 = 0x02;
 const PENDING_LEN: usize = 16 + 1 + 8;
 
 /// Имя допустимо: непусто, не больше `MAX_NAME_BYTES` байт, без управляющих символов.
@@ -39,10 +47,15 @@ fn source_byte(s: AddrSource) -> u8 {
         AddrSource::Invite => 3,
         AddrSource::AddressUpdate => 4,
         AddrSource::ObservedByFriend => 5,
+        AddrSource::Contact => 6,
     }
 }
 
-fn source_from(b: u8) -> Option<AddrSource> {
+/// `max` — наибольший допустимый байт источника в этой версии (v1: 5, v2: 6).
+fn source_from(b: u8, max: u8) -> Option<AddrSource> {
+    if b > max {
+        return None;
+    }
     Some(match b {
         0 => AddrSource::Interface,
         1 => AddrSource::Lan,
@@ -50,6 +63,7 @@ fn source_from(b: u8) -> Option<AddrSource> {
         3 => AddrSource::Invite,
         4 => AddrSource::AddressUpdate,
         5 => AddrSource::ObservedByFriend,
+        6 => AddrSource::Contact,
         _ => return None,
     })
 }
@@ -69,8 +83,8 @@ fn encoded_len(data: &BookData) -> usize {
                 .iter()
                 .map(|a| (if a.addr.is_ipv4() { 1 + 4 } else { 1 + 16 }) + 2 + 1 + 8 + 1)
                 .sum();
-            // pair, длина имени, имя, три ключа, состояние, право, два u64, число адресов
-            16 + 1 + f.name.len() + 3 * 32 + 1 + perm + 8 + 8 + 1 + addrs
+            // pair, длина имени, имя, три ключа, состояние, право, три u64, число адресов
+            16 + 1 + f.name.len() + 3 * 32 + 1 + perm + 8 + 8 + 8 + 1 + addrs
         })
         .sum();
     // версия, число друзей, число pending; pending: pair, роль, срок
@@ -121,6 +135,7 @@ pub(crate) fn encode(data: &BookData) -> Result<Zeroizing<Vec<u8>>, FriendsError
             }
         }
         out.extend_from_slice(&f.last_addr_seq.to_be_bytes());
+        out.extend_from_slice(&f.addr_seq_out.to_be_bytes());
         out.extend_from_slice(&f.added_at_unix.to_be_bytes());
         out.push(u8::try_from(f.known_addrs.len()).map_err(|_| FriendsError::LimitExceeded)?);
         for a in &f.known_addrs {
@@ -137,7 +152,14 @@ pub(crate) fn encode(data: &BookData) -> Result<Zeroizing<Vec<u8>>, FriendsError
             out.extend_from_slice(&a.addr.port().to_be_bytes());
             out.push(source_byte(a.source));
             out.extend_from_slice(&a.last_seen_unix.to_be_bytes());
-            out.push(u8::from(a.short_lived));
+            let mut flags = 0u8;
+            if a.short_lived {
+                flags |= FLAG_SHORT_LIVED;
+            }
+            if a.hint {
+                flags |= FLAG_HINT;
+            }
+            out.push(flags);
         }
     }
     let n_pending = u16::try_from(data.pending.len()).map_err(|_| FriendsError::LimitExceeded)?;
@@ -204,6 +226,7 @@ impl<'a> Reader<'a> {
         Ok(PairId::from_bytes(a))
     }
 
+    /// v1: байт short_lived, только 0|1.
     fn flag(&mut self) -> Result<bool, FriendsError> {
         match self.u8()? {
             0 => Ok(false),
@@ -213,14 +236,17 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// Строгий разбор открытого текста. Любое отклонение: `Corrupt`.
+/// Строгий разбор открытого текста (v1 или v2). Любое отклонение: `Corrupt`.
 pub(crate) fn decode(buf: &[u8]) -> Result<BookData, FriendsError> {
     let mut r = Reader { b: buf };
-    if r.u8()? != PLAIN_VERSION {
-        return Err(FriendsError::Corrupt);
-    }
+    let version = r.u8()?;
+    let (v2, min_friend, max_source) = match version {
+        PLAIN_V1 => (false, MIN_FRIEND_LEN_V1, 5u8),
+        PLAIN_VERSION => (true, MIN_FRIEND_LEN_V2, 6u8),
+        _ => return Err(FriendsError::Corrupt),
+    };
     let n_friends = usize::from(r.u16()?);
-    if n_friends > MAX_FRIENDS || n_friends.saturating_mul(MIN_FRIEND_LEN) > r.b.len() {
+    if n_friends > MAX_FRIENDS || n_friends.saturating_mul(min_friend) > r.b.len() {
         return Err(FriendsError::Corrupt);
     }
     let mut friends = Vec::with_capacity(n_friends);
@@ -264,6 +290,7 @@ pub(crate) fn decode(buf: &[u8]) -> Result<BookData, FriendsError> {
             _ => return Err(FriendsError::Corrupt),
         };
         let last_addr_seq = r.u64()?;
+        let addr_seq_out = if v2 { r.u64()? } else { 0 };
         let added_at_unix = r.u64()?;
         let n_addrs = usize::from(r.u8()?);
         if n_addrs > MAX_ADDRS_PER_FRIEND {
@@ -283,14 +310,23 @@ pub(crate) fn decode(buf: &[u8]) -> Result<BookData, FriendsError> {
                 _ => return Err(FriendsError::Corrupt),
             };
             let port = r.u16()?;
-            let source = source_from(r.u8()?).ok_or(FriendsError::Corrupt)?;
+            let source = source_from(r.u8()?, max_source).ok_or(FriendsError::Corrupt)?;
             let last_seen_unix = r.u64()?;
-            let short_lived = r.flag()?;
+            let (short_lived, hint) = if v2 {
+                let flags = r.u8()?;
+                if flags & !(FLAG_SHORT_LIVED | FLAG_HINT) != 0 {
+                    return Err(FriendsError::Corrupt);
+                }
+                (flags & FLAG_SHORT_LIVED != 0, flags & FLAG_HINT != 0)
+            } else {
+                (r.flag()?, false)
+            };
             known_addrs.push(KnownAddr {
                 addr: SocketAddr::new(ip, port),
                 source,
                 last_seen_unix,
                 short_lived,
+                hint,
             });
         }
         friends.push(Friend {
@@ -303,6 +339,7 @@ pub(crate) fn decode(buf: &[u8]) -> Result<BookData, FriendsError> {
             permission,
             known_addrs,
             last_addr_seq,
+            addr_seq_out,
             added_at_unix,
         });
     }

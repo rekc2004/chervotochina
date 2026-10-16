@@ -34,7 +34,10 @@ pub struct Friend {
     pub state: FriendState,
     pub permission: Permission,
     pub known_addrs: Vec<KnownAddr>,
+    /// Наибольший принятый номер обновления адреса от друга (строго растёт).
     pub last_addr_seq: u64,
+    /// Последний выпущенный нами номер обновления для этого друга (сохраняется до выдачи токена).
+    pub addr_seq_out: u64,
     pub added_at_unix: u64,
 }
 

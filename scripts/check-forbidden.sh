@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Guard: forbid third-party iroh presets/relays/DNS in our code (docs/DECISION.md 2.4).
 set -euo pipefail
-patterns=( 'presets::N0' 'N0DisableRelay' 'RelayMode::Default' 'RelayMode::Staging' 'iroh.link' 'n0_dns' )
+patterns=( 'presets::N0' 'N0DisableRelay' 'RelayMode::Default' 'RelayMode::Staging' 'iroh.link' 'n0_dns'
+           # no public "what is my IP" service and no STUN (BRIEF 2.2)
+           'stun:' 'stun.l.google' 'ipify' 'ifconfig.me' 'icanhazip' 'checkip.' 'ipinfo.io' 'whatismyip' )
 args=()
 for p in "${patterns[@]}"; do args+=( -e "$p" ); done
 

@@ -22,7 +22,7 @@ pub mod vault;
 #[cfg(test)]
 mod tests;
 
-pub use book::{FriendBook, KeyStatus, NewFriend};
+pub use book::{FriendBook, KeyStatus, MIN_INBAND_UPDATE_INTERVAL_SECS, NewFriend};
 pub use error::FriendsError;
 pub use types::{
     AutoAcceptLimits, BookData, Friend, FriendState, PendingEntry, PendingRole, Permission,

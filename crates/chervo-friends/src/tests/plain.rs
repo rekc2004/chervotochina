@@ -49,7 +49,7 @@ fn one_friend() -> (BookData, Vec<u8>, Off) {
 fn plain_roundtrip_and_layout() {
     let d = sample();
     let b = bytes_of(&d);
-    assert_eq!(b[0], 1);
+    assert_eq!(b[0], 2);
     assert_eq!(u16::from_be_bytes([b[1], b[2]]), 2);
     let back = decode(&b).unwrap();
     assert!(same(&d, &back));
@@ -135,7 +135,7 @@ fn plain_limits() {
     assert_eq!(decode(&b).unwrap().pending.len(), MAX_PENDING);
     let mut bad = pend(MAX_PENDING + 1).pending;
     // руками: 65 записей в разборе
-    let mut raw = vec![1u8, 0, 0];
+    let mut raw = vec![2u8, 0, 0];
     raw.extend_from_slice(&65u16.to_be_bytes());
     for e in bad.drain(..) {
         raw.extend_from_slice(e.pair.as_bytes());
@@ -198,6 +198,7 @@ fn plain_limits() {
             source: AddrSource::Lan,
             last_seen_unix: 1,
             short_lived: false,
+            hint: false,
         })
         .collect();
     let seventeen = BookData {
@@ -213,7 +214,7 @@ fn plain_limits() {
     let mut b16 = bytes_of(&sixteen);
     assert_eq!(decode(&b16).unwrap().friends[0].known_addrs.len(), 16);
     // 17-й адрес руками: счётчик 17 и лишняя запись (17 байт для IPv4)
-    let n_addrs_at = off(3).perm + 1 + 8 + 8;
+    let n_addrs_at = off(3).perm + 1 + 8 + 8 + 8;
     assert_eq!(b16[n_addrs_at], 16);
     b16[n_addrs_at] = 17;
     let insert_at = b16.len() - 2; // перед `n_pending u16`
@@ -254,7 +255,7 @@ fn plain_rejects_duplicates() {
         pending: vec![p, p],
     };
     assert_eq!(encode(&dup).err(), Some(FriendsError::AlreadyExists));
-    let mut raw = vec![1u8, 0, 0, 0, 2];
+    let mut raw = vec![2u8, 0, 0, 0, 2];
     for _ in 0..2 {
         raw.extend_from_slice(p.pair.as_bytes());
         raw.push(0);
@@ -312,15 +313,15 @@ fn plain_rejects_unknown_enums() {
         assert_eq!(decode(&x).err(), Some(FriendsError::Corrupt), "perm {v}");
     }
     // адрес: семейство, источник, short_lived
-    let addr0 = o.perm + 1 + 8 + 8 + 1; // первый адрес (IPv4)
+    let addr0 = o.perm + 1 + 8 + 8 + 8 + 1; // первый адрес (IPv4)
     let mut x = b.clone();
     x[addr0] = 5;
     assert_eq!(decode(&x).err(), Some(FriendsError::Corrupt));
     let mut x = b.clone();
-    x[addr0 + 1 + 4 + 2] = 6;
+    x[addr0 + 1 + 4 + 2] = 7;
     assert_eq!(decode(&x).err(), Some(FriendsError::Corrupt));
     let mut x = b.clone();
-    x[addr0 + 1 + 4 + 2 + 1 + 8] = 2;
+    x[addr0 + 1 + 4 + 2 + 1 + 8] = 4;
     assert_eq!(decode(&x).err(), Some(FriendsError::Corrupt));
     // положительный контроль на всех допустимых значениях
     for s in 0..=2u8 {
@@ -328,13 +329,13 @@ fn plain_rejects_unknown_enums() {
         x[o.state] = s;
         assert!(decode(&x).is_ok());
     }
-    for s in 0..=5u8 {
+    for s in 0..=6u8 {
         let mut x = b.clone();
         x[addr0 + 1 + 4 + 2] = s;
         assert!(decode(&x).is_ok());
     }
     // роль pending
-    let mut raw = vec![1u8, 0, 0, 0, 1];
+    let mut raw = vec![2u8, 0, 0, 0, 1];
     raw.extend_from_slice(&[9u8; 16]);
     raw.push(2);
     raw.extend_from_slice(&1u64.to_be_bytes());
@@ -344,7 +345,7 @@ fn plain_rejects_unknown_enums() {
     assert!(decode(&raw).is_ok());
     // версия открытого текста
     let mut x = b.clone();
-    x[0] = 2;
+    x[0] = 3;
     assert_eq!(decode(&x).err(), Some(FriendsError::Corrupt));
     // автоприём с нулевыми лимитами: запись отказывает, разбор отказывает
     let mut d = BookData {
@@ -385,4 +386,176 @@ fn plain_rejects_trailing() {
         assert!(decode(&b[..n]).is_err(), "обрезка до {n}");
     }
     assert_eq!(decode(&[]).err(), Some(FriendsError::Corrupt));
+}
+
+/// Открытый текст v1, собранный руками: старая раскладка (без `addr_seq_out`, байт
+/// short_lived 0|1 после `last_seen`).
+pub(super) fn v1_blob(f: &crate::Friend) -> Vec<u8> {
+    let mut b = vec![1u8, 0, 1];
+    b.extend_from_slice(f.pair.as_bytes());
+    b.push(f.name.len() as u8);
+    b.extend_from_slice(f.name.as_bytes());
+    b.extend_from_slice(&f.friend_ed.to_bytes());
+    b.extend_from_slice(&f.friend_x.to_bytes());
+    b.extend_from_slice(&f.our_ed.to_bytes());
+    b.push(0); // Active
+    b.push(0); // Ask
+    b.extend_from_slice(&f.last_addr_seq.to_be_bytes());
+    b.extend_from_slice(&f.added_at_unix.to_be_bytes());
+    b.push(f.known_addrs.len() as u8);
+    for a in &f.known_addrs {
+        match a.addr {
+            std::net::SocketAddr::V4(v) => {
+                b.push(4);
+                b.extend_from_slice(&v.ip().octets());
+            }
+            std::net::SocketAddr::V6(v) => {
+                b.push(6);
+                b.extend_from_slice(&v.ip().octets());
+            }
+        }
+        b.extend_from_slice(&a.addr.port().to_be_bytes());
+        b.push(match a.source {
+            AddrSource::Invite => 3,
+            AddrSource::ObservedByFriend => 5,
+            _ => 0,
+        });
+        b.extend_from_slice(&a.last_seen_unix.to_be_bytes());
+        b.push(u8::from(a.short_lived));
+    }
+    b.extend_from_slice(&[0, 0]); // n_pending
+    b
+}
+
+#[test]
+fn plain_v1_migrates() {
+    let mut f = friend(1);
+    f.name = "abc".into();
+    let v1 = v1_blob(&f);
+    let d = decode(&v1).unwrap();
+    assert_eq!(d.friends.len(), 1);
+    let g = &d.friends[0];
+    assert_eq!(g.last_addr_seq, 7);
+    assert_eq!(g.addr_seq_out, 0, "v1 не знает addr_seq_out");
+    assert_eq!(g.known_addrs.len(), 2);
+    assert!(g.known_addrs.iter().all(|a| !a.hint));
+    assert!(!g.known_addrs[0].short_lived && g.known_addrs[1].short_lived);
+    assert_eq!(g.known_addrs[0].source, AddrSource::Invite);
+    assert_eq!(g.known_addrs[1].source, AddrSource::ObservedByFriend);
+    // запись всегда v2; повторное чтение даёт те же данные
+    let again = bytes_of(&d);
+    assert_eq!(again[0], 2);
+    assert_eq!(again.len(), v1.len() + 8, "добавлен только addr_seq_out");
+    assert!(same(&decode(&again).unwrap(), &d));
+    assert_eq!(bytes_of(&decode(&again).unwrap()), again);
+    // v1 строже: источник 6, байт short_lived 2 и обрезки отклоняются
+    let at_src = v1.len() - 2 - 1 - 8 - 1; // источник последнего адреса
+    assert_eq!(v1[at_src], 5);
+    let mut x = v1.clone();
+    x[at_src] = 6;
+    assert_eq!(decode(&x).err(), Some(FriendsError::Corrupt));
+    let mut x = v1.clone();
+    let last_flag = v1.len() - 3;
+    assert_eq!(v1[last_flag], 1);
+    x[last_flag] = 2;
+    assert_eq!(decode(&x).err(), Some(FriendsError::Corrupt));
+    for n in 0..v1.len() {
+        assert!(decode(&v1[..n]).is_err(), "обрезка v1 до {n}");
+    }
+    let mut x = v1.clone();
+    x.push(0);
+    assert_eq!(decode(&x).err(), Some(FriendsError::Corrupt));
+}
+
+#[test]
+fn plain_v2_roundtrip_new_fields() {
+    let mut d = BookData {
+        friends: vec![friend(1)],
+        pending: vec![],
+    };
+    d.friends[0].name = "abc".into();
+    d.friends[0].addr_seq_out = u64::MAX - 3;
+    d.friends[0].known_addrs = vec![
+        KnownAddr {
+            addr: addr("203.0.113.7:1"),
+            source: AddrSource::Contact,
+            last_seen_unix: 5,
+            short_lived: false,
+            hint: true,
+        },
+        KnownAddr {
+            addr: addr("[2001:db8::2]:2"),
+            source: AddrSource::AddressUpdate,
+            last_seen_unix: 6,
+            short_lived: true,
+            hint: true,
+        },
+        KnownAddr {
+            addr: addr("198.51.100.1:3"),
+            source: AddrSource::Contact,
+            last_seen_unix: 7,
+            short_lived: true,
+            hint: false,
+        },
+    ];
+    let b = bytes_of(&d);
+    assert_eq!(b[0], 2);
+    let back = decode(&b).unwrap();
+    assert!(same(&d, &back));
+    assert_eq!(back.friends[0].addr_seq_out, u64::MAX - 3);
+    assert_eq!(bytes_of(&back), b);
+    // флаги: bit0 = short_lived, bit1 = hint
+    let o = off(3);
+    let addr0 = o.perm + 1 + 8 + 8 + 8 + 1;
+    let flags_at = |i: usize| match i {
+        0 => addr0 + 1 + 4 + 2 + 1 + 8,
+        1 => addr0 + 17 + 1 + 16 + 2 + 1 + 8,
+        _ => addr0 + 17 + 29 + 1 + 4 + 2 + 1 + 8,
+    };
+    assert_eq!(b[flags_at(0)], 2);
+    assert_eq!(b[flags_at(1)], 3);
+    assert_eq!(b[flags_at(2)], 1);
+}
+
+#[test]
+fn plain_v2_rejects_bad_flags() {
+    let (_d, b, o) = one_friend();
+    let flags0 = o.perm + 1 + 8 + 8 + 8 + 1 + 1 + 4 + 2 + 1 + 8;
+    assert_eq!(b[flags0], 0);
+    for v in 0..=3u8 {
+        let mut x = b.clone();
+        x[flags0] = v;
+        assert!(decode(&x).is_ok(), "флаги {v}");
+    }
+    for bit in 2..8u8 {
+        for extra in [0u8, 1, 2, 3] {
+            let mut x = b.clone();
+            x[flags0] = (1 << bit) | extra;
+            assert_eq!(
+                decode(&x).err(),
+                Some(FriendsError::Corrupt),
+                "бит {bit} + {extra}"
+            );
+        }
+    }
+}
+
+#[test]
+fn plain_v2_rejects_source_7() {
+    let (_d, b, o) = one_friend();
+    let src0 = o.perm + 1 + 8 + 8 + 8 + 1 + 1 + 4 + 2;
+    for s in 0..=6u8 {
+        let mut x = b.clone();
+        x[src0] = s;
+        assert!(decode(&x).is_ok(), "источник {s}");
+    }
+    for s in [7u8, 8, 0x7F, 0xFF] {
+        let mut x = b.clone();
+        x[src0] = s;
+        assert_eq!(
+            decode(&x).err(),
+            Some(FriendsError::Corrupt),
+            "источник {s}"
+        );
+    }
 }

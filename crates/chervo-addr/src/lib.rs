@@ -1,4 +1,4 @@
-//! Адреса: классификация, собственные адреса и набор для публикации (этап 12, часть A1).
+//! Адреса: классификация, собственные адреса и набор для публикации (этап 12, части A1 и A4).
 //! Спецификация: `docs/specs/stage-12-addr.md`.
 //!
 //! Часов, фоновых задач и отправки данных в крейте нет: время передаёт вызывающий
@@ -12,12 +12,18 @@
     clippy::todo
 )]
 
+mod book;
 mod class;
 mod own;
 mod probe;
 
 use std::net::SocketAddr;
 
+pub use book::{
+    CONTACT_REFRESH_SECS, CONTACT_TTL_SECS, Findability, HINT_TTL_SECS, MAX_CONTACT_ADDRS,
+    NEED_TOKEN_TEXT, NO_PUBLIC_ADDR_TEXT, SHORT_LIVED_TTL_SECS, findability, from_invite,
+    merge_update, note_contact, prune, usable,
+};
 pub use class::{AddrClass, classify, is_eui64, normalize, update_allowed};
 pub use own::{
     GatewayInfo, LocalSnapshot, MAX_OBSERVATIONS, MAX_UPDATE_ADDRS, NatView, OBSERVED_TTL_SECS,
@@ -33,6 +39,8 @@ pub enum AddrSource {
     Invite,
     AddressUpdate,
     ObservedByFriend,
+    /// Адрес, с которого друг подключился по проверенному соединению.
+    Contact,
 }
 
 /// Без Debug: адреса не печатаются через derive.
@@ -42,4 +50,6 @@ pub struct KnownAddr {
     pub source: AddrSource,
     pub last_seen_unix: u64,
     pub short_lived: bool,
+    /// Отправитель пометил адрес как «так меня видят» (непроверенная подсказка).
+    pub hint: bool,
 }
