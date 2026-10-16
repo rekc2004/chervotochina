@@ -13,4 +13,5 @@ mod gate;
 mod kit;
 mod knock;
 mod misc;
+mod peers;
 mod tlsx;

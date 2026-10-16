@@ -2,28 +2,6 @@ use std::fmt;
 
 use crate::{ACCOUNT_PREFIX, IdentityError};
 
-/// Временный несекретный идентификатор-заглушка для других крейтов. Не публичный ключ:
-/// байты не проверяются. Не используется API ключей пар. Будет заменён или удалён
-/// по решению U10b (этапы 9/11).
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DeviceId([u8; 32]);
-
-impl DeviceId {
-    pub const fn from_bytes(b: [u8; 32]) -> Self {
-        Self(b)
-    }
-
-    pub const fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-}
-
-impl fmt::Debug for DeviceId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("DeviceId(..)")
-    }
-}
-
 /// Идентификатор пары друзей: 16 случайных байт, локальный и несекретный.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PairId([u8; 16]);

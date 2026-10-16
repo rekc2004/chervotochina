@@ -3,9 +3,9 @@ mod common;
 use std::time::Instant;
 
 use chervo_identity::{
-    BINDING_LEN, ChannelBinding, IdentityError, KK_KIND_V1, KK_MSG1_LEN, KK_MSG2_LEN, KK_MSG3_LEN,
-    KK_PROLOGUE_TAG, KkInitiator, KkResponder, KxPeer, NOISE_PARAMS, PairId, create, kk_initiate,
-    kk_respond,
+    BINDING_LEN, ChannelBinding, GuestSecret, IdentityError, KK_KIND_V1, KK_MSG1_LEN, KK_MSG2_LEN,
+    KK_MSG3_LEN, KK_PROLOGUE_TAG, KkInitiator, KkResponder, KxPeer, NOISE_PARAMS, PairId, create,
+    kk_initiate, kk_respond,
 };
 use common::MemStore;
 
@@ -451,4 +451,29 @@ fn kk_trial_cost() {
             res[0], res[1], res[2]
         );
     }
+}
+
+/// Гостевая пара: A знает G, B знает секрет g и ключ A из токена.
+#[test]
+fn guest_into_kx_knock_and_kk_work() {
+    let pid = PairId::generate().unwrap();
+    let store = MemStore::new();
+    let ka = create(&store, &pid).unwrap();
+    let a_x = ka.kx_public();
+    let guest = GuestSecret::generate().unwrap();
+    let g_pub = guest.public();
+    let a_peer = KxPeer::new(pid, ka.into_kx(), g_pub);
+    let b_peer = KxPeer::new(pid, guest.into_kx(), a_x);
+
+    // стук: B стучит, A проверяет по recv_id
+    let a_keys = a_peer.knock_keys().unwrap();
+    let b_keys = b_peer.knock_keys().unwrap();
+    let knock = b_keys.make(42).unwrap();
+    assert_eq!(&knock[..16], &a_keys.recv_id(42)[..]);
+    assert!(a_keys.verify(42, &knock));
+
+    // KK в обе стороны
+    let b = binding(9);
+    assert_eq!(handshake(&b_peer, &[&a_peer], &b, &b), Ok(pid));
+    assert_eq!(handshake(&a_peer, &[&b_peer], &b, &b), Ok(pid));
 }

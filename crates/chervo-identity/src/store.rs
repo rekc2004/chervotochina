@@ -19,8 +19,32 @@ pub trait SecretStore: Send + Sync {
     fn delete(&self, pair: &PairId) -> Result<(), IdentityError>;
 }
 
+/// Хранилище ключа списка друзей: одна запись `LIST_KEY_ACCOUNT`, отдельная от записей пар.
+/// `read_list_key` возвращает `None`, только если записи точно нет.
+pub trait ListKeyStore: Send + Sync {
+    fn read_list_key(&self) -> Result<Option<Zeroizing<Vec<u8>>>, IdentityError>;
+    /// Перезапись записи.
+    fn write_list_key(&self, key: &[u8]) -> Result<(), IdentityError>;
+    /// Записи нет: `Ok(())`.
+    fn delete_list_key(&self) -> Result<(), IdentityError>;
+}
+
 /// Заглушка хранилища: всегда `NotImplemented`.
 pub struct UnavailableKeyStore;
+
+impl ListKeyStore for UnavailableKeyStore {
+    fn read_list_key(&self) -> Result<Option<Zeroizing<Vec<u8>>>, IdentityError> {
+        Err(IdentityError::NotImplemented)
+    }
+
+    fn write_list_key(&self, _key: &[u8]) -> Result<(), IdentityError> {
+        Err(IdentityError::NotImplemented)
+    }
+
+    fn delete_list_key(&self) -> Result<(), IdentityError> {
+        Err(IdentityError::NotImplemented)
+    }
+}
 
 impl SecretStore for UnavailableKeyStore {
     fn read(&self, _pair: &PairId) -> Result<Option<Zeroizing<Vec<u8>>>, IdentityError> {

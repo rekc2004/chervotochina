@@ -7,6 +7,10 @@ publish.workspace = true
 
 [dependencies]
 chervo-identity.workspace = true
+chervo-transport.workspace = true
+blake2.workspace = true
+getrandom.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true

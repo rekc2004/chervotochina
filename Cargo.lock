@@ -355,6 +355,10 @@ version = "0.0.0"
 dependencies = [
  "chervo-addr",
  "chervo-identity",
+ "chervo-token",
+ "getrandom 0.4.3",
+ "ring",
+ "zeroize",
 ]
 
 [[package]]
@@ -389,7 +393,11 @@ dependencies = [
 name = "chervo-token"
 version = "0.0.0"
 dependencies = [
+ "blake2",
  "chervo-identity",
+ "chervo-transport",
+ "getrandom 0.4.3",
+ "zeroize",
 ]
 
 [[package]]

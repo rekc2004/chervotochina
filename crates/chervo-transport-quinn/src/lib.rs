@@ -164,6 +164,11 @@ pub enum TransportEvent {
     ClockSkewSuspected {
         pair: PairId,
     },
+    /// Живое соединение закрыто: тройки `(пара, наш X25519, X25519 собеседника)` нет в наборе
+    /// после `set_peers` (удаление, блокировка, смена ключа).
+    PeerRemoved {
+        pair: PairId,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -200,13 +205,28 @@ pub struct TransportStats {
     pub admit_exhausted: u64,
     /// Попытки звонка, на которые не пришло ни одного пакета.
     pub connect_silent: u64,
+    /// Живые соединения, закрытые из-за `set_peers` без их тройки.
+    pub removed_closed: u64,
+}
+
+/// Только тесты: детерминированная гонка между концом KK и `promote`.
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct PromoteHook {
+    /// Соединение дошло до `promote` и ждёт.
+    pub(crate) reached: Arc<tokio::sync::Notify>,
+    /// Разрешение продолжить.
+    pub(crate) proceed: Arc<tokio::sync::Notify>,
 }
 
 pub(crate) struct Inner {
     pub(crate) cfg: QuinnConfig,
     pub(crate) filter: Arc<dyn PeerFilter>,
     pub(crate) endpoint: quinn::Endpoint,
-    peers: Mutex<Arc<Vec<KxPeer>>>,
+    pub(crate) peers: Mutex<Arc<Vec<KxPeer>>>,
+    /// Крюк тестов гонки: пауза между концом KK и `promote`.
+    #[cfg(test)]
+    pub(crate) promote_hook: Mutex<Option<PromoteHook>>,
     pub(crate) events: broadcast::Sender<TransportEvent>,
     pub(crate) counters: Arc<Counters>,
     pub(crate) knock: Arc<KnockState>,
@@ -221,6 +241,20 @@ pub(crate) struct Inner {
 }
 
 impl Inner {
+    /// Только тесты: если задан крюк, сообщить о подходе к `promote` и ждать разрешения.
+    #[cfg(test)]
+    pub(crate) async fn test_pause_before_promote(&self) {
+        let hook = self
+            .promote_hook
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(h) = hook {
+            h.reached.notify_one();
+            h.proceed.notified().await;
+        }
+    }
+
     pub(crate) fn peers_snapshot(&self) -> Arc<Vec<KxPeer>> {
         self.peers
             .lock()
@@ -293,6 +327,8 @@ impl QuinnTransport {
             gate: KkGate::new(&cfg, counters.clone()),
             registry: Registry::default(),
             peers: Mutex::new(Arc::new(Vec::new())),
+            #[cfg(test)]
+            promote_hook: Mutex::new(None),
             cfg,
             filter,
             endpoint,
@@ -315,14 +351,23 @@ impl QuinnTransport {
 
     /// Атомарная замена набора пар. Ёмкость бюджета перебора не меньше числа пар
     /// (`kk_budget_burst` меньше этого числа поднимается, иначе стоимость обрезалась бы).
+    ///
+    /// Живые соединения, чьей тройки `(пара, наш X25519, X25519 собеседника)` нет в новом
+    /// наборе, закрываются отказом с пустой причиной (событие `PeerRemoved`, счётчик
+    /// `removed_closed`). Порядок замков: реестр, затем набор пар; соединения закрываются
+    /// после снятия замков.
     pub fn set_peers(&self, peers: Vec<KxPeer>) {
         self.inner.gate.set_min_burst(peers.len());
         self.inner.knock.set_peers(&peers);
-        *self
-            .inner
-            .peers
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Arc::new(peers);
+        let removed = self.inner.registry.replace_peers(&self.inner.peers, peers);
+        for (pair, conn) in removed {
+            conn::refuse(&conn);
+            self.inner
+                .counters
+                .removed_closed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let _ = self.inner.events.send(TransportEvent::PeerRemoved { pair });
+        }
     }
 
     pub fn rebind(&self, sock: std::net::UdpSocket) -> Result<(), TransportError> {

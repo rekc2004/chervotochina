@@ -4,7 +4,7 @@ use std::sync::Arc;
 use keyring_core::{CredentialStore, Entry, Error as KeyringError};
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::{DEFAULT_SERVICE, IdentityError, PairId, SecretStore};
+use crate::{DEFAULT_SERVICE, IdentityError, LIST_KEY_ACCOUNT, ListKeyStore, PairId, SecretStore};
 
 /// Хранилище ОС: Credential Manager, login keychain, Secret Service.
 /// Создаётся явным конструктором платформенного крейта, глобальное хранилище не используется.
@@ -77,7 +77,10 @@ impl OsKeyStore {
     }
 
     fn entry(&self, pair: &PairId) -> Result<Entry, IdentityError> {
-        let account = pair.account_name();
+        self.entry_named(&pair.account_name())
+    }
+
+    fn entry_named(&self, account: &str) -> Result<Entry, IdentityError> {
         #[cfg(target_os = "windows")]
         let mods_map = std::collections::HashMap::from([("persistence", "Local")]);
         #[cfg(target_os = "windows")]
@@ -85,7 +88,7 @@ impl OsKeyStore {
         #[cfg(not(target_os = "windows"))]
         let mods = None;
         self.store
-            .build(&self.service, &account, mods)
+            .build(&self.service, account, mods)
             .map_err(map_error)
     }
 }
@@ -105,6 +108,29 @@ impl SecretStore for OsKeyStore {
 
     fn delete(&self, pair: &PairId) -> Result<(), IdentityError> {
         match self.entry(pair)?.delete_credential() {
+            Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
+            Err(e) => Err(map_error(e)),
+        }
+    }
+}
+
+impl ListKeyStore for OsKeyStore {
+    fn read_list_key(&self) -> Result<Option<Zeroizing<Vec<u8>>>, IdentityError> {
+        match self.entry_named(LIST_KEY_ACCOUNT)?.get_secret() {
+            Ok(secret) => Ok(Some(Zeroizing::new(secret))),
+            Err(KeyringError::NoEntry) => Ok(None),
+            Err(e) => Err(map_error(e)),
+        }
+    }
+
+    fn write_list_key(&self, key: &[u8]) -> Result<(), IdentityError> {
+        self.entry_named(LIST_KEY_ACCOUNT)?
+            .set_secret(key)
+            .map_err(map_error)
+    }
+
+    fn delete_list_key(&self) -> Result<(), IdentityError> {
+        match self.entry_named(LIST_KEY_ACCOUNT)?.delete_credential() {
             Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
             Err(e) => Err(map_error(e)),
         }

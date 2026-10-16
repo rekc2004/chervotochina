@@ -1,8 +1,9 @@
 mod common;
 
 use chervo_identity::{
-    ACCOUNT_PREFIX, ChannelBinding, DEFAULT_SERVICE, DeviceId, IdentityError, KEY_BLOB_LEN,
-    KK_PROLOGUE_TAG, KxPeer, KxPublicKey, PairId, PairKey, PairKx, PublicKey, SecretStore,
+    ACCOUNT_PREFIX, ChannelBinding, DEFAULT_SERVICE, GuestSecret, IdentityError, KEY_BLOB_LEN,
+    KK_PROLOGUE_TAG, KNOCK_ID_LABEL, KNOCK_KDF_LABEL, KNOCK_TAG_LABEL, KxPeer, KxPublicKey,
+    LIST_KEY_ACCOUNT, LIST_KEY_LEN, ListKeyStore, PairId, PairKey, PairKx, PublicKey, SecretStore,
     SignDomain, UnavailableKeyStore, create, load, rekey,
 };
 use common::{FailingStore, FixedStore, LossyStore, MemStore};
@@ -24,19 +25,113 @@ fn some_public() -> PublicKey {
     k.public_key()
 }
 
-// ---------- заглушка DeviceId ----------
+// ---------- гостевой секрет приглашения ----------
 
 #[test]
-fn device_id_roundtrip() {
-    assert_eq!(DeviceId::from_bytes([7; 32]).as_bytes(), &[7; 32]);
+fn guest_generate_public_valid() {
+    let g = GuestSecret::generate().unwrap();
+    let p = g.public();
+    assert!(KxPublicKey::try_from_slice(&p.to_bytes()).is_ok());
+    assert_ne!(
+        g.public(),
+        GuestSecret::generate().unwrap().public(),
+        "два секрета не совпадают"
+    );
 }
 
 #[test]
-fn debug_does_not_leak_key() {
+fn guest_from_bytes_roundtrip() {
+    let g = GuestSecret::generate().unwrap();
+    let bytes = g.to_token_bytes();
+    let back = GuestSecret::from_bytes(bytes.as_slice()).unwrap();
+    assert_eq!(back.public(), g.public());
+    assert_eq!(*back.to_token_bytes(), *bytes);
+}
+
+#[test]
+fn guest_from_bytes_bad_len() {
+    for n in [0usize, 1, 31, 33, 64] {
+        assert_eq!(
+            GuestSecret::from_bytes(&vec![7u8; n]).err(),
+            Some(IdentityError::InvalidGuestSecret),
+            "длина {n}"
+        );
+    }
+    assert!(GuestSecret::from_bytes(&[7u8; 32]).is_ok());
+}
+
+#[test]
+fn guest_debug_redacted() {
+    let g = GuestSecret::from_bytes(&[0xAB; 32]).unwrap();
+    assert_eq!(format!("{g:?}"), "GuestSecret(..)");
     assert_eq!(
-        format!("{:?}", DeviceId::from_bytes([0xAB; 32])),
-        "DeviceId(..)"
+        IdentityError::InvalidGuestSecret.to_string(),
+        "invalid invite secret"
     );
+    fn z<T: ZeroizeOnDrop>() {}
+    z::<GuestSecret>();
+}
+
+#[test]
+fn sign_domains_pairwise_not_prefix() {
+    let mut all: Vec<&[u8]> = SignDomain::ALL.iter().map(|d| d.tag()).collect();
+    assert_eq!(all.len(), 4);
+    all.push(KK_PROLOGUE_TAG);
+    all.push(KNOCK_KDF_LABEL);
+    all.push(KNOCK_ID_LABEL);
+    all.push(KNOCK_TAG_LABEL);
+    for (i, a) in all.iter().enumerate() {
+        for (j, b) in all.iter().enumerate() {
+            if i != j {
+                assert_ne!(a, b, "теги {i} и {j} равны");
+                assert!(!b.starts_with(a), "тег {i} префикс тега {j}");
+            }
+        }
+    }
+}
+
+#[test]
+fn invite_accept_domain_separated() {
+    assert_eq!(
+        SignDomain::InviteAccept.tag(),
+        b"chervotochina/v1/invite-accept\0"
+    );
+    let (_, _, k) = fresh();
+    let pk = k.public_key();
+    let msg = b"payload";
+    let a = k.sign(SignDomain::InviteAccept, msg).unwrap();
+    let i = k.sign(SignDomain::Invite, msg).unwrap();
+    assert!(pk.verify(SignDomain::InviteAccept, msg, &a).is_ok());
+    assert!(pk.verify(SignDomain::Invite, msg, &i).is_ok());
+    assert_eq!(
+        pk.verify(SignDomain::Invite, msg, &a),
+        Err(IdentityError::BadSignature)
+    );
+    assert_eq!(
+        pk.verify(SignDomain::InviteAccept, msg, &i),
+        Err(IdentityError::BadSignature)
+    );
+}
+
+// ---------- ключ списка друзей ----------
+
+#[test]
+fn unavailable_list_key_store() {
+    assert_eq!(
+        UnavailableKeyStore.read_list_key().err(),
+        Some(IdentityError::NotImplemented)
+    );
+    assert_eq!(
+        UnavailableKeyStore.write_list_key(&[0; LIST_KEY_LEN]),
+        Err(IdentityError::NotImplemented)
+    );
+    assert_eq!(
+        UnavailableKeyStore.delete_list_key(),
+        Err(IdentityError::NotImplemented)
+    );
+    assert_eq!(LIST_KEY_ACCOUNT, "friends-key-v1");
+    assert!(!LIST_KEY_ACCOUNT.starts_with(ACCOUNT_PREFIX));
+    assert_eq!(LIST_KEY_LEN, 32);
 }
 
 // ---------- позитивные ----------
@@ -166,6 +261,7 @@ fn error_display_fixed_strings() {
             IdentityError::AuthFailed,
             "connection authentication failed",
         ),
+        (IdentityError::InvalidGuestSecret, "invalid invite secret"),
     ];
     for (e, text) in all {
         assert_eq!(e.to_string(), text);
@@ -248,7 +344,7 @@ fn prologue_tag_distinct_from_sign_domains() {
 #[test]
 fn domain_tags_prefix_free() {
     let tags: Vec<&[u8]> = SignDomain::ALL.iter().map(|d| d.tag()).collect();
-    assert_eq!(tags.len(), 3);
+    assert_eq!(tags.len(), 4);
     for (i, a) in tags.iter().enumerate() {
         assert_eq!(a.iter().filter(|b| **b == 0).count(), 1);
         assert_eq!(a.last(), Some(&0));
@@ -889,4 +985,44 @@ fn os_store_roundtrip_manual() {
         load(&first, &p, &new).unwrap_err(),
         IdentityError::KeyMissing
     );
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+#[test]
+#[ignore = "трогает реальное хранилище ОС; запускает владелец вручную"]
+fn os_list_key_roundtrip_manual() {
+    use chervo_identity::OsKeyStore;
+
+    struct Guard(String);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            if let Ok(s) = OsKeyStore::open_with_service(&self.0) {
+                let _ = s.delete_list_key();
+            }
+        }
+    }
+
+    let mut r = [0u8; 8];
+    getrandom::fill(&mut r).unwrap();
+    let hex: String = r.iter().map(|b| format!("{b:02x}")).collect();
+    let service = format!("chervotochina-test-{hex}");
+    assert_ne!(service, DEFAULT_SERVICE);
+    let _guard = Guard(service.clone());
+
+    let first = OsKeyStore::open_with_service(&service).unwrap();
+    assert!(first.read_list_key().unwrap().is_none());
+    first.write_list_key(&[0x5A; LIST_KEY_LEN]).unwrap();
+    let second = OsKeyStore::open_with_service(&service).unwrap();
+    assert_eq!(
+        second.read_list_key().unwrap().unwrap().as_slice(),
+        &[0x5A; LIST_KEY_LEN]
+    );
+    second.write_list_key(&[0x33; LIST_KEY_LEN]).unwrap();
+    assert_eq!(
+        first.read_list_key().unwrap().unwrap().as_slice(),
+        &[0x33; LIST_KEY_LEN]
+    );
+    second.delete_list_key().unwrap();
+    assert!(first.read_list_key().unwrap().is_none());
+    second.delete_list_key().unwrap();
 }

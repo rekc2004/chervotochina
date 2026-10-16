@@ -78,7 +78,8 @@ pub(crate) fn admit(inner: &Arc<Inner>, incoming: quinn::Incoming) {
 /// Результат успешной проверки вызываемого.
 struct Authed {
     pair: PairId,
-    caller_pub: [u8; 32],
+    ours_pub: [u8; 32],
+    theirs_pub: [u8; 32],
 }
 
 async fn serve(
@@ -122,8 +123,18 @@ async fn serve(
         refuse(&conn);
         return;
     };
-    match promote(&inner, conn.clone(), authed.pair, false, authed.caller_pub) {
-        Promoted::Lost(_) => {}
+    #[cfg(test)]
+    inner.test_pause_before_promote().await;
+    match promote(
+        &inner,
+        conn.clone(),
+        authed.pair,
+        false,
+        authed.ours_pub,
+        authed.theirs_pub,
+    ) {
+        // тройки нет в текущем наборе: соединение уже закрыто отказом, вызываемый молчит
+        Promoted::Lost(_) | Promoted::NotAllowed => {}
         Promoted::Winner(qc) => slot.send(qc),
     }
 }
@@ -163,11 +174,16 @@ async fn callee_handshake(
     if !inner.filter.is_allowed(&pair) {
         return Err(Fail::Failed);
     }
-    let caller_pub = snapshot
+    // тройка берётся из снимка, с которым прошёл KK; `promote` сверит её с текущим набором
+    let (ours_pub, theirs_pub) = snapshot
         .iter()
         .find(|p| p.pair() == pair)
-        .map(|p| p.theirs().to_bytes())
+        .map(|p| (p.ours_public().to_bytes(), p.theirs().to_bytes()))
         .ok_or(Fail::Failed)?;
     guard.disarm();
-    Ok(Authed { pair, caller_pub })
+    Ok(Authed {
+        pair,
+        ours_pub,
+        theirs_pub,
+    })
 }

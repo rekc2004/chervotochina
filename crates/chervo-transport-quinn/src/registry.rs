@@ -4,12 +4,19 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use chervo_identity::PairId;
+use chervo_identity::{KxPeer, PairId};
 use quinn::VarInt;
 
 use crate::CLOSE_DUPLICATE;
-use crate::conn::{QuinnConn, close_duplicate};
+use crate::conn::{QuinnConn, close_duplicate, refuse};
 use crate::{Inner, TransportEvent};
+
+/// Есть ли в наборе пара с точно такой тройкой `(пара, наш X25519, X25519 собеседника)`.
+fn has_triple(peers: &[KxPeer], pair: &PairId, ours: &[u8; 32], theirs: &[u8; 32]) -> bool {
+    peers.iter().any(|p| {
+        p.pair() == *pair && p.ours_public().to_bytes() == *ours && p.theirs().to_bytes() == *theirs
+    })
+}
 
 #[derive(Clone)]
 struct Entry {
@@ -17,9 +24,15 @@ struct Entry {
     initiator: bool,
     /// Публичный ключ X25519 звонящего в этом соединении.
     caller_pub: [u8; 32],
+    /// Публичный X25519 этой стороны и собеседника: тройка `(пара, ours, theirs)` должна
+    /// оставаться в наборе, иначе соединение закрывается (`set_peers`).
+    ours_pub: [u8; 32],
+    theirs_pub: [u8; 32],
 }
 
 pub(crate) enum Verdict {
+    /// Тройки нет в текущем наборе (набор сменился во время KK): соединение не принимается.
+    NotAllowed,
     /// Новое соединение выиграло; старое (если было живо) надо закрыть.
     Keep { replaced: Option<quinn::Connection> },
     /// Новое проиграло; победитель жив.
@@ -37,19 +50,34 @@ pub(crate) struct Registry {
 impl Registry {
     /// Правило одного соединения: одно направление, новое побеждает; встречные: остаётся то,
     /// где звонящий имеет меньший публичный X25519.
+    ///
+    /// Порядок замков: реестр, затем набор пар. Членство тройки в текущем наборе проверяется
+    /// под замком реестра, тем же, под которым `replace_peers` меняет набор.
     pub(crate) fn admit(
         &self,
+        peers: &Mutex<Arc<Vec<KxPeer>>>,
         pair: PairId,
         conn: quinn::Connection,
         initiator: bool,
-        caller_pub: [u8; 32],
+        ours_pub: [u8; 32],
+        theirs_pub: [u8; 32],
     ) -> Verdict {
+        let caller_pub = if initiator { ours_pub } else { theirs_pub };
         let new = Entry {
             conn,
             initiator,
             caller_pub,
+            ours_pub,
+            theirs_pub,
         };
         let mut map = self.map.lock().unwrap_or_else(PoisonError::into_inner);
+        let allowed = {
+            let cur = peers.lock().unwrap_or_else(PoisonError::into_inner);
+            has_triple(&cur, &pair, &ours_pub, &theirs_pub)
+        };
+        if !allowed {
+            return Verdict::NotAllowed;
+        }
         let list = map.entry(pair).or_default();
         list.retain(|e| e.conn.close_reason().is_none());
         match list.pop() {
@@ -88,6 +116,33 @@ impl Registry {
             .collect()
     }
 
+    /// Заменяет набор пар и возвращает живые соединения, чьей тройки в новом наборе нет
+    /// (они убраны из реестра; закрывает вызывающий после снятия замка).
+    pub(crate) fn replace_peers(
+        &self,
+        peers: &Mutex<Arc<Vec<KxPeer>>>,
+        new: Vec<KxPeer>,
+    ) -> Vec<(PairId, quinn::Connection)> {
+        let mut map = self.map.lock().unwrap_or_else(PoisonError::into_inner);
+        let new = Arc::new(new);
+        *peers.lock().unwrap_or_else(PoisonError::into_inner) = new.clone();
+        let mut removed = Vec::new();
+        for (pair, list) in map.iter_mut() {
+            list.retain(|e| {
+                if e.conn.close_reason().is_some() {
+                    return true;
+                }
+                if has_triple(&new, pair, &e.ours_pub, &e.theirs_pub) {
+                    return true;
+                }
+                removed.push((*pair, e.conn.clone()));
+                false
+            });
+        }
+        map.retain(|_, list| !list.is_empty());
+        removed
+    }
+
     pub(crate) fn remove(&self, pair: &PairId, stable_id: usize) {
         let mut map = self.map.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(list) = map.get_mut(pair) {
@@ -103,6 +158,8 @@ pub(crate) enum Promoted {
     Winner(QuinnConn),
     /// Новое проиграло: живой победитель.
     Lost(QuinnConn),
+    /// Тройки нет в текущем наборе: соединение закрыто отказом.
+    NotAllowed,
 }
 
 /// Пара подтверждена: поднять лимиты, применить правило одного соединения.
@@ -111,14 +168,23 @@ pub(crate) fn promote(
     conn: quinn::Connection,
     pair: PairId,
     initiator: bool,
-    caller_pub: [u8; 32],
+    ours_pub: [u8; 32],
+    theirs_pub: [u8; 32],
 ) -> Promoted {
     conn.set_max_concurrent_bi_streams(VarInt::from_u32(inner.cfg.post_auth_bidi));
     conn.set_receive_window(VarInt::MAX);
-    match inner
-        .registry
-        .admit(pair, conn.clone(), initiator, caller_pub)
-    {
+    match inner.registry.admit(
+        &inner.peers,
+        pair,
+        conn.clone(),
+        initiator,
+        ours_pub,
+        theirs_pub,
+    ) {
+        Verdict::NotAllowed => {
+            refuse(&conn);
+            Promoted::NotAllowed
+        }
         Verdict::Keep { replaced } => {
             if let Some(old) = replaced {
                 close_duplicate(&old);

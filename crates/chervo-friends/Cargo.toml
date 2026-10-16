@@ -8,6 +8,10 @@ publish.workspace = true
 [dependencies]
 chervo-identity.workspace = true
 chervo-addr.workspace = true
+chervo-token.workspace = true
+ring.workspace = true
+getrandom.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true

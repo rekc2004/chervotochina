@@ -14,6 +14,7 @@ pub enum SignDomain {
     Invite,
     AddressUpdate,
     KeyRevocation,
+    InviteAccept,
 }
 
 impl SignDomain {
@@ -21,6 +22,7 @@ impl SignDomain {
         SignDomain::Invite,
         SignDomain::AddressUpdate,
         SignDomain::KeyRevocation,
+        SignDomain::InviteAccept,
     ];
 
     pub const fn tag(self) -> &'static [u8] {
@@ -28,6 +30,7 @@ impl SignDomain {
             Self::Invite => b"chervotochina/v1/invite\0",
             Self::AddressUpdate => b"chervotochina/v1/address-update\0",
             Self::KeyRevocation => b"chervotochina/v1/key-revocation\0",
+            Self::InviteAccept => b"chervotochina/v1/invite-accept\0",
         }
     }
 }

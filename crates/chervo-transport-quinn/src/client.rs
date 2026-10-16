@@ -112,10 +112,13 @@ async fn attempt(
         }
     };
     match timeout_at(deadline, caller_handshake(inner, &conn, pair)).await {
-        Ok(Ok(caller_pub)) => {
+        Ok(Ok((ours, theirs))) => {
             Counters::bump(&inner.counters.auth_ok);
-            match promote(inner, conn, pair, true, caller_pub) {
+            #[cfg(test)]
+            inner.test_pause_before_promote().await;
+            match promote(inner, conn, pair, true, ours, theirs) {
                 Promoted::Winner(c) | Promoted::Lost(c) => Ok(c),
+                Promoted::NotAllowed => Err(TransportError::PeerNotAllowed),
             }
         }
         Ok(Err(fail)) => {
@@ -135,12 +138,12 @@ async fn attempt(
     }
 }
 
-/// Возвращает публичный X25519 звонящего (наш) для правила одного соединения.
+/// Возвращает публичные X25519 (наш, собеседника) для правила одного соединения и членства в наборе.
 async fn caller_handshake(
     inner: &Arc<Inner>,
     conn: &quinn::Connection,
     pair: PairId,
-) -> Result<[u8; 32], Fail> {
+) -> Result<([u8; 32], [u8; 32]), Fail> {
     let bind = binding(conn).map_err(|_| Fail::Failed)?;
     let snapshot = inner.peers_snapshot();
     let kx = snapshot
@@ -149,6 +152,7 @@ async fn caller_handshake(
         .ok_or(Fail::Failed)?;
     let (initiator, msg1) = kk_initiate(kx, &bind).map_err(|_| Fail::Failed)?;
     let ours_public = kx.ours_public().to_bytes();
+    let theirs_public = kx.theirs().to_bytes();
     let (tx, rx) = conn.open_bi().await.map_err(|_| Fail::Failed)?;
     // защитник владеет потоками: при любом выходе или отмене отказ уходит раньше FIN/STOP_SENDING
     let mut guard = RefuseGuard::new(conn, tx, rx);
@@ -159,7 +163,7 @@ async fn caller_handshake(
     guard.tx.write_all(&msg3).await.map_err(|_| Fail::Failed)?;
     guard.tx.finish().map_err(|_| Fail::Failed)?;
     guard.disarm();
-    Ok(ours_public)
+    Ok((ours_public, theirs_public))
 }
 
 /// После своего `rebind`: стук по каждому живому соединению с нового гнезда (первый сразу,

@@ -36,6 +36,7 @@ pub(crate) struct Counters {
     pub admit_full: AtomicU64,
     pub admit_exhausted: AtomicU64,
     pub connect_silent: AtomicU64,
+    pub removed_closed: AtomicU64,
     kk_active: AtomicU64,
 }
 
@@ -67,6 +68,7 @@ impl Counters {
             admit_full: g(&self.admit_full),
             admit_exhausted: g(&self.admit_exhausted),
             connect_silent: g(&self.connect_silent),
+            removed_closed: g(&self.removed_closed),
         }
     }
 }
