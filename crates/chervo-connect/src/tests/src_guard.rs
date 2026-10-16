@@ -59,11 +59,25 @@ fn src_guard() {
         ] {
             assert!(!s.text.contains(w), "{} contains {w}", s.rel);
         }
-        // имя поля диагноза `rendezvous_could_help` обязательно по спецификации и допустимо;
-        // любое другое упоминание посредника, STUN, UPnP, mDNS запрещено
-        let lower = s.text.to_lowercase().replace("rendezvous_could_help", "");
+        // имя поля диагноза `rendezvous_could_help` обязательно по спецификации, но допустимо
+        // только в `diag.rs` и `engine.rs` (и тестах диагноза); любое другое упоминание
+        // посредника, STUN, UPnP, mDNS запрещено
+        let flag_ok = matches!(
+            s.rel.as_str(),
+            "diag.rs" | "engine.rs" | "tests/diag.rs" | "tests/engine.rs"
+        );
+        let mut lower = s.text.to_lowercase();
+        if flag_ok {
+            lower = lower.replace("rendezvous_could_help", "");
+        }
         for w in ["rendezvous", "stun", "igd", "upnp", "mdns"] {
             assert!(!lower.contains(w), "{} contains {w}", s.rel);
+        }
+        // производственный код не запускает процессы и не открывает сокеты tokio
+        if !s.is_test {
+            for w in ["Command::new", "std::process", "tokio::net"] {
+                assert!(!s.text.contains(w), "{} contains {w}", s.rel);
+            }
         }
     }
 

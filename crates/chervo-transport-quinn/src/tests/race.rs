@@ -152,6 +152,37 @@ async fn race_deadline_total_not_per_address() {
     assert!(el >= deadline - Duration::from_millis(100), "{el:?}");
 }
 
+/// Ревью 13, L1: ответчик на раннем адресе завершает QUIC, но молчит в KK. Его попытка KK
+/// ограничена 3 с, и хороший адрес за ним успевает до общего срока (5 с).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn race_kk_silent_early_address_does_not_eat_deadline() {
+    let k = Keys::new();
+    let a = bind(cfg(), vec![k.peer_a()]);
+    let b = bind(cfg(), vec![k.peer_b()]);
+    let c = cfg();
+    let ep = server_endpoint(&c);
+    let mute = ep_addr(&ep);
+    // принимает QUIC и держит соединение, ни разу не открыв поток
+    let holder = tokio::spawn(async move {
+        let conn = serve_one(&ep, &c).await;
+        sleep_ms(20_000).await;
+        drop(conn);
+    });
+    let t0 = Instant::now();
+    let conn = a
+        .connect(&target(k.pid, vec![mute, addr_of(&b)]))
+        .await
+        .unwrap();
+    let el = t0.elapsed();
+    holder.abort();
+    assert!(alive(&conn));
+    // KK на первом адресе шёл до своего предела, а не до общего срока
+    assert!(el >= Duration::from_millis(2500), "{el:?}");
+    assert!(el < Duration::from_millis(4500), "{el:?}");
+    assert_eq!(a.stats().auth_ok, 1);
+    assert!(a.stats().auth_timeout >= 1);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn connect_all_dead_is_no_response() {
     let k = Keys::new();

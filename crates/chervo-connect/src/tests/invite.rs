@@ -157,8 +157,10 @@ async fn inviter_max_three_sessions() {
 #[tokio::test(start_paused = true)]
 async fn inviter_session_capped_by_token_expiry() {
     // таймер срока не успевает: конец приглашения обеспечивает только срок сессии
+    // срок M1 отключён (он короче и сработал бы раньше): проверяется только предел сессии
     let cfg = ConnectConfig {
         expire_interval: secs(3600),
+        invite_m1_deadline: secs(3600),
         ..ConnectConfig::default()
     };
     let mut d = duo_with(60, cfg);
@@ -171,6 +173,43 @@ async fn inviter_session_capped_by_token_expiry() {
     assert!(took <= secs(62), "session outlived the token: {took:?}");
     assert!(c.is_closed());
     assert_eq!(pending_count(&d.a), 0);
+}
+
+/// Ревью 13, L2: молчащий держатель токена освобождает сессию по сроку M1 (20 с), а не по
+/// сроку сессии (300 с); приглашение живёт, следующий приглашённый проходит.
+#[tokio::test(start_paused = true)]
+async fn inviter_silent_holder_dropped_after_m1_deadline() {
+    let mut d = duo(900);
+    let silent = FakeConn::lonely(d.pa, addr(B_ADDR), false);
+    d.a.t.push_incoming(silent.clone());
+    tokio::time::sleep(secs(15)).await;
+    assert!(!silent.is_closed(), "dropped before the M1 deadline");
+    // пока сессия занята, второе соединение отклоняется
+    let second = FakeConn::lonely(d.pa, addr(B_ADDR), false);
+    d.a.t.push_incoming(second.clone());
+    tokio::time::sleep(secs(1)).await;
+    assert!(second.is_closed());
+    tokio::time::sleep(secs(10)).await;
+    assert!(
+        silent.is_closed(),
+        "silent holder kept past the M1 deadline"
+    );
+    assert_eq!(pending_count(&d.a), 1, "invite died");
+    // настоящий приглашённый после освобождения доходит до SAS
+    let (b_end, a_end) = FakeConn::pair(d.pb, addr(A_ADDR), d.pa, addr(B_ADDR), true);
+    d.b.t.push_incoming(b_end);
+    d.a.t.push_incoming(a_end);
+    let Some(EngineEvent::SasReady { sas: sa, .. }) =
+        wait_event(&mut d.a.events, secs(30), is_sas).await
+    else {
+        panic!("A: no SAS")
+    };
+    let Some(EngineEvent::SasReady { sas: sb, .. }) =
+        wait_event(&mut d.b.events, secs(30), is_sas).await
+    else {
+        panic!("B: no SAS")
+    };
+    assert_eq!(sa.digits(), sb.digits());
 }
 
 #[tokio::test(start_paused = true)]

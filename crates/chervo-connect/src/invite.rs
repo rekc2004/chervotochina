@@ -617,8 +617,11 @@ where
     ) {
         let reached = Arc::new(AtomicBool::new(false));
         let (flag, clock) = (reached.clone(), self.clock.clone());
+        // ревью 13, L2: M1 ждётся не всю сессию, а `invite_m1_deadline` (обмен M1/M2 короткий);
+        // молчащий держатель токена освобождает приглашение быстро
+        let exchange_by = add_sat(Instant::now(), self.cfg.invite_m1_deadline).min(deadline);
         let res = timeout_at(
-            deadline,
+            exchange_by,
             inviter_exchange(&conn, &mut pending, move || {
                 flag.store(true, Ordering::SeqCst);
                 clock.now_unix()

@@ -124,6 +124,12 @@ async fn removed_during_kk_refused() {
             .is_err(),
         "вызываемому не должно прийти соединение"
     );
+    // ревью 13: прошедший KK, но не допущенный реестром, не считается в `auth_ok`
+    for t in [&a, &b] {
+        let st = t.stats();
+        assert_eq!(st.auth_ok, 0);
+        assert_eq!(st.auth_not_admitted, 1);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

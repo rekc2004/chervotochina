@@ -19,6 +19,9 @@ use crate::registry::{Promoted, promote};
 use crate::tls::client_config;
 use crate::{Inner, SERVER_NAME};
 
+/// Предел одной попытки KK на установленном соединении гонки (ревью 13, L1).
+const KK_ATTEMPT_CAP: Duration = Duration::from_secs(3);
+
 /// Не больше одного исходящего звонка на пару: запись убирается при любом выходе, в том числе
 /// при отмене future.
 struct DialGuard {
@@ -132,15 +135,26 @@ pub(crate) async fn connect(
         // QUIC-рукопожатие закончено: собеседник отвечал
         all_silent = false;
         let conn = &est.conn;
-        match timeout_at(deadline, caller_handshake(inner, conn, pair)).await {
+        // ревью 13, L1: один KK не дольше `KK_ATTEMPT_CAP` (и не дольше общего срока):
+        // ответчик, завершивший QUIC и молчащий в KK, не съедает весь вызов
+        let kk_by = Instant::now()
+            .checked_add(KK_ATTEMPT_CAP)
+            .map_or(deadline, |t| t.min(deadline));
+        match timeout_at(kk_by, caller_handshake(inner, conn, pair)).await {
             Ok(Ok((ours, theirs))) => {
-                Counters::bump(&inner.counters.auth_ok);
                 #[cfg(test)]
                 inner.test_pause_before_promote().await;
+                // `auth_ok` только после допуска реестром; иначе `auth_not_admitted`
                 outcome = Some(
                     match promote(inner, conn.clone(), pair, true, ours, theirs) {
-                        Promoted::Winner(c) | Promoted::Lost(c) => Ok(c),
-                        Promoted::NotAllowed => Err(TransportError::PeerNotAllowed),
+                        Promoted::Winner(c) | Promoted::Lost(c) => {
+                            Counters::bump(&inner.counters.auth_ok);
+                            Ok(c)
+                        }
+                        Promoted::NotAllowed => {
+                            Counters::bump(&inner.counters.auth_not_admitted);
+                            Err(TransportError::PeerNotAllowed)
+                        }
                     },
                 );
                 break;

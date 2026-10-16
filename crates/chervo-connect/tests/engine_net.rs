@@ -21,9 +21,10 @@ use chervo_connect::{
     RouteProbe, SystemClock,
 };
 use chervo_friends::{FriendBook, NewFriend, PendingRole};
-use chervo_identity::{IdentityError, ListKeyStore, PairId, PairKey, SecretStore};
+use chervo_identity::{IdentityError, KxPeer, ListKeyStore, PairId, PairKey, SecretStore};
 use chervo_token::addr_flow::exchange_addr_info;
-use chervo_transport::{Connection, PeerFilter, Transport};
+use chervo_token::{Token, decode};
+use chervo_transport::{Connection, PeerAddr, PeerFilter, Transport};
 use chervo_transport_quinn::{QuinnConfig, QuinnTransport};
 use zeroize::Zeroizing;
 
@@ -189,20 +190,22 @@ impl Node {
 
     /// Запуск движка; `book`: готовая книга (иначе открывается файл каталога).
     fn start(b: Bound, store: Arc<MemStore>, dir: Arc<TestDir>, book: Option<FriendBook>) -> Node {
+        Self::start_cfg(b, store, dir, book, engine_cfg())
+    }
+
+    fn start_cfg(
+        b: Bound,
+        store: Arc<MemStore>,
+        dir: Arc<TestDir>,
+        book: Option<FriendBook>,
+        cfg: ConnectConfig,
+    ) -> Node {
         let book = book.unwrap_or_else(|| FriendBook::open(&dir.file(), &*store).unwrap());
         let probe = Probe::new();
         let clock: Arc<dyn Clock> = Arc::new(SystemClock::new());
         let p: Arc<dyn RouteProbe> = probe.clone();
-        let (engine, events) = Engine::start(
-            b.t.clone(),
-            b.allow,
-            book,
-            store.clone(),
-            clock,
-            p,
-            engine_cfg(),
-        )
-        .unwrap();
+        let (engine, events) =
+            Engine::start(b.t.clone(), b.allow, book, store.clone(), clock, p, cfg).unwrap();
         Node {
             engine,
             events,
@@ -553,12 +556,28 @@ async fn engine_block_closes_and_stops_dialing() {
         .is_some(),
         "friend still connected after block"
     );
-    // заблокированный друг не набирается и не принимается; второй сторона не дозванивается
+    // заблокированный друг не набирается и не принимается; вторая сторона не дозванивается
     assert!(nx.engine.connect_now(&m.pair_x).is_err());
+    // исходящий набор из быстрого окна мог снять снимок пар до блокировки: он кончается не
+    // позже `auth_deadline`, поэтому снимок статистики берётся после него (+1 с), а не сразу
+    tokio::time::sleep(quinn_cfg().auth_deadline + Duration::from_secs(1)).await;
+    for n in [&mut nx, &mut ny] {
+        while wait_for(&mut n.events, 0, |_| true).await.is_some() {}
+    }
     let stats = nx.t.stats();
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert!(nx.engine.connection(&m.pair_x).is_none());
     assert!(ny.engine.connection(&m.pair_y).is_none());
+    // допуск: ни одного `Connected` ни у одной стороны, соединений нет
+    assert!(
+        wait_for(&mut nx.events, 0, is_connected).await.is_none(),
+        "blocked friend connected (A)"
+    );
+    assert!(
+        wait_for(&mut ny.events, 0, is_connected).await.is_none(),
+        "blocked friend connected (B)"
+    );
+    // `auth_ok` растёт только при допуске реестром
     assert_eq!(
         nx.t.stats().auth_ok,
         stats.auth_ok,
@@ -647,4 +666,88 @@ async fn engine_probe_change_reknocks_and_keeps_conn() {
     assert_eq!(nx.engine.connection(&m.pair_x).unwrap().conn_id(), id);
     assert!(round_trip(&nx.engine, &m.pair_x).await);
     assert!(round_trip(&ny.engine, &m.pair_y).await);
+}
+
+struct AllowAll;
+
+impl PeerFilter for AllowAll {
+    fn is_allowed(&self, _pair: &PairId) -> bool {
+        true
+    }
+}
+
+/// Ревью 13, L2: держатель токена соединяется и молчит. Пригласивший освобождает сессию по
+/// сроку M1 (здесь 2 с), приглашение живёт, настоящий приглашённый затем проходит целиком.
+#[tokio::test]
+async fn engine_silent_token_holder_dropped_then_real_invitee_succeeds() {
+    let cfg = ConnectConfig {
+        invite_m1_deadline: Duration::from_secs(2),
+        ..engine_cfg()
+    };
+    let mut a = Node::start_cfg(
+        bind(0),
+        Arc::new(MemStore::default()),
+        TestDir::new(),
+        None,
+        cfg,
+    );
+    let mut b = Node::new();
+    let (pa, text) = a
+        .engine
+        .create_invite(300, InviteAddrs::Manual(vec![a.addr]))
+        .unwrap();
+    // «держатель токена»: те же гостевые ключи, но по соединению ничего не отправляется
+    let Token::Invite(tok) = decode(&text).unwrap() else {
+        panic!("not an invite")
+    };
+    let pc = PairId::generate().unwrap();
+    let filter: Arc<dyn PeerFilter> = Arc::new(AllowAll);
+    let c =
+        QuinnTransport::bind(SocketAddr::from(([127, 0, 0, 1], 0)), quinn_cfg(), filter).unwrap();
+    c.set_peers(vec![KxPeer::new(
+        pc,
+        tok.guest_secret().unwrap().into_kx(),
+        tok.inviter_x(),
+    )])
+    .unwrap();
+    let silent = c
+        .connect(&PeerAddr {
+            pair: pc,
+            addrs: vec![a.addr],
+        })
+        .await
+        .unwrap();
+    // до срока M1 соединение держится
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1000), silent.closed())
+            .await
+            .is_err(),
+        "dropped before the M1 deadline"
+    );
+    // после срока M1 (но задолго до срока сессии в 300 с) пригласивший его закрывает
+    tokio::time::timeout(Duration::from_secs(5), silent.closed())
+        .await
+        .expect("silent holder not dropped after the M1 deadline");
+    // приглашение живо, настоящий приглашённый проходит
+    assert_eq!(a.engine.read_book(|bk| bk.pending().len()), 1);
+    let pb = b.engine.accept_invite(&text).unwrap();
+    let Some(EngineEvent::SasReady { sas: sa, .. }) = wait_for(&mut a.events, 15, is_sas).await
+    else {
+        panic!("A: no SAS")
+    };
+    let Some(EngineEvent::SasReady { sas: sb, .. }) = wait_for(&mut b.events, 15, is_sas).await
+    else {
+        panic!("B: no SAS")
+    };
+    assert_eq!(sa.digits(), sb.digits());
+    a.engine.confirm_sas(&pa, true, "Борис").unwrap();
+    b.engine.confirm_sas(&pb, true, "Анна").unwrap();
+    assert_eq!(
+        outcome(wait_for(&mut a.events, 15, is_finished).await),
+        Some(InviteOutcome::Added)
+    );
+    assert_eq!(
+        outcome(wait_for(&mut b.events, 15, is_finished).await),
+        Some(InviteOutcome::Added)
+    );
 }

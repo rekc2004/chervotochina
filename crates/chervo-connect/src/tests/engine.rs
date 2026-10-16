@@ -329,3 +329,103 @@ impl crate::Clock for FixedClock {
         BASE_UNIX
     }
 }
+
+/// Ревью 13, M1: друг перечисляет адреса жертв перед рабочим и обрывает каждое соединение.
+/// Жертвы получают неудачу при каждом успешном наборе (рост задержки), а набор самой пары
+/// не чаще `min_redial`.
+#[tokio::test(start_paused = true)]
+async fn liar_friend_dropping_connections_cannot_hammer_victims() {
+    use chervo_addr::AddrSource;
+    let mut pre = Pre::new();
+    let victims = ["5.6.7.1:4000", "5.6.7.2:4000", "5.6.7.3:4000"];
+    let hint_victim = "5.6.7.4:4000";
+    let working = "9.9.9.9:4000";
+    let mut addrs: Vec<_> = victims
+        .iter()
+        .map(|a| known(a, AddrSource::AddressUpdate, false))
+        .collect();
+    addrs.push(inv(working));
+    addrs.push(known(hint_victim, AddrSource::AddressUpdate, true));
+    let p = pre.solo_friend(addrs);
+    let n = Node::start(pre, ConnectConfig::default());
+    let times: Arc<Mutex<Vec<tokio::time::Instant>>> = Arc::new(Mutex::new(Vec::new()));
+    let t = times.clone();
+    n.t.set_script(move |pair, _| {
+        t.lock().unwrap().push(tokio::time::Instant::now());
+        let c = FakeConn::lonely(*pair, addr(working), true);
+        // друг обрывает каждое соединение сразу
+        c.close();
+        Action::Ok(c, secs(0))
+    });
+    tokio::time::sleep(secs(600)).await;
+    let calls = n.t.calls_for(&p);
+    let count = |a: &str| calls.iter().filter(|c| c.contains(&addr(a))).count();
+    for v in victims {
+        // 30, 60, 120, 240, 480 с: не больше пяти набора за 600 с
+        assert!((1..=5).contains(&count(v)), "{v}: {}", count(v));
+    }
+    // подсказка растёт медленнее: 60, 120, 240, 480 с
+    assert!(
+        (1..=4).contains(&count(hint_victim)),
+        "{}",
+        count(hint_victim)
+    );
+    // сама пара не чаще раза в `min_redial`
+    let times = times.lock().unwrap().clone();
+    assert!(times.len() >= 10, "dial count {}", times.len());
+    assert!(times.len() <= 21, "dial count {}", times.len());
+    for w in times.windows(2) {
+        assert!(w[1] - w[0] >= secs(30), "redial too early");
+    }
+    // задержка у жертв растёт, а не держится на первом шаге
+    let now = tokio::time::Instant::now();
+    let (fails, _) = n
+        .engine
+        .inner
+        .lock()
+        .limiter
+        .entry_state(addr(victims[0]), now)
+        .unwrap();
+    assert!(fails >= 3, "fails {fails}");
+}
+
+/// Короткое соединение: следующий набор не раньше `min_redial` от его установки; долгое
+/// соединение набор сразу после обрыва не задерживает.
+#[tokio::test(start_paused = true)]
+async fn short_lived_connection_waits_min_redial_long_one_does_not() {
+    let mut pre = Pre::new();
+    let p = pre.solo_friend(vec![inv("5.6.7.8:4000")]);
+    let n = Node::start(pre, ConnectConfig::default());
+    let times: Arc<Mutex<Vec<tokio::time::Instant>>> = Arc::new(Mutex::new(Vec::new()));
+    let t = times.clone();
+    n.t.set_script(move |pair, _| {
+        let k = {
+            let mut v = t.lock().unwrap();
+            v.push(tokio::time::Instant::now());
+            v.len()
+        };
+        let c = FakeConn::lonely(*pair, addr("5.6.7.8:4000"), true);
+        let life = if k <= 3 { secs(1) } else { secs(100) };
+        let cc = c.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(life).await;
+            cc.close();
+        });
+        Action::Ok(c, secs(0))
+    });
+    tokio::time::sleep(secs(400)).await;
+    let times = times.lock().unwrap().clone();
+    assert!(times.len() >= 5, "dials {}", times.len());
+    // три коротких соединения: между наборами не меньше 30 с
+    for w in times[..4].windows(2) {
+        assert!(
+            w[1] - w[0] >= secs(30),
+            "redial after short connection too early"
+        );
+        assert!(w[1] - w[0] <= secs(33));
+    }
+    // четвёртое жило 100 с: пятый набор сразу после обрыва (в пределах такта)
+    let gap = times[4] - times[3];
+    assert!(gap >= secs(100) && gap <= secs(103), "{gap:?}");
+    assert!(n.engine.connection(&p).is_some() || n.t.call_count() >= 5);
+}

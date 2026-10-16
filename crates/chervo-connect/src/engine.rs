@@ -173,6 +173,9 @@ pub(crate) struct FriendRt {
     pub(crate) history: VecDeque<DialRecord>,
     pub(crate) last_reported: Option<NoDirectPath>,
     pub(crate) last_dial_at: Option<Instant>,
+    /// Когда с этим другом в последний раз установлено соединение (любое направление):
+    /// следующий наш набор не раньше `min_redial` после него.
+    pub(crate) last_conn_at: Option<Instant>,
 }
 
 pub(crate) struct LiveConn<C> {
@@ -219,6 +222,13 @@ pub(crate) struct Inner<T: ManagedTransport, S> {
 
 async fn wait_shutdown(mut rx: watch::Receiver<bool>) {
     let _ = rx.wait_for(|v| *v).await;
+}
+
+/// Соединение уже закрыто (одним опросом `closed()` без ожидания).
+fn closed_now<C: Connection>(conn: &C) -> bool {
+    let mut fut = std::pin::pin!(conn.closed());
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    fut.as_mut().poll(&mut cx).is_ready()
 }
 
 /// Пауза цикла не короче миллисекунды: нулевой период превратил бы цикл в busy loop.
@@ -412,6 +422,16 @@ where
             if st.live.get(&pair).is_some_and(|l| l.id == id) {
                 return;
             }
+            // Уже закрытое соединение (проигравшее при одновременном наборе или сброшенное
+            // другом сразу) запись не вытесняет: иначе оно стёрло бы живого победителя, а
+            // повтор набора ждал бы `min_redial`. Само соединение считается коротким:
+            // минимальная задержка набора идёт от него.
+            if closed_now(&conn) {
+                st.friends.entry(pair).or_default().last_conn_at = Some(now);
+                drop(st);
+                conn.close();
+                return;
+            }
             let own_stable = st.own.stable_reachable(unix);
             let path = path_kind(
                 conn.remote_addr(),
@@ -449,6 +469,7 @@ where
                 .book
                 .note_contact(&*self.store, &pair, conn.remote_addr(), unix);
             let rt = st.friends.entry(pair).or_default();
+            rt.last_conn_at = Some(now);
             rt.consecutive_fails = 0;
             rt.history.clear();
             rt.last_reported = None;
@@ -528,6 +549,16 @@ where
             if st.live.contains_key(&pair) || st.inflight.contains(&pair) {
                 continue;
             }
+            // ревью 13, M1: после только что установленного соединения не набирать раньше
+            // `min_redial` (друг-лжец обрывает каждое соединение)
+            let too_soon = st
+                .friends
+                .get(&pair)
+                .and_then(|r| r.last_conn_at)
+                .is_some_and(|t| add_sat(t, self.cfg.min_redial) > now);
+            if too_soon {
+                continue;
+            }
             let plan = match st.guests.get(&pair) {
                 Some(g) if st.book.get(&pair).is_none() => guest_plan(&g.token_addrs, local),
                 _ => friend_plan(&st.book.usable_known(&pair, unix), local),
@@ -572,6 +603,23 @@ where
                 {
                     let mut st = self.lock();
                     st.inflight.remove(&pair);
+                    // ревью 13, M1: списаны были все выбранные адреса, поэтому все, кроме
+                    // победителя, получают неудачу (рост задержки). Иначе лгущий друг с
+                    // адресами жертв перед рабочим и обрывом каждого соединения гнал бы
+                    // стук на жертв при каждом наборе. Не быстрое окно: рост всегда.
+                    let won = normalize(conn.remote_addr());
+                    let plain: Vec<SocketAddr> = chosen
+                        .iter()
+                        .filter(|c| !c.hint && normalize(c.addr) != won)
+                        .map(|c| c.addr)
+                        .collect();
+                    let hints: Vec<SocketAddr> = chosen
+                        .iter()
+                        .filter(|c| c.hint && normalize(c.addr) != won)
+                        .map(|c| c.addr)
+                        .collect();
+                    st.limiter.failed(&plain, false, false, now);
+                    st.limiter.failed(&hints, true, false, now);
                     st.limiter.succeeded(conn.remote_addr());
                     st.last_success_any = Some(now);
                 }
@@ -948,6 +996,10 @@ where
         }
         let addrs = Inner::<T, S>::friend_addrs(&st, pair);
         st.limiter.reset_pair(&addrs, now);
+        // местное событие пользователя снимает и минимальную задержку повторного набора
+        if let Some(rt) = st.friends.get_mut(pair) {
+            rt.last_conn_at = None;
+        }
         self.inner.start_fast_pair(&mut st, *pair, now);
         Ok(())
     }

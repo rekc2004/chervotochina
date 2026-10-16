@@ -115,7 +115,6 @@ async fn serve(
             return;
         }
     };
-    Counters::bump(&inner.counters.auth_ok);
     // Место в очереди резервируется до `promote`: победитель, не помещающийся в очередь, не должен
     // вытеснить старое соединение пары и сам тут же закрыться.
     let Ok(slot) = inner.queue_tx.try_reserve() else {
@@ -134,8 +133,12 @@ async fn serve(
         authed.theirs_pub,
     ) {
         // тройки нет в текущем наборе: соединение уже закрыто отказом, вызываемый молчит
-        Promoted::Lost(_) | Promoted::NotAllowed => {}
-        Promoted::Winner(qc) => slot.send(qc),
+        Promoted::NotAllowed => Counters::bump(&inner.counters.auth_not_admitted),
+        Promoted::Lost(_) => Counters::bump(&inner.counters.auth_ok),
+        Promoted::Winner(qc) => {
+            Counters::bump(&inner.counters.auth_ok);
+            slot.send(qc);
+        }
     }
 }
 

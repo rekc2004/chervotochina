@@ -12,6 +12,11 @@ pub struct ConnectConfig {
     pub fast_period: Duration,
     pub dial_base: Duration,
     pub dial_cap: Duration,
+    /// Минимум между установлением соединения с другом и следующим нашим набором этой пары
+    /// (ревью 13, M1): друг, обрывающий каждое соединение, не может вызвать набор чаще. Равен
+    /// `dial_base` (30 с); действует только после короткого соединения, так как к концу
+    /// долгого срок давно прошёл. Пользовательское «соединить сейчас» его снимает.
+    pub min_redial: Duration,
     pub hint_base: Duration,
     pub hint_cap: Duration,
     pub per_ip_dials: u32,
@@ -23,6 +28,9 @@ pub struct ConnectConfig {
     pub addr_info_in_per_min: u32,
     pub addr_info_out_interval: Duration,
     pub invite_session: Duration,
+    /// Срок приглашающего на M1 внутри сессии (ревью 13, L2): держатель токена, молчащий
+    /// после соединения, освобождает приглашение через это время, а не через `invite_session`.
+    pub invite_m1_deadline: Duration,
     pub expire_interval: Duration,
     pub unreachable_after_fails: u32,
     pub udp_blocked_window: Duration,
@@ -39,6 +47,7 @@ impl Default for ConnectConfig {
             fast_period: Duration::from_secs(5),
             dial_base: Duration::from_secs(30),
             dial_cap: Duration::from_secs(600),
+            min_redial: Duration::from_secs(30),
             hint_base: Duration::from_secs(60),
             hint_cap: Duration::from_secs(1800),
             per_ip_dials: 4,
@@ -50,6 +59,7 @@ impl Default for ConnectConfig {
             addr_info_in_per_min: 4,
             addr_info_out_interval: Duration::from_secs(10),
             invite_session: Duration::from_secs(300),
+            invite_m1_deadline: Duration::from_secs(20),
             expire_interval: Duration::from_secs(60),
             unreachable_after_fails: 3,
             udp_blocked_window: Duration::from_secs(600),

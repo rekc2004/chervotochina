@@ -165,7 +165,10 @@ pub struct TransportStats {
     pub retry_sent: u64,
     pub ignored_rate: u64,
     pub ignored_busy: u64,
+    /// Звонки и ответы, прошедшие KK и допущенные реестром (победитель или проигравший дубль).
     pub auth_ok: u64,
+    /// KK прошёл, но тройки уже нет в текущем наборе пар (`promote` -> `NotAllowed`).
+    pub auth_not_admitted: u64,
     pub auth_failed: u64,
     pub auth_timeout: u64,
     pub duplicates_closed: u64,
