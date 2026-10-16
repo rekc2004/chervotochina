@@ -1,9 +1,9 @@
 -- nft a
-dns=0 peer=2497 nd=0 mcast_kernel=0 portmap=0 other=0 
+dns=0 peer=2454 nd=0 mcast_kernel=0 portmap=0 other=0 
 -- nft b
-dns=0 peer=2151 nd=0 mcast_kernel=0 portmap=0 other=0 
+dns=0 peer=2158 nd=0 mcast_kernel=0 portmap=0 other=0 
 -- nft r
-fwd_ok=4648 fwd_drop=0 
+fwd_ok=4612 fwd_drop=0 
 -- analysis a
 VIOLATIONS 0
 -- analysis b

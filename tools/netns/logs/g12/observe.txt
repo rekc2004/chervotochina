@@ -1,6 +1,8 @@
-OBSERVE datagrams=103 quic_initial=8 client_decrypted=6 server_decrypted=2 skips=0
+SKIP reason=needle_too_short needle=uname_n
+SKIP reason=cid_len pkt=53
+OBSERVE datagrams=105 quic_initial=8 client_decrypted=6 server_decrypted=2 skips=1
 QUIC versions=[1] client_dcid_lens=[8, 20] client_scid_lens=[8] alpn_found=1
-CONN 0 client_scid=3900d8dc978fd5a4 first_dcid=a5f27243aada6d10707db804ea98ced1e3f14d1b
-CONN 1 client_scid=84a492a20584bd7d first_dcid=b687cacc0082473975ca90228c798fc2fcd25d23
+CONN 0 client_scid=7e5efca3a7d46a89 first_dcid=a99765cc762cdbdfa7449ec576899f0ec016ff2b
+CONN 1 client_scid=bfdee39a860b116f first_dcid=4ca4fdca438d9b6c46d76b9e9d89940f0dfb970f
 RESULT PASS совпадений нет; положительные контроли выполнены
-размер захвата: 124760 байт
+размер захвата: 124987 байт

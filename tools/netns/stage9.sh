@@ -456,12 +456,26 @@ need_privs() {
     || { echo "INCONCLUSIVE: нужны ip, nft, tcpdump" >&2; exit 3; }
 }
 
-trap 'for p in "${BGPIDS[@]}"; do kill "$p" 2>/dev/null || true; done' EXIT
+# Уборка при любом выходе: фоновые процессы, а для `all` ещё и netns chv-* (при успехе и при ошибке).
+TEARDOWN_ON_EXIT=0
+cleanup() {
+  for p in "${BGPIDS[@]}"; do kill "$p" 2>/dev/null || true; done
+  if [[ "$TEARDOWN_ON_EXIT" == 1 ]]; then do_teardown || true; fi
+}
+trap cleanup EXIT
 case "$CMD" in
   teardown) need_privs; do_teardown ;;
   g1) need_privs; g1 ;;
   g12) need_privs; g12 ;;
   knock) need_privs; mkdirs; knock ;;
-  all) need_privs; g1; g12; knock; echo "--- $SUMMARY"; cat "$SUMMARY" ;;
+  all)
+    need_privs
+    TEARDOWN_ON_EXIT=1
+    mkdirs
+    g1; g12; knock
+    echo "--- $SUMMARY"; cat "$SUMMARY"
+    do_teardown
+    TEARDOWN_ON_EXIT=0
+    ;;
   *) echo "использование: stage9.sh <g1|g12|knock|all|teardown>" >&2; exit 2 ;;
 esac
