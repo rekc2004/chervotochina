@@ -76,6 +76,18 @@ impl Registry {
         }
     }
 
+    /// Живые соединения: (пара, адрес собеседника).
+    pub(crate) fn live_remotes(&self) -> Vec<(PairId, std::net::SocketAddr)> {
+        let map = self.map.lock().unwrap_or_else(PoisonError::into_inner);
+        map.iter()
+            .flat_map(|(pair, list)| {
+                list.iter()
+                    .filter(|e| e.conn.close_reason().is_none())
+                    .map(|e| (*pair, e.conn.remote_address()))
+            })
+            .collect()
+    }
+
     pub(crate) fn remove(&self, pair: &PairId, stable_id: usize) {
         let mut map = self.map.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(list) = map.get_mut(pair) {
@@ -142,8 +154,11 @@ pub(crate) fn promote(
 /// Опрос `remote_address()` раз в `addr_poll` до закрытия; событие смены адреса; уборка записи.
 fn spawn_monitor(inner: &Arc<Inner>, conn: quinn::Connection, pair: PairId) {
     let inner = inner.clone();
+    let mut last = conn.remote_address();
+    // закрепление адреса собеседника до закрытия (берётся синхронно, до конца `serve`);
+    // при смене адреса перепинивается
+    let mut pin = inner.knock.pin(last);
     tokio::spawn(async move {
-        let mut last = conn.remote_address();
         let mut tick =
             tokio::time::interval(inner.cfg.addr_poll.max(std::time::Duration::from_millis(1)));
         let reason = loop {
@@ -153,6 +168,7 @@ fn spawn_monitor(inner: &Arc<Inner>, conn: quinn::Connection, pair: PairId) {
                     let now = conn.remote_address();
                     if now != last {
                         last = now;
+                        pin = inner.knock.pin(now);
                         let _ = inner.events.send(TransportEvent::RemoteAddrChanged { pair });
                     }
                 }
@@ -167,6 +183,7 @@ fn spawn_monitor(inner: &Arc<Inner>, conn: quinn::Connection, pair: PairId) {
                 .events
                 .send(TransportEvent::ConnectionReplaced { pair });
         }
+        drop(pin);
         inner.registry.remove(&pair, conn.stable_id());
     });
 }

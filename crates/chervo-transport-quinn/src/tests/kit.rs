@@ -134,6 +134,8 @@ pub fn test_cfg() -> QuinnConfig {
     QuinnConfig {
         auth_deadline: Duration::from_secs(5),
         per_ip_max: 1000,
+        // сырые клиенты проверяют слой после стука; стук проверяют тесты `knock.rs`
+        knock_required: false,
         ..QuinnConfig::default()
     }
 }

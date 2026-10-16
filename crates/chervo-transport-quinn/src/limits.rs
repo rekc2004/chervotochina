@@ -28,6 +28,14 @@ pub(crate) struct Counters {
     pub kk_candidates: AtomicU64,
     pub kk_trials_peak: AtomicU64,
     pub kk_denied: AtomicU64,
+    pub knock_ok: AtomicU64,
+    pub knock_bad: AtomicU64,
+    pub knock_replay: AtomicU64,
+    pub knock_skewed: AtomicU64,
+    pub dropped_unadmitted: AtomicU64,
+    pub admit_full: AtomicU64,
+    pub admit_exhausted: AtomicU64,
+    pub connect_silent: AtomicU64,
     kk_active: AtomicU64,
 }
 
@@ -51,6 +59,14 @@ impl Counters {
             kk_candidates: g(&self.kk_candidates),
             kk_trials_peak: g(&self.kk_trials_peak),
             kk_denied: g(&self.kk_denied),
+            knock_ok: g(&self.knock_ok),
+            knock_bad: g(&self.knock_bad),
+            knock_replay: g(&self.knock_replay),
+            knock_skewed: g(&self.knock_skewed),
+            dropped_unadmitted: g(&self.dropped_unadmitted),
+            admit_full: g(&self.admit_full),
+            admit_exhausted: g(&self.admit_exhausted),
+            connect_silent: g(&self.connect_silent),
         }
     }
 }

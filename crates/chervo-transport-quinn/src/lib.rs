@@ -15,6 +15,7 @@
 
 mod client;
 mod conn;
+mod knock;
 mod limits;
 mod registry;
 mod server;
@@ -31,10 +32,13 @@ use std::time::Duration;
 
 use chervo_identity::{KxPeer, PairId};
 use chervo_transport::{PeerAddr, PeerFilter, Transport, TransportError};
+use quinn::Runtime;
 use tokio::sync::{Semaphore, broadcast, mpsc};
 
 pub use conn::{QuinnConn, QuinnRecv, QuinnSend};
+pub use knock::window_at;
 
+use knock::{KnockSocket, KnockState};
 use limits::{Counters, IpLimiter, KkGate};
 use registry::Registry;
 
@@ -46,6 +50,12 @@ pub const EKM_CONTEXT: &[u8] = b"";
 pub const CLOSE_REFUSED: u32 = 0;
 /// Только аутентифицированному собеседнику.
 pub const CLOSE_DUPLICATE: u32 = 1;
+/// Длина окна «стука», секунд.
+pub const KNOCK_WINDOW_SECS: u64 = 30;
+/// Принимаются окна `w-1..=w+1`.
+pub const KNOCK_ACCEPT_SPAN: u64 = 1;
+/// Окна `w±2..=w±10` держатся как «подсказка»: верный стук в них не допускается, но отмечается.
+pub const KNOCK_HINT_SPAN: u64 = 10;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuinnConfig {
@@ -77,6 +87,21 @@ pub struct QuinnConfig {
     /// Готовых соединений в очереди `accept`; переполнено: закрыть новое.
     pub accept_queue: usize,
     pub addr_poll: Duration,
+    /// До верного стука адрес не получает ни одного пакета; звонящий стучит перед QUIC.
+    /// `false` только в тестах (сырые клиенты, проверяющие слой после стука).
+    pub knock_required: bool,
+    /// Жизнь допуска после верного стука.
+    pub knock_admit_ttl: Duration,
+    /// Подтверждённых `Incoming` на один допуск.
+    pub knock_admit_attempts: u32,
+    /// Пауза между стуком и первым пакетом QUIC.
+    pub knock_lead: Duration,
+    /// Досылка стука в моменты `resend`, `3*resend` после первого.
+    pub knock_resend_after: Duration,
+    /// Размер таблицы допуска (адресов).
+    pub admit_capacity: usize,
+    /// Размер кэша виденных стуков.
+    pub replay_capacity: usize,
 }
 
 impl Default for QuinnConfig {
@@ -99,6 +124,13 @@ impl Default for QuinnConfig {
             keep_alive: Duration::from_secs(10),
             accept_queue: 16,
             addr_poll: Duration::from_secs(1),
+            knock_required: true,
+            knock_admit_ttl: Duration::from_secs(10),
+            knock_admit_attempts: 2,
+            knock_lead: Duration::from_millis(30),
+            knock_resend_after: Duration::from_secs(1),
+            admit_capacity: 1024,
+            replay_capacity: 4096,
         }
     }
 }
@@ -106,8 +138,16 @@ impl Default for QuinnConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TransportEvent {
-    RemoteAddrChanged { pair: PairId },
-    ConnectionReplaced { pair: PairId },
+    RemoteAddrChanged {
+        pair: PairId,
+    },
+    ConnectionReplaced {
+        pair: PairId,
+    },
+    /// Стук пары пришёл с верным тегом, но в окне вне допуска: у кого-то сбиты часы.
+    ClockSkewSuspected {
+        pair: PairId,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -128,6 +168,22 @@ pub struct TransportStats {
     pub kk_trials_peak: u64,
     /// Отказы ворот: бюджет или дедлайн до старта перебора.
     pub kk_denied: u64,
+    /// Допуски по верному стуку.
+    pub knock_ok: u64,
+    /// Стук с известным `id`, но неверным тегом.
+    pub knock_bad: u64,
+    /// Повторный стук (nonce уже виден).
+    pub knock_replay: u64,
+    /// Верный стук в окне «подсказки» (часы расходятся).
+    pub knock_skewed: u64,
+    /// Принятые гнездом записи недопущенных адресов (не переданы quinn).
+    pub dropped_unadmitted: u64,
+    /// Переполнение таблицы допуска или кэша повторов.
+    pub admit_full: u64,
+    /// Подтверждённый `Incoming` без допуска или сверх числа попыток.
+    pub admit_exhausted: u64,
+    /// Попытки звонка, на которые не пришло ни одного пакета.
+    pub connect_silent: u64,
 }
 
 pub(crate) struct Inner {
@@ -137,6 +193,7 @@ pub(crate) struct Inner {
     peers: Mutex<Arc<Vec<KxPeer>>>,
     pub(crate) events: broadcast::Sender<TransportEvent>,
     pub(crate) counters: Arc<Counters>,
+    pub(crate) knock: Arc<KnockState>,
     pub(crate) limiter: Mutex<IpLimiter>,
     pub(crate) preauth: Arc<Semaphore>,
     pub(crate) gate: KkGate,
@@ -187,19 +244,29 @@ impl QuinnTransport {
         }
         sock.set_nonblocking(true).map_err(|_| TransportError::Io)?;
         let base = tls::base_server_config(&cfg).map_err(|_| TransportError::Io)?;
-        let endpoint = quinn::Endpoint::new(
+        let counters = Arc::new(Counters::default());
+        let (events, _) = broadcast::channel(64);
+        let raw = quinn::TokioRuntime
+            .wrap_udp_socket(sock)
+            .map_err(|_| TransportError::Io)?;
+        let knock = KnockState::new(
+            &cfg,
+            counters.clone(),
+            filter.clone(),
+            events.clone(),
+            raw.clone(),
+        );
+        let endpoint = quinn::Endpoint::new_with_abstract_socket(
             quinn::EndpointConfig::default(),
             Some(base),
-            sock,
+            Arc::new(KnockSocket::new(raw, knock.clone())),
             Arc::new(quinn::TokioRuntime),
         )
         .map_err(|_| TransportError::Io)?;
         let client_quic = tls::client_quic().map_err(|_| TransportError::Io)?;
         let client_transport =
             tls::pre_auth_transport(&cfg, tls::Role::Client).map_err(|_| TransportError::Io)?;
-        let counters = Arc::new(Counters::default());
         let (queue_tx, queue_rx) = mpsc::channel(cfg.accept_queue.max(1));
-        let (events, _) = broadcast::channel(64);
         let inner = Arc::new(Inner {
             limiter: Mutex::new(IpLimiter::new(
                 cfg.per_ip_max,
@@ -215,6 +282,7 @@ impl QuinnTransport {
             endpoint,
             events,
             counters,
+            knock,
             queue_tx,
             queue_rx: tokio::sync::Mutex::new(queue_rx),
             client_quic,
@@ -233,6 +301,7 @@ impl QuinnTransport {
     /// (`kk_budget_burst` меньше этого числа поднимается, иначе стоимость обрезалась бы).
     pub fn set_peers(&self, peers: Vec<KxPeer>) {
         self.inner.gate.set_min_burst(peers.len());
+        self.inner.knock.set_peers(&peers);
         *self
             .inner
             .peers
@@ -242,10 +311,27 @@ impl QuinnTransport {
 
     pub fn rebind(&self, sock: std::net::UdpSocket) -> Result<(), TransportError> {
         sock.set_nonblocking(true).map_err(|_| TransportError::Io)?;
+        let raw = quinn::TokioRuntime
+            .wrap_udp_socket(sock)
+            .map_err(|_| TransportError::Io)?;
+        let wrapped = Arc::new(KnockSocket::new(raw.clone(), self.inner.knock.clone()));
         self.inner
             .endpoint
-            .rebind(sock)
-            .map_err(|_| TransportError::Io)
+            .rebind_abstract(wrapped)
+            .map_err(|_| TransportError::Io)?;
+        self.inner.knock.set_tx(raw);
+        client::reknock_live(&self.inner);
+        Ok(())
+    }
+
+    /// Поправка часов (мс) к системному времени для стука; задаётся только отсюда
+    /// (значение из кнопки «синхронизировать время»), сама никогда не меняется.
+    pub fn set_clock_offset(&self, offset_ms: i64) {
+        self.inner.knock.set_offset(offset_ms);
+    }
+
+    pub fn clock_offset_ms(&self) -> i64 {
+        self.inner.knock.offset()
     }
 
     pub fn events(&self) -> broadcast::Receiver<TransportEvent> {

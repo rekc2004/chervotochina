@@ -9,6 +9,7 @@ use tokio::time::{Instant, timeout_at};
 
 use crate::Inner;
 use crate::conn::{Fail, RefuseGuard, binding, expect_eof, read_exact_n, refuse};
+use crate::knock::Pin;
 use crate::limits::Counters;
 use crate::registry::{Promoted, promote};
 use crate::tls::ephemeral_server_config;
@@ -20,6 +21,11 @@ pub(crate) fn admit(inner: &Arc<Inner>, incoming: quinn::Incoming) {
             Ok(()) => Counters::bump(&inner.counters.retry_sent),
             Err(e) => e.into_incoming().ignore(),
         }
+        return;
+    }
+    if inner.knock.required && !inner.knock.consume_attempt(incoming.remote_address()) {
+        // подтверждённый `Incoming` без допуска или сверх числа попыток: молчание
+        incoming.ignore();
         return;
     }
     let ip = incoming.remote_address().ip();
@@ -59,10 +65,12 @@ pub(crate) fn admit(inner: &Arc<Inner>, incoming: quinn::Incoming) {
         return;
     };
     let deadline = Instant::now() + inner.cfg.auth_deadline;
+    // закрепление адреса до конца KK: пакеты рукопожатия проходят и без действующего допуска
+    let pin = inner.knock.pin(incoming.remote_address());
     if let Ok(connecting) = incoming.accept_with(server_cfg) {
         let inner = inner.clone();
         tokio::spawn(async move {
-            serve(inner, connecting, deadline, permit).await;
+            serve(inner, connecting, deadline, permit, pin).await;
         });
     }
 }
@@ -78,6 +86,7 @@ async fn serve(
     connecting: quinn::Connecting,
     deadline: Instant,
     _permit: OwnedSemaphorePermit,
+    _pin: Pin,
 ) {
     let conn = match timeout_at(deadline, connecting).await {
         Ok(Ok(c)) => c,

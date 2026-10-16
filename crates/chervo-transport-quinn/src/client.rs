@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use chervo_identity::{KK_MSG2_LEN, PairId, kk_initiate};
 use chervo_transport::{PeerAddr, TransportError};
-use tokio::time::{Instant, timeout_at};
+use tokio::time::{Instant, sleep, sleep_until, timeout_at};
 
 use crate::conn::{Fail, QuinnConn, RefuseGuard, binding, expect_eof, read_exact_n, refuse};
 use crate::limits::Counters;
@@ -49,17 +49,65 @@ async fn attempt(
     pair: PairId,
     addr: SocketAddr,
 ) -> Result<QuinnConn, TransportError> {
-    let deadline = Instant::now() + inner.cfg.auth_deadline;
+    let started = Instant::now();
+    let deadline = started + inner.cfg.auth_deadline;
+    let knock = &inner.knock;
+    let required = knock.required;
+    // закрепление: ответы адреса проходят, новый `Incoming` с него без своего стука нет
+    let pin = knock.pin(addr);
+    if required {
+        let first = knock
+            .make_knock(&pair, false)
+            .ok_or(TransportError::AuthFailed)?;
+        knock.send(addr, &first).await;
+        sleep(inner.cfg.knock_lead).await;
+    }
     let cc = client_config(&inner.client_quic, &inner.client_transport);
     let connecting = inner
         .endpoint
         .connect_with(cc, addr, SERVER_NAME)
         .map_err(|_| TransportError::Io)?;
-    let conn = match timeout_at(deadline, connecting).await {
-        Ok(Ok(c)) => c,
-        Ok(Err(_)) => return Err(TransportError::Io),
-        Err(_) => {
+    tokio::pin!(connecting);
+    // досылка стука в моменты `resend` и `3*resend` (третий по системному времени при поправке)
+    let resend = inner.cfg.knock_resend_after;
+    let mut sent = 1u32;
+    let outcome = loop {
+        let next = match sent {
+            1 => Some(started + resend),
+            2 => Some(started + resend.saturating_mul(3)),
+            _ => None,
+        }
+        .filter(|_| required);
+        tokio::select! {
+            r = &mut connecting => break Some(r),
+            () = sleep_until(deadline) => break None,
+            () = async {
+                match next {
+                    Some(t) => sleep_until(t).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                let raw = sent == 2 && knock.offset() != 0;
+                if let Some(k) = knock.make_knock(&pair, raw) {
+                    knock.send(addr, &k).await;
+                }
+                sent += 1;
+            }
+        }
+    };
+    let conn = match outcome {
+        Some(Ok(c)) => c,
+        Some(Err(_)) => {
+            if !pin.heard() {
+                Counters::bump(&inner.counters.connect_silent);
+            }
+            return Err(TransportError::Io);
+        }
+        None => {
             Counters::bump(&inner.counters.auth_timeout);
+            if !pin.heard() {
+                Counters::bump(&inner.counters.connect_silent);
+            }
             return Err(TransportError::TimedOut);
         }
     };
@@ -112,4 +160,35 @@ async fn caller_handshake(
     guard.tx.finish().map_err(|_| Fail::Failed)?;
     guard.disarm();
     Ok(ours_public)
+}
+
+/// После своего `rebind`: стук по каждому живому соединению с нового гнезда (первый сразу,
+/// остальные в моменты `resend`, `3*resend`), чтобы собеседник допустил новый адрес.
+pub(crate) fn reknock_live(inner: &Arc<Inner>) {
+    if !inner.knock.required {
+        return;
+    }
+    let targets = inner.registry.live_remotes();
+    for (pair, addr) in &targets {
+        if let Some(k) = inner.knock.make_knock(pair, false) {
+            inner.knock.send_now(*addr, &k);
+        }
+    }
+    if targets.is_empty() || tokio::runtime::Handle::try_current().is_err() {
+        return;
+    }
+    let inner = inner.clone();
+    tokio::spawn(async move {
+        let t0 = Instant::now();
+        let resend = inner.cfg.knock_resend_after;
+        for (n, at) in [resend, resend.saturating_mul(3)].into_iter().enumerate() {
+            sleep_until(t0 + at).await;
+            let raw = n == 1 && inner.knock.offset() != 0;
+            for (pair, addr) in &targets {
+                if let Some(k) = inner.knock.make_knock(pair, raw) {
+                    inner.knock.send(*addr, &k).await;
+                }
+            }
+        }
+    });
 }
