@@ -4,4 +4,4 @@ mode=stale b_packets=0
 mode=replay b_packets=0
 mode=flood b_packets=0
 friend b_packets=25
-control(no-knock, noise) b_packets=23
+control(no-knock, noise) b_packets=14

@@ -352,7 +352,7 @@ async fn clock_skew_within_tolerance() {
     for off in [25_000i64, -25_000] {
         let k = Keys::new();
         let a = bind(kc(true), vec![k.peer_a()]);
-        a.set_clock_offset(off);
+        a.set_clock_offset(off).unwrap();
         assert_eq!(a.clock_offset_ms(), off);
         let b = Arc::new(bind(kc(true), vec![k.peer_b()]));
         let b2 = b.clone();
@@ -402,7 +402,7 @@ async fn stale_offset_raw_fallback() {
     };
     let a = bind(cfg, vec![k.peer_a()]);
     // поправка устарела (+300 с), системные часы верны: третий стук по системному времени
-    a.set_clock_offset(300_000);
+    a.set_clock_offset(300_000).unwrap();
     let b = Arc::new(bind(kc(true), vec![k.peer_b()]));
     let b2 = b.clone();
     let acc = tokio::spawn(async move { b2.accept().await });
@@ -632,41 +632,270 @@ async fn gro_segments_on_open_address() {
     assert_eq!(kept, 0, "чужой адрес допущен");
 }
 
-/// Жизнь записи кэша повторов покрывает оба окна приёма при поправке часов больше 30 с.
+/// Срок записи кэша считается по окну стука, а не по поправке.
 #[test]
-fn replay_lifetime_covers_offset() {
+fn replay_life_by_window() {
+    use crate::knock::window_life;
+    let ms = |w: u64| (w * 30_000) as i64;
+    let w = 1_000_000u64;
+    let secs = |d: Option<Duration>| d.map(|d| d.as_secs());
+    // без поправки окно w принимается до (w+2)*30 с; запас 2 с
+    assert_eq!(secs(window_life(w, 0, ms(w))), Some(62));
+    assert_eq!(secs(window_life(w, 0, ms(w + 2) - 1)), Some(2));
+    assert_eq!(window_life(w, 0, ms(w + 2)), None);
+    assert_eq!(window_life(w, 0, ms(w + 50)), None);
+    // поправка +100 с: интервал по системному времени позже, срок тот же
+    assert_eq!(secs(window_life(w, 100_000, ms(w))), Some(62));
+    // -100 с: интервал по исправленному времени кончается на 100 с позже
+    assert_eq!(secs(window_life(w, -100_000, ms(w))), Some(162));
+    // стук по исправленному времени при большой поправке: окно по системным часам наступит
+    // через |поправку|, запись живёт до его конца
+    let day = 86_400_000i64;
+    assert_eq!(secs(window_life(w, day, ms(w) - day)), Some(86_400 + 62));
+    assert_eq!(secs(window_life(w, -day, ms(w) + day)), Some(62));
+    // будущее окно (подсказка w+5) живёт до конца своего интервала
+    assert_eq!(secs(window_life(w + 5, 0, ms(w))), Some(62 + 150));
+}
+
+/// Большая поправка не даёт отказа друзьям после многих стуков (раньше общий кэш в 4096 записей
+/// заполнялся и отказывал всем), а при отрицательной поправке записи не копятся.
+#[test]
+fn replay_big_offset_friends_pass() {
+    use crate::knock::{Replay, ReplayErr, window_life};
+    use std::time::Instant;
+    let t0 = Instant::now();
+    let pairs: Vec<_> = (0..50)
+        .map(|_| chervo_identity::PairId::generate().unwrap())
+        .collect();
+    let base_ms = 1_800_000_000_000i64;
+    for off in [3_600_000i64, -3_600_000, 86_400_000, -86_400_000] {
+        let mut r = Replay::new(4096);
+        let mut peak = 0usize;
+        // 3 часа, окно за окном: каждая пара стучит 4 раза за окно
+        for step in 0..360u64 {
+            let at = Duration::from_secs(step * 30);
+            let sys = base_ms + (step * 30_000) as i64;
+            let w = crate::window_at(sys + off);
+            for p in &pairs {
+                for n in 0..4u8 {
+                    let mut nonce = [0u8; 16];
+                    nonce[0] = n;
+                    nonce[1..9].copy_from_slice(&step.to_le_bytes());
+                    let life = window_life(w, off, sys).unwrap();
+                    let res = r.check_insert((*p, nonce), w, t0 + at, life);
+                    assert!(
+                        !matches!(res, Err(ReplayErr::Quota)),
+                        "off={off} шаг {step}: отказ другу"
+                    );
+                }
+            }
+            peak = peak.max(r.len());
+        }
+        if off < 0 {
+            // записи живут около трёх окон
+            assert!(peak <= 50 * 4 * 5, "off={off}: записей {peak}");
+        }
+    }
+}
+
+/// Предел записей на пару: переполнение отказывает только этой паре.
+#[test]
+fn replay_pair_total_cap() {
     use crate::knock::{Replay, ReplayErr};
     use std::time::Instant;
     let t0 = Instant::now();
-    let s = Duration::from_secs;
-    let key = (chervo_identity::PairId::generate().unwrap(), [1u8; 16]);
-    let seen = |r: &mut Replay, at: Duration, off: i64| {
-        matches!(r.check_insert(key, t0 + at, off), Err(ReplayErr::Seen))
-    };
-
-    // без поправки 120 с хватает, дальше запись забывается
-    let mut r = Replay::new(8);
-    assert!(r.check_insert(key, t0, 0).is_ok());
-    assert!(seen(&mut r, s(119), 0));
-    assert!(!seen(&mut r, s(121), 0));
-
-    // поправка +-300 с: повтор в позднем интервале (спустя 121 с и 419 с) отвергается
-    for off in [300_000i64, -300_000] {
-        let mut r = Replay::new(8);
-        assert!(r.check_insert(key, t0, off).is_ok());
-        assert!(seen(&mut r, s(121), off), "off={off}: забыт через 121 с");
-        assert!(seen(&mut r, s(419), off), "off={off}: забыт через 419 с");
-        assert!(
-            !seen(&mut r, s(421), off),
-            "off={off}: не забыт после срока"
-        );
+    let (evil, friend) = (
+        chervo_identity::PairId::generate().unwrap(),
+        chervo_identity::PairId::generate().unwrap(),
+    );
+    let life = Duration::from_secs(1000);
+    let mut r = Replay::new(40);
+    for i in 0..40u64 {
+        assert!(r.check_insert((evil, [i as u8; 16]), i, t0, life).is_ok());
     }
+    assert!(matches!(
+        r.check_insert((evil, [99u8; 16]), 99, t0, life),
+        Err(ReplayErr::Quota)
+    ));
+    assert!(r.check_insert((friend, [99u8; 16]), 99, t0, life).is_ok());
+}
 
-    // поправка задана после внесения записи: срок продлевается
+/// Квота пары: 32 nonce на пару и окно; переполнение отвергает только эту пару.
+#[test]
+fn replay_pair_quota() {
+    use crate::knock::{REPLAY_PER_WINDOW, Replay, ReplayErr};
+    use std::time::Instant;
+    let t0 = Instant::now();
+    let (evil, friend) = (
+        chervo_identity::PairId::generate().unwrap(),
+        chervo_identity::PairId::generate().unwrap(),
+    );
+    let life = Duration::from_secs(100);
+    let mut r = Replay::new(4096);
+    for n in 0..REPLAY_PER_WINDOW {
+        let mut nonce = [0u8; 16];
+        nonce[0] = n as u8;
+        assert!(r.check_insert((evil, nonce), 7, t0, life).is_ok());
+    }
+    assert!(matches!(
+        r.check_insert((evil, [200u8; 16]), 7, t0, life),
+        Err(ReplayErr::Quota)
+    ));
+    // повтор уже внесённого остаётся повтором
+    assert!(matches!(
+        r.check_insert((evil, [0u8; 16]), 7, t0, life),
+        Err(ReplayErr::Seen)
+    ));
+    // другое окно той же пары и другой друг проходят
+    assert!(r.check_insert((evil, [201u8; 16]), 8, t0, life).is_ok());
+    assert!(r.check_insert((friend, [200u8; 16]), 7, t0, life).is_ok());
+    // после срока места освобождаются
+    assert!(
+        r.check_insert((evil, [202u8; 16]), 7, t0 + Duration::from_secs(101), life)
+            .is_ok()
+    );
+}
+
+/// Поправка +100 -> -100 с: срок записи продлён, повтор в «хвосте» отвергается.
+#[test]
+fn replay_offset_flip_tail() {
+    use crate::knock::{Replay, ReplayErr, window_life};
+    use std::time::Instant;
+    let t0 = Instant::now();
+    let key = (chervo_identity::PairId::generate().unwrap(), [1u8; 16]);
+    let w = 1_000_000u64;
+    let sys = (w * 30_000) as i64;
     let mut r = Replay::new(8);
-    assert!(r.check_insert(key, t0, 0).is_ok());
-    r.extend_for_offset(t0 + s(10), 300_000);
-    assert!(seen(&mut r, s(300), 0), "забыт после смены поправки");
+    let life = window_life(w, 100_000, sys).unwrap();
+    assert!(r.check_insert(key, w, t0, life).is_ok());
+    // без продления запись кончилась бы раньше: окно на -100 с принимается ещё 100 с
+    r.extend(t0 + Duration::from_secs(5), |win| {
+        window_life(win, -100_000, sys + 5_000)
+    });
+    let seen = |r: &mut Replay, at: u64| {
+        matches!(
+            r.check_insert(key, w, t0 + Duration::from_secs(at), life),
+            Err(ReplayErr::Seen)
+        )
+    };
+    assert!(seen(&mut r, life.as_secs() + 40), "хвост не защищён");
+    assert!(seen(&mut r, 160));
+    assert!(!seen(&mut r, 200), "запись не забыта после окна");
+}
+
+fn knock_for(k: &Keys, window: u64) -> [u8; 48] {
+    k.peer_a().knock_keys().unwrap().make(window).unwrap()
+}
+
+fn set_sys_skew(state: &crate::knock::KnockState, ms: i64) {
+    state.sys_skew_ms.store(ms, Ordering::Relaxed);
+}
+
+/// Стук-подсказка будущего окна кэшируется: когда окно станет допустимым, копия с другого
+/// адреса отвергается как повтор.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hint_window_knock_is_cached() {
+    let k = Keys::new();
+    let (state, counters) = bare_state(&k, Arc::new(AllowAll));
+    let rd = |c: &std::sync::atomic::AtomicU64| c.load(Ordering::Relaxed);
+    let (friend, spy): (std::net::SocketAddr, std::net::SocketAddr) = (
+        "127.0.0.1:40011".parse().unwrap(),
+        "127.0.0.1:40012".parse().unwrap(),
+    );
+    let w = now_window();
+    let knock = knock_for(&k, w + 2);
+    let (kept, ..) = one_batch(&state, friend, &knock, 48);
+    assert_eq!(kept, 0);
+    assert_eq!(rd(&counters.knock_skewed), 1);
+    assert_eq!(rd(&counters.knock_ok), 0);
+    // системные часы ушли на +60 с: окно w+2 допустимо
+    set_sys_skew(&state, 60_000);
+    let (kept, ..) = one_batch(&state, spy, &knock, 48);
+    assert_eq!(kept, 0, "атакующему отдан пакет");
+    assert_eq!(
+        rd(&counters.knock_replay),
+        1,
+        "копия не опознана как повтор"
+    );
+    assert_eq!(rd(&counters.knock_ok), 0, "копия дала допуск");
+    // контроль: свежий стук того же окна принимается
+    let fresh = knock_for(&k, w + 2);
+    let (kept, ..) = one_batch(&state, friend, &fresh, 48);
+    assert_eq!(kept, 0);
+    assert_eq!(rd(&counters.knock_ok), 1);
+    // и с адреса атакующего квитирующие пакеты по-прежнему не проходят
+    let (kept, ..) = one_batch(&state, spy, &[9u8; 100], 100);
+    assert_eq!(kept, 0, "чужой адрес допущен");
+}
+
+/// Злая пара (с ключом) исчерпывает только свою квоту кэша повторов; друг проходит.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evil_pair_exhausts_only_own_replay_quota() {
+    let (evil, friend) = (Keys::new(), Keys::new());
+    let (state, counters) = bare_state(&evil, Arc::new(AllowAll));
+    state.set_peers(&[evil.peer_b(), friend.peer_b()]);
+    let rd = |c: &std::sync::atomic::AtomicU64| c.load(Ordering::Relaxed);
+    let w = now_window();
+    let n = crate::knock::REPLAY_PER_WINDOW as usize;
+    for i in 0..n + 10 {
+        let addr: std::net::SocketAddr = format!("127.0.0.1:{}", 41000 + i).parse().unwrap();
+        one_batch(&state, addr, &knock_for(&evil, w), 48);
+    }
+    assert_eq!(rd(&counters.knock_ok), n as u64, "квота пары");
+    assert_eq!(rd(&counters.admit_full), 10);
+    let addr: std::net::SocketAddr = "127.0.0.1:42000".parse().unwrap();
+    one_batch(&state, addr, &knock_for(&friend, w), 48);
+    assert_eq!(rd(&counters.knock_ok), n as u64 + 1, "друг не прошёл");
+    // допуск друга действует: его пакеты проходят
+    let (kept, ..) = one_batch(&state, addr, &[3u8; 100], 100);
+    assert_eq!(kept, 1);
+}
+
+/// Таблица допуска: одна пара не занимает все места.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evil_pair_exhausts_only_own_admit_share() {
+    use quinn::Runtime;
+    let (evil, friend) = (Keys::new(), Keys::new());
+    let counters = Arc::new(crate::limits::Counters::default());
+    let (events, _) = tokio::sync::broadcast::channel(8);
+    let std_sock = std::net::UdpSocket::bind(lo()).unwrap();
+    std_sock.set_nonblocking(true).unwrap();
+    let raw = quinn::TokioRuntime.wrap_udp_socket(std_sock).unwrap();
+    let cfg = QuinnConfig {
+        admit_capacity: 32,
+        ..kc(true)
+    };
+    let state =
+        crate::knock::KnockState::new(&cfg, counters.clone(), Arc::new(AllowAll), events, raw);
+    state.set_peers(&[evil.peer_b(), friend.peer_b()]);
+    let rd = |c: &std::sync::atomic::AtomicU64| c.load(Ordering::Relaxed);
+    let w = now_window();
+    // доля пары: 32 / 8 = 4 адреса
+    for i in 0..10 {
+        let addr: std::net::SocketAddr = format!("127.0.0.1:{}", 43000 + i).parse().unwrap();
+        one_batch(&state, addr, &knock_for(&evil, w), 48);
+    }
+    assert_eq!(rd(&counters.knock_ok), 4);
+    assert_eq!(rd(&counters.admit_full), 6);
+    let addr: std::net::SocketAddr = "127.0.0.1:44000".parse().unwrap();
+    one_batch(&state, addr, &knock_for(&friend, w), 48);
+    assert_eq!(rd(&counters.knock_ok), 5, "друг не прошёл");
+}
+
+/// Поправка вне ±7 суток отвергается, прежняя остаётся.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn clock_offset_range() {
+    let k = Keys::new();
+    let a = bind(kc(true), vec![k.peer_a()]);
+    let max = crate::MAX_CLOCK_OFFSET_MS;
+    assert!(a.set_clock_offset(max).is_ok());
+    assert!(a.set_clock_offset(-max).is_ok());
+    assert_eq!(a.clock_offset_ms(), -max);
+    assert!(a.set_clock_offset(max + 1).is_err());
+    assert!(a.set_clock_offset(-max - 1).is_err());
+    assert!(a.set_clock_offset(i64::MIN).is_err());
+    assert!(a.set_clock_offset(i64::MAX).is_err());
+    assert_eq!(a.clock_offset_ms(), -max, "прежняя поправка потеряна");
 }
 
 /// Подсказка о расхождении часов только после `PeerFilter`: заблокированная пара её не вызывает.

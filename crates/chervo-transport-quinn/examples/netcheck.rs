@@ -207,7 +207,7 @@ async fn listen(dir: &Path, addr: SocketAddr, offset_ms: i64, no_knock: bool) ->
     };
     let t =
         Arc::new(QuinnTransport::bind(addr, cfg, Arc::new(AllowAll)).map_err(|e| e.to_string())?);
-    t.set_clock_offset(offset_ms);
+    t.set_clock_offset(offset_ms).map_err(|e| e.to_string())?;
     let mut peers = Vec::new();
     for n in 1..=PAIRS {
         peers.push(load_peer(dir, 'b', n)?);
@@ -338,7 +338,7 @@ async fn client(dir: &Path, o: Opts) -> Res<()> {
         )
         .map_err(|e| e.to_string())?,
     );
-    t.set_clock_offset(o.offset_ms);
+    t.set_clock_offset(o.offset_ms).map_err(|e| e.to_string())?;
     t.set_peers(vec![load_peer(dir, 'a', o.pair)?]);
     let pid = pair_id(dir, o.pair)?;
     let started = Instant::now();

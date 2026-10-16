@@ -5,7 +5,7 @@
 //! (ни Retry, ни сброса, ни согласования версии). Единственное место `try_send(` в крейте.
 //! Спецификация: `docs/specs/stage-09b-knock.md`.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 use std::fmt;
 use std::future::poll_fn;
 use std::io::{self, IoSliceMut};
@@ -27,10 +27,14 @@ use crate::{KNOCK_ACCEPT_SPAN, KNOCK_HINT_SPAN, KNOCK_WINDOW_SECS, QuinnConfig, 
 
 /// Сколько раз цикл фильтра опрашивает гнездо подряд без единого пропущенного пакета.
 pub(crate) const MAX_FILTER_POLLS: usize = 16;
-/// Базовая жизнь записи кэша повторов (4 окна); к ней добавляется модуль поправки часов.
-const REPLAY_LIFETIME: Duration = Duration::from_secs(120);
-/// Предел добавки к жизни записи за счёт поправки (защита от переполнения `Instant`).
-const REPLAY_OFFSET_CAP: Duration = Duration::from_secs(30 * 24 * 3600);
+/// Запас к сроку записи кэша повторов (дрожание часов между проверкой и вставкой).
+const REPLAY_MARGIN_MS: i128 = 2000;
+/// Предел срока записи (защита от переполнения `Instant`; поправка не больше 7 суток).
+const REPLAY_LIFE_CAP: Duration = Duration::from_secs(8 * 24 * 3600);
+/// Не больше стольких nonce на пару и окно; переполнение отвергает только эту пару.
+pub(crate) const REPLAY_PER_WINDOW: u32 = 32;
+/// Доля таблицы допуска, доступная одной паре: `admit_capacity / ADMIT_PAIR_SHARE`.
+const ADMIT_PAIR_SHARE: usize = 8;
 /// Событие «сбиты часы» не чаще раза в минуту на пару.
 const SKEW_EVENT_EVERY: Duration = Duration::from_secs(60);
 /// Попыток отправки стука при `WouldBlock`.
@@ -149,70 +153,126 @@ pub(crate) type ReplayKey = (PairId, [u8; 16]);
 
 pub(crate) enum ReplayErr {
     Seen,
-    Full,
+    /// Квота пары (на окно или всего) исчерпана; другие пары не затронуты.
+    Quota,
+}
+
+/// Срок записи по окну стука: до конца более позднего из интервалов приёма этого окна, по
+/// исправленному (`sys + offset`) и по системному времени (при ненулевой поправке), считая от
+/// `sys_ms`. Окно `w` принимается при `w_corr` или `w_sys` в `w-1..=w+1`, то есть до
+/// `(w+2)*30 с`; в системном времени это `(w+2)*30 с - offset` и `(w+2)*30 с`.
+/// `None`: оба интервала уже кончились.
+pub(crate) fn window_life(window: u64, offset_ms: i64, sys_ms: i64) -> Option<Duration> {
+    let span = i128::from(KNOCK_WINDOW_SECS) * 1000;
+    let last = i128::from(window) + i128::from(KNOCK_ACCEPT_SPAN) + 1;
+    let end = last
+        .saturating_mul(span)
+        .saturating_add((-i128::from(offset_ms)).max(0));
+    let left = end - i128::from(sys_ms);
+    if left <= 0 {
+        return None;
+    }
+    let ms = u64::try_from(left.saturating_add(REPLAY_MARGIN_MS)).unwrap_or(u64::MAX);
+    Some(Duration::from_millis(ms).min(REPLAY_LIFE_CAP))
 }
 
 pub(crate) struct Replay {
-    set: HashSet<ReplayKey>,
-    /// (момент, когда запись можно забыть, ключ).
-    order: VecDeque<(Instant, ReplayKey)>,
-    capacity: usize,
-}
-
-/// Срок жизни записи: стук принимается по исправленному и по системному времени, то есть в двух
-/// интервалах по 90 с, сдвинутых на поправку; запись держится дольше обоих.
-pub(crate) fn replay_lifetime(offset_ms: i64) -> Duration {
-    let extra = Duration::from_millis(offset_ms.unsigned_abs()).min(REPLAY_OFFSET_CAP);
-    REPLAY_LIFETIME + extra
+    /// Запись: (когда можно забыть, окно стука).
+    entries: HashMap<ReplayKey, (Instant, u64)>,
+    per_window: HashMap<(PairId, u64), u32>,
+    per_pair: HashMap<PairId, usize>,
+    pair_capacity: usize,
+    last_purge: Option<Instant>,
 }
 
 impl Replay {
-    pub(crate) fn new(capacity: usize) -> Self {
+    /// `pair_capacity`: записей на одну пару всего (страховка памяти).
+    pub(crate) fn new(pair_capacity: usize) -> Self {
         Self {
-            set: HashSet::new(),
-            order: VecDeque::new(),
-            capacity,
+            entries: HashMap::new(),
+            per_window: HashMap::new(),
+            per_pair: HashMap::new(),
+            pair_capacity: pair_capacity.max(1),
+            last_purge: None,
         }
     }
 
-    /// Новая запись; `offset_ms`: поправка часов на момент приёма.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn remove(&mut self, key: &ReplayKey) {
+        let Some((_, window)) = self.entries.remove(key) else {
+            return;
+        };
+        if let Some(n) = self.per_window.get_mut(&(key.0, window)) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                self.per_window.remove(&(key.0, window));
+            }
+        }
+        if let Some(n) = self.per_pair.get_mut(&key.0) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                self.per_pair.remove(&key.0);
+            }
+        }
+    }
+
+    fn purge(&mut self, now: Instant) {
+        let dead: Vec<ReplayKey> = self
+            .entries
+            .iter()
+            .filter(|(_, (t, _))| *t <= now)
+            .map(|(k, _)| *k)
+            .collect();
+        for k in dead {
+            self.remove(&k);
+        }
+        self.last_purge = Some(now);
+    }
+
+    /// Новая запись окна `window` со сроком `life` от `now`. Повтор: `Seen` (срок не продлевается).
     pub(crate) fn check_insert(
         &mut self,
         key: ReplayKey,
+        window: u64,
         now: Instant,
-        offset_ms: i64,
+        life: Duration,
     ) -> Result<(), ReplayErr> {
-        // Порядок очереди может нарушиться при смене поправки: это лишь задерживает удаление
-        // отдельных записей, раньше срока запись не удаляется.
-        while let Some((t, k)) = self.order.front().copied() {
-            if t > now {
-                break;
-            }
-            self.order.pop_front();
-            self.set.remove(&k);
+        if self
+            .last_purge
+            .is_none_or(|t| now.saturating_duration_since(t) >= Duration::from_secs(1))
+        {
+            self.purge(now);
         }
-        if self.set.contains(&key) {
-            return Err(ReplayErr::Seen);
+        match self.entries.get(&key) {
+            Some((t, _)) if *t > now => return Err(ReplayErr::Seen),
+            Some(_) => self.remove(&key),
+            None => {}
         }
-        if self.set.len() >= self.capacity {
-            return Err(ReplayErr::Full);
+        let in_window = self.per_window.get(&(key.0, window)).copied().unwrap_or(0);
+        let in_pair = self.per_pair.get(&key.0).copied().unwrap_or(0);
+        if in_window >= REPLAY_PER_WINDOW || in_pair >= self.pair_capacity {
+            return Err(ReplayErr::Quota);
         }
-        let until = now
-            .checked_add(replay_lifetime(offset_ms))
-            .or_else(|| now.checked_add(REPLAY_LIFETIME))
-            .unwrap_or(now);
-        self.set.insert(key);
-        self.order.push_back((until, key));
+        let until = now.checked_add(life).unwrap_or(now);
+        self.entries.insert(key, (until, window));
+        let w = self.per_window.entry((key.0, window)).or_insert(0);
+        *w = w.saturating_add(1);
+        let p = self.per_pair.entry(key.0).or_insert(0);
+        *p = p.saturating_add(1);
         Ok(())
     }
 
-    /// Поправка сменилась: у уже внесённых записей интервал приёма сдвинулся, продлить срок.
-    pub(crate) fn extend_for_offset(&mut self, now: Instant, offset_ms: i64) {
-        let Some(until) = now.checked_add(replay_lifetime(offset_ms)) else {
-            return;
-        };
-        for (t, _) in &mut self.order {
-            if *t < until {
+    /// Поправка сменилась: интервал приёма окна сдвинулся, срок записи не короче нового.
+    pub(crate) fn extend(&mut self, now: Instant, life_of: impl Fn(u64) -> Option<Duration>) {
+        for (t, window) in self.entries.values_mut() {
+            if let Some(life) = life_of(*window)
+                && let Some(until) = now.checked_add(life)
+                && *t < until
+            {
                 *t = until;
             }
         }
@@ -232,6 +292,8 @@ struct Entry {
     pins: u32,
     /// Сколько раз с этого адреса пропущен пакет (для `connect_silent`).
     rx: u64,
+    /// Пара, чей верный стук открыл допуск (квота мест на пару).
+    pair: Option<PairId>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -281,19 +343,31 @@ impl AdmitTable {
         gate
     }
 
-    /// Допуск по верному стуку; `false`, если таблица заполнена.
+    fn pair_slots(&self, pair: PairId) -> usize {
+        self.map.values().filter(|e| e.pair == Some(pair)).count()
+    }
+
+    /// Допуск по верному стуку пары; `false`, если таблица заполнена или исчерпана доля пары
+    /// (одна пара не занимает больше `cap / ADMIT_PAIR_SHARE` мест).
     fn open(
         &mut self,
         addr: SocketAddr,
+        pair: PairId,
         now: Instant,
         ttl: Duration,
         attempts: u32,
         cap: usize,
     ) -> bool {
-        if !self.map.contains_key(&addr) && self.map.len() >= cap {
-            self.purge(now);
-            if self.map.len() >= cap {
-                return false;
+        let share = (cap / ADMIT_PAIR_SHARE).max(1);
+        if self.map.get(&addr).is_none_or(|e| e.pair != Some(pair)) {
+            let full = |t: &Self| {
+                (!t.map.contains_key(&addr) && t.map.len() >= cap) || t.pair_slots(pair) >= share
+            };
+            if full(self) {
+                self.purge(now);
+                if full(self) {
+                    return false;
+                }
             }
         }
         let e = self.map.entry(addr).or_insert(Entry {
@@ -301,9 +375,11 @@ impl AdmitTable {
             attempts: 0,
             pins: 0,
             rx: 0,
+            pair: None,
         });
         e.expires = Some(now + ttl);
         e.attempts = attempts;
+        e.pair = Some(pair);
         true
     }
 
@@ -324,6 +400,7 @@ impl AdmitTable {
             attempts: 0,
             pins: 0,
             rx: 0,
+            pair: None,
         });
         e.pins = e.pins.saturating_add(1);
         e.rx
@@ -425,10 +502,14 @@ impl KnockState {
         base
     }
 
+    /// Смена поправки под замком кэша повторов (как и чтение поправки при внесении записи):
+    /// у внесённых записей интервал приёма сдвигается, срок продлевается до нового.
     pub(crate) fn set_offset(&self, offset_ms: i64) {
+        let mut replay = lock(&self.replay);
         let old = self.offset_ms.swap(offset_ms, Ordering::Relaxed);
         if old != offset_ms {
-            lock(&self.replay).extend_for_offset(Instant::now(), offset_ms);
+            let sys = self.system_ms();
+            replay.extend(Instant::now(), |w| window_life(w, offset_ms, sys));
         }
     }
 
@@ -548,18 +629,18 @@ impl KnockState {
             let Some(list) = ring.table.get(&id) else {
                 return false;
             };
-            let mut best: Option<(PairId, bool)> = None;
+            let mut best: Option<(PairId, bool, u64)> = None;
             for c in list {
                 let Some((pair, keys)) = ring.keys.get(c.idx) else {
                     continue;
                 };
                 if keys.verify(c.window, seg) && (best.is_none() || c.accept) {
-                    best = Some((*pair, c.accept));
+                    best = Some((*pair, c.accept, c.window));
                 }
             }
             best
         };
-        let Some((pair, accept)) = hit else {
+        let Some((pair, accept, window)) = hit else {
             Counters::bump(&self.counters.knock_bad);
             return true;
         };
@@ -567,28 +648,53 @@ impl KnockState {
         if !self.filter.is_allowed(&pair) {
             return true;
         }
-        if !accept {
-            Counters::bump(&self.counters.knock_skewed);
-            self.skew_event(pair);
-            return true;
-        }
         let Some(nonce) = seg.get(16..32).and_then(|s| <[u8; 16]>::try_from(s).ok()) else {
             return true;
         };
+        // В кэш попадает и «подсказка» будущего окна: когда оно станет допустимым, повтор с
+        // другого адреса отвергается. Срок по окну; поправка читается под замком кэша (гонка с
+        // `set_offset`), берётся более длинный срок из использованной и текущей.
         let now = Instant::now();
-        match lock(&self.replay).check_insert((pair, nonce), now, off) {
+        let inserted = {
+            let mut replay = lock(&self.replay);
+            let sys_now = self.system_ms();
+            let off_now = self.offset();
+            let life = [off, off_now]
+                .into_iter()
+                .filter_map(|o| window_life(window, o, sys_now))
+                .max();
+            match life {
+                Some(life) => replay.check_insert((pair, nonce), window, now, life),
+                // оба интервала приёма уже кончились: запоминать нечего
+                None => Ok(()),
+            }
+        };
+        match inserted {
             Ok(()) => {}
             Err(ReplayErr::Seen) => {
                 Counters::bump(&self.counters.knock_replay);
                 return true;
             }
-            Err(ReplayErr::Full) => {
-                Counters::bump(&self.counters.admit_full);
-                return true;
+            Err(ReplayErr::Quota) => {
+                if accept {
+                    Counters::bump(&self.counters.admit_full);
+                    return true;
+                }
             }
         }
-        let opened =
-            lock(&self.admit).open(addr, now, self.ttl, self.attempts, self.admit_capacity);
+        if !accept {
+            Counters::bump(&self.counters.knock_skewed);
+            self.skew_event(pair);
+            return true;
+        }
+        let opened = lock(&self.admit).open(
+            addr,
+            pair,
+            now,
+            self.ttl,
+            self.attempts,
+            self.admit_capacity,
+        );
         if opened {
             Counters::bump(&self.counters.knock_ok);
         } else {

@@ -57,6 +57,21 @@ pub const KNOCK_ACCEPT_SPAN: u64 = 1;
 /// Окна `w±2..=w±10` держатся как «подсказка»: верный стук в них не допускается, но отмечается.
 pub const KNOCK_HINT_SPAN: u64 = 10;
 
+/// Предел модуля поправки часов: 7 суток (как `max_abs_offset` в `chervo-timesync`).
+pub const MAX_CLOCK_OFFSET_MS: i64 = 7 * 24 * 3600 * 1000;
+
+/// Поправка часов вне `±MAX_CLOCK_OFFSET_MS`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClockOffsetError;
+
+impl std::fmt::Display for ClockOffsetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("clock offset out of range (max 7 days)")
+    }
+}
+
+impl std::error::Error for ClockOffsetError {}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuinnConfig {
     /// От `Incoming` (вызываемый) или от `connect` (звонящий) до конца KK.
@@ -98,9 +113,10 @@ pub struct QuinnConfig {
     pub knock_lead: Duration,
     /// Досылка стука в моменты `resend`, `3*resend` после первого.
     pub knock_resend_after: Duration,
-    /// Размер таблицы допуска (адресов).
+    /// Размер таблицы допуска (адресов); одна пара занимает не больше восьмой части.
     pub admit_capacity: usize,
-    /// Размер кэша виденных стуков.
+    /// Записей кэша виденных стуков на одну пару (страховка памяти; сверх этого ещё
+    /// не больше 32 nonce на пару и окно).
     pub replay_capacity: usize,
 }
 
@@ -326,8 +342,13 @@ impl QuinnTransport {
 
     /// Поправка часов (мс) к системному времени для стука; задаётся только отсюда
     /// (значение из кнопки «синхронизировать время»), сама никогда не меняется.
-    pub fn set_clock_offset(&self, offset_ms: i64) {
+    /// Не больше `MAX_CLOCK_OFFSET_MS` по модулю, иначе ошибка и прежняя поправка.
+    pub fn set_clock_offset(&self, offset_ms: i64) -> Result<(), ClockOffsetError> {
+        if offset_ms.unsigned_abs() > MAX_CLOCK_OFFSET_MS.unsigned_abs() {
+            return Err(ClockOffsetError);
+        }
         self.inner.knock.set_offset(offset_ms);
+        Ok(())
     }
 
     pub fn clock_offset_ms(&self) -> i64 {
