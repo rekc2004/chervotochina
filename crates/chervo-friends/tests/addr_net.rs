@@ -17,7 +17,7 @@ use chervo_addr::{LocalSnapshot, ObserveOutcome, OwnAddrs, PublishCtx, PublishSe
 use chervo_friends::{FriendBook, FriendsError, NewFriend, PendingRole};
 use chervo_identity::{KxPeer, PairId, PairKey, create};
 use chervo_token::addr_flow::{PeerAddrInfo, answer_addr_info, exchange_addr_info};
-use chervo_token::{AddrFlowError, IssuedAddrUpdate, STREAM_ADDR_INFO};
+use chervo_token::{AddrFlowError, IssuedAddrUpdate, STREAM_ADDR_INFO, decode_addr_update_bin};
 use chervo_transport::{Connection, PeerAddr, PeerFilter, RecvStream, Transport};
 use chervo_transport_quinn::{QuinnConfig, QuinnConn, QuinnTransport};
 use common::*;
@@ -294,9 +294,14 @@ async fn addr_info_other_pairs_update_rejected() {
         .unwrap();
     let (conn_b, conn_a) = link(&b, pb, &a).await;
     assert_eq!(conn_a.remote_pair(), pa_b);
-    let (rb, ra) = run_exchange(&conn_b, &pb, Some(&from_c), &conn_a, &pa_b, None).await;
-    rb.unwrap();
-    let forwarded = ra.unwrap().update.unwrap();
+    assert_eq!(from_c.pair(), Some(pc));
+    // честный помощник такой токен по соединению B не отправит (L2)
+    assert_eq!(
+        exchange_addr_info(&conn_b, &pb, Some(&from_c)).await.err(),
+        Some(AddrFlowError::WrongPeer)
+    );
+    // злонамеренный B шлёт те же байты мимо помощника: A всё равно отвергает
+    let forwarded = decode_addr_update_bin(from_c.bytes()).unwrap();
     let file = a.file();
     assert_eq!(
         a.book

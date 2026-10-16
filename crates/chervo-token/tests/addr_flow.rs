@@ -503,6 +503,55 @@ fn addr_flow_wrong_peer_sends_nothing() {
 }
 
 #[test]
+fn addr_flow_update_for_other_pair_sends_nothing() {
+    let (f_pair, g_pair) = (PairId::generate().unwrap(), PairId::generate().unwrap());
+    let (a, b) = (key(), key());
+    // обновление выпущено для друга G, а соединение принадлежит F
+    let for_g = issued(&a, &b.public_key(), 5, "8.8.4.4").for_pair(g_pair);
+    assert_eq!(for_g.pair(), Some(g_pair));
+    // привязка не меняет формат: те же байты, что и без неё
+    assert_eq!(
+        for_g.bytes(),
+        issued(&a, &b.public_key(), 5, "8.8.4.4").bytes()
+    );
+    // соединяющая сторона
+    let l = link(f_pair);
+    let r = block_on(exchange_addr_info(&l.b, &f_pair, Some(&for_g)));
+    assert_eq!(r.err(), Some(AddrFlowError::WrongPeer));
+    assert!(l.b.streams_untouched(), "поток не открывался");
+    assert_eq!(queued(&l.a_to_b), 0);
+    assert_eq!(queued(&l.b_to_a), 0);
+    assert!(!l.b_to_a.finished.load(Ordering::SeqCst));
+    // принимающая сторона: вход подан, ответ не пишется
+    let l = link(f_pair);
+    let f = frame_v4(None);
+    l.b_to_a
+        .buf
+        .lock()
+        .unwrap()
+        .extend(f.iter().skip(1).copied());
+    l.b_to_a.finished.store(true, Ordering::SeqCst);
+    let (tx, rx) = block_on(l.a.accept_bi()).unwrap();
+    let r = block_on(answer_addr_info(&l.a, &f_pair, tx, rx, Some(&for_g)));
+    assert_eq!(r.err(), Some(AddrFlowError::WrongPeer));
+    assert_eq!(queued(&l.a_to_b), 0);
+    assert!(!l.a_to_b.finished.load(Ordering::SeqCst));
+    // положительный контроль: токен, выпущенный для F, уходит по соединению F
+    let for_f = issued(&a, &b.public_key(), 6, "8.8.4.4").for_pair(f_pair);
+    let l = link(f_pair);
+    let f = frame_v4(None);
+    l.b_to_a
+        .buf
+        .lock()
+        .unwrap()
+        .extend(f.iter().skip(1).copied());
+    l.b_to_a.finished.store(true, Ordering::SeqCst);
+    let (tx, rx) = block_on(l.a.accept_bi()).unwrap();
+    block_on(answer_addr_info(&l.a, &f_pair, tx, rx, Some(&for_f))).unwrap();
+    assert!(queued(&l.a_to_b) > 0);
+}
+
+#[test]
 fn addr_flow_trailing_after_frame() {
     let pair = PairId::generate().unwrap();
     // принимающая сторона: после кадра ещё байт, ответ не пишется

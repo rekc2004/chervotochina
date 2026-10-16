@@ -41,7 +41,13 @@ pub fn from_invite(addrs: &[SocketAddr], now_unix: u64) -> Vec<KnownAddr> {
 /// Убрать все `Invite` и `AddressUpdate`, вставить адреса обновления как `AddressUpdate`
 /// (`last_seen = now`) в начало, остальное (в первую очередь `Contact`) оставить. Остальная
 /// запись с тем же адресом, что у обновления, заменяется записью обновления.
+/// Исключение (L1): обновление только из подсказок (`hint`) не вытесняет прежние
+/// `AddressUpdate` без подсказки: они остаются после новых подсказок. Лимит записей на
+/// стороне вызывающего (`trim`).
+/// Из принимаемых полей `short_lived` берётся не из флага отправителя, а по семейству
+/// адреса: `short_lived = addr.is_ipv6()` (L3).
 pub fn merge_update(addrs: &mut Vec<KnownAddr>, update: &[UpdateAddr], now_unix: u64) {
+    let hints_only = !update.is_empty() && update.iter().all(|u| u.hint);
     let mut out: Vec<KnownAddr> = Vec::with_capacity(update.len().saturating_add(addrs.len()));
     for u in update {
         if out.iter().any(|k| k.addr == u.addr) {
@@ -51,13 +57,14 @@ pub fn merge_update(addrs: &mut Vec<KnownAddr>, update: &[UpdateAddr], now_unix:
             addr: u.addr,
             source: AddrSource::AddressUpdate,
             last_seen_unix: now_unix,
-            short_lived: u.short_lived,
+            short_lived: u.addr.is_ipv6(),
             hint: u.hint,
         });
     }
     let fresh = out.len();
     for k in addrs.drain(..) {
-        if matches!(k.source, AddrSource::Invite | AddrSource::AddressUpdate) {
+        let keep_prev_update = hints_only && k.source == AddrSource::AddressUpdate && !k.hint;
+        if matches!(k.source, AddrSource::Invite | AddrSource::AddressUpdate) && !keep_prev_update {
             continue;
         }
         if out.iter().take(fresh).any(|n| n.addr == k.addr) {

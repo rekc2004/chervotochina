@@ -11,7 +11,7 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use chervo_addr::{PublishSet, UpdateAddr, update_allowed};
-use chervo_identity::{PairKey, PublicKey, SignDomain};
+use chervo_identity::{PairId, PairKey, PublicKey, SignDomain};
 
 use crate::{
     ADDR_UPDATE_MAX_LEN, ADDR_UPDATE_MIN_LEN, ADDR_UPDATE_PREFIX, FLAG_HINT, FLAG_SHORT_LIVED,
@@ -59,16 +59,31 @@ impl fmt::Debug for AddrUpdate {
     }
 }
 
-/// Выпущенный токен: двоичная запись и номер.
+/// Выпущенный токен: двоичная запись, номер и (если задана) пара, для которой он выпущен.
+/// Пара не входит в формат токена и не передаётся по сети: это локальная привязка, по
+/// которой помощники ADDR_INFO отказывают на соединении другой пары (`WrongPeer`).
 #[derive(Clone)]
 pub struct IssuedAddrUpdate {
     bytes: Vec<u8>,
     seq: u64,
+    pair: Option<PairId>,
 }
 
 impl IssuedAddrUpdate {
     pub fn seq(&self) -> u64 {
         self.seq
+    }
+
+    /// Пара (в нашем списке друзей), для которой выпущен токен; `None`, если не привязан.
+    pub fn pair(&self) -> Option<PairId> {
+        self.pair
+    }
+
+    /// Привязать токен к паре.
+    #[must_use]
+    pub fn for_pair(mut self, pair: PairId) -> Self {
+        self.pair = Some(pair);
+        self
     }
 
     pub fn bytes(&self) -> &[u8] {
@@ -88,6 +103,12 @@ impl fmt::Debug for IssuedAddrUpdate {
 }
 
 impl SignedAddrUpdate {
+    /// Номер из разобранного, но НЕ проверенного токена. Годится только для дешёвых отказов
+    /// до проверки подписи (устаревший номер, лимит); принимать по нему ничего нельзя.
+    pub fn unverified_seq(&self) -> u64 {
+        self.seq
+    }
+
     /// `signer` = `friend_ed`, `recipient` = наш `our_ed` этой пары. Любая ошибка даёт
     /// `BadSignature`.
     pub fn verify(
@@ -275,5 +296,9 @@ pub fn issue_addr_update(
         .map_err(|_| TokenError::SigningFailed)?;
     b.extend_from_slice(&sig);
     parse(&b).map_err(|_| TokenError::Malformed)?;
-    Ok(IssuedAddrUpdate { bytes: b, seq })
+    Ok(IssuedAddrUpdate {
+        bytes: b,
+        seq,
+        pair: None,
+    })
 }

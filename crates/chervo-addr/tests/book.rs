@@ -115,6 +115,88 @@ fn merge_update_replaces_invite_and_update_keeps_contact() {
 }
 
 #[test]
+fn merge_update_hint_only_keeps_previous_non_hint_updates() {
+    let base = || {
+        vec![
+            known("198.51.100.1:1", AddrSource::Invite, 1, false, false),
+            known("198.51.100.2:2", AddrSource::AddressUpdate, 2, false, false),
+            known("198.51.100.6:6", AddrSource::AddressUpdate, 2, false, true),
+            known("198.51.100.3:3", AddrSource::Contact, 3, false, false),
+        ]
+    };
+    // только подсказки: прежний AddressUpdate без подсказки остаётся после новых подсказок
+    let mut v = base();
+    merge_update(
+        &mut v,
+        &[
+            upd("203.0.113.5:50", false, true),
+            upd("198.51.100.2:2", false, true),
+        ],
+        NOW,
+    );
+    let got: Vec<(SocketAddr, AddrSource, u64, bool)> = v
+        .iter()
+        .map(|k| (k.addr, k.source, k.last_seen_unix, k.hint))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (sa("203.0.113.5:50"), AddrSource::AddressUpdate, NOW, true),
+            // тот же адрес, что и у подсказки, заменяется записью обновления
+            (sa("198.51.100.2:2"), AddrSource::AddressUpdate, NOW, true),
+            (sa("198.51.100.3:3"), AddrSource::Contact, 3, false),
+        ]
+    );
+    // вторая ветвь, как раньше: есть запись без подсказки, прежние AddressUpdate уходят
+    let mut v = base();
+    merge_update(
+        &mut v,
+        &[
+            upd("203.0.113.5:50", false, true),
+            upd("203.0.113.6:60", false, false),
+        ],
+        NOW,
+    );
+    assert_eq!(
+        addrs_of(&v),
+        vec![
+            sa("203.0.113.5:50"),
+            sa("203.0.113.6:60"),
+            sa("198.51.100.3:3")
+        ]
+    );
+    // подсказки без совпадений: прежний AddressUpdate без подсказки цел, старая подсказка ушла
+    let mut v = base();
+    merge_update(&mut v, &[upd("203.0.113.5:50", false, true)], NOW);
+    assert_eq!(
+        addrs_of(&v),
+        vec![
+            sa("203.0.113.5:50"),
+            sa("198.51.100.2:2"),
+            sa("198.51.100.3:3")
+        ]
+    );
+}
+
+#[test]
+fn merge_update_ipv6_short_lived_regardless_of_sender_flag() {
+    let mut v: Vec<KnownAddr> = Vec::new();
+    merge_update(
+        &mut v,
+        &[
+            upd("[2606:4700::7]:70", false, false),
+            upd("203.0.113.5:50", false, false),
+        ],
+        NOW,
+    );
+    assert!(v[0].short_lived, "IPv6 без флага всё равно короткоживущий");
+    assert!(!v[1].short_lived);
+    assert_eq!(usable(&v, NOW + SHORT_LIVED_TTL_SECS - 1).len(), 2);
+    prune(&mut v, NOW + SHORT_LIVED_TTL_SECS);
+    assert_eq!(addrs_of(&v), vec![sa("203.0.113.5:50")]);
+}
+
+#[test]
 fn note_contact_refresh_and_cap() {
     let mut v: Vec<KnownAddr> = Vec::new();
     let a = sa("203.0.113.1:100");

@@ -1196,14 +1196,147 @@ fn apply_inband_rate_limited() {
             .err(),
         Some(FriendsError::RateLimited)
     );
-    // часы ушли назад: не блокируют навсегда
+    // часы ушли назад (now < момента принятого): лимит не отключается
+    for back in [1, 1000] {
+        assert_eq!(
+            b.book
+                .apply_addr_update(
+                    &b.store,
+                    &pb,
+                    &u3,
+                    NOW + MIN_INBAND_UPDATE_INTERVAL_SECS - back
+                )
+                .err(),
+            Some(FriendsError::RateLimited),
+            "назад на {back}"
+        );
+    }
+    // через интервал от принятого обновление проходит
     b.book
-        .apply_addr_update(&b.store, &pb, &u3, NOW - 1000)
+        .apply_addr_update(
+            &b.store,
+            &pb,
+            &u3,
+            NOW + 2 * MIN_INBAND_UPDATE_INTERVAL_SECS,
+        )
         .unwrap();
     // токен из буфера обмена окном не ограничен
     b.book
         .apply_addr_update_text(&b.store, &text.text(), NOW - 999)
         .unwrap();
+}
+
+/// Копия токена с испорченной подписью (структура верна, подпись не сойдётся).
+fn with_bad_signature(bytes: &[u8]) -> chervo_token::SignedAddrUpdate {
+    let mut bad = bytes.to_vec();
+    let last = bad.len() - 1;
+    bad[last] ^= 0x01;
+    decode_addr_update_bin(&bad).unwrap()
+}
+
+#[test]
+fn apply_inband_stale_and_rate_limit_checked_before_signature() {
+    let (mut a, pa, mut b, pb) = duo();
+    let set = publish_set("8.8.8.8", 4000);
+    let t1 = a.book.issue_addr_update(&a.store, &pa, &set, NOW).unwrap();
+    let t2 = a.book.issue_addr_update(&a.store, &pa, &set, NOW).unwrap();
+    let u1 = decode_addr_update_bin(t1.bytes()).unwrap();
+    b.book.apply_addr_update(&b.store, &pb, &u1, NOW).unwrap();
+    let file = file_bytes(&b);
+    // повтор принятого номера с испорченной подписью: StaleSeq, а не BadAddrUpdate
+    // (подпись до проверки номера не смотрится)
+    assert_eq!(
+        b.book
+            .apply_addr_update(&b.store, &pb, &with_bad_signature(t1.bytes()), NOW + 1)
+            .err(),
+        Some(FriendsError::StaleSeq)
+    );
+    // новый номер внутри интервала с испорченной подписью: RateLimited
+    assert_eq!(
+        b.book
+            .apply_addr_update(&b.store, &pb, &with_bad_signature(t2.bytes()), NOW + 1)
+            .err(),
+        Some(FriendsError::RateLimited)
+    );
+    // после интервала испорченная подпись замечена
+    assert_eq!(
+        b.book
+            .apply_addr_update(
+                &b.store,
+                &pb,
+                &with_bad_signature(t2.bytes()),
+                NOW + MIN_INBAND_UPDATE_INTERVAL_SECS
+            )
+            .err(),
+        Some(FriendsError::BadAddrUpdate)
+    );
+    assert_eq!(file_bytes(&b), file, "отказы не пишут файл");
+    // отказы не сдвинули окно и не заняли номер: честный токен проходит
+    let u2 = decode_addr_update_bin(t2.bytes()).unwrap();
+    b.book
+        .apply_addr_update(&b.store, &pb, &u2, NOW + MIN_INBAND_UPDATE_INTERVAL_SECS)
+        .unwrap();
+    assert_eq!(b.book.get(&pb).unwrap().last_addr_seq, t2.seq());
+}
+
+#[test]
+fn issued_update_carries_its_pair() {
+    let (mut a, pa, _b, _pb) = duo();
+    let (_c, _pc, pa2) = add_peer(&mut a);
+    let set = publish_set("8.8.8.8", 4000);
+    let t = a.book.issue_addr_update(&a.store, &pa, &set, NOW).unwrap();
+    let t2 = a.book.issue_addr_update(&a.store, &pa2, &set, NOW).unwrap();
+    assert_eq!(t.pair(), Some(pa));
+    assert_eq!(t2.pair(), Some(pa2));
+    // формат не изменился: токен разбирается как обычно
+    assert!(decode_addr_update_bin(t.bytes()).is_ok());
+}
+
+#[test]
+fn inactive_friend_has_no_usable_addrs() {
+    let (mut a, pa, mut b, pb) = duo();
+    let set = publish_set("8.8.8.8", 4000);
+    let tok = a.book.issue_addr_update(&a.store, &pa, &set, NOW).unwrap();
+    b.book
+        .apply_addr_update_text(&b.store, &tok.text(), NOW)
+        .unwrap();
+    assert_eq!(b.book.usable_addrs(&pb, NOW + 1), set.socket_addrs());
+    assert_eq!(
+        b.book.findability(&pb, false, NOW + 1).unwrap(),
+        Findability::Ok
+    );
+    // заблокирован: пусто, не найдём; адреса в списке целы
+    b.book.block(&b.store, &pb).unwrap();
+    assert!(b.book.usable_addrs(&pb, NOW + 1).is_empty());
+    assert_eq!(
+        b.book.findability(&pb, false, NOW + 1).unwrap(),
+        Findability::NeedToken
+    );
+    assert_eq!(
+        b.book.findability(&pb, true, NOW + 1).unwrap(),
+        Findability::Ok
+    );
+    assert!(!b.book.get(&pb).unwrap().known_addrs.is_empty());
+    // разблокирован: адреса вернулись
+    b.book.unblock(&b.store, &pb).unwrap();
+    assert_eq!(b.book.usable_addrs(&pb, NOW + 1), set.socket_addrs());
+    assert_eq!(
+        b.book.findability(&pb, false, NOW + 1).unwrap(),
+        Findability::Ok
+    );
+    // отозван другом: пусто
+    let revoke = a.book.remove(&a.store, &pa, NOW + 2).unwrap().unwrap();
+    assert_eq!(
+        b.book.apply_revocation(&b.store, &revoke).unwrap(),
+        Some(pb)
+    );
+    assert_eq!(b.book.get(&pb).unwrap().state, FriendState::RevokedByPeer);
+    assert!(b.book.usable_addrs(&pb, NOW + 3).is_empty());
+    assert_eq!(
+        b.book.findability(&pb, false, NOW + 3).unwrap(),
+        Findability::NeedToken
+    );
+    assert!(!b.book.get(&pb).unwrap().known_addrs.is_empty());
 }
 
 #[test]

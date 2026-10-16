@@ -736,10 +736,12 @@ impl FriendBook {
             Ok(())
         })?;
         // номер уже на диске: теперь подпись
-        issue_addr_update(&key, &friend_ed, seq, set).map_err(|e| match e {
-            TokenError::RandomUnavailable => FriendsError::RandomUnavailable,
-            _ => FriendsError::BadAddrUpdate,
-        })
+        issue_addr_update(&key, &friend_ed, seq, set)
+            .map(|t| t.for_pair(*pair))
+            .map_err(|e| match e {
+                TokenError::RandomUnavailable => FriendsError::RandomUnavailable,
+                _ => FriendsError::BadAddrUpdate,
+            })
     }
 
     /// Применить проверенное обновление: номер строго больше `last_addr_seq` (`StaleSeq`),
@@ -803,6 +805,22 @@ impl FriendBook {
         Ok(pair)
     }
 
+    /// Номер строго больше `last_addr_seq` (`StaleSeq`) и не чаще одного принятого обновления
+    /// на пару за `MIN_INBAND_UPDATE_INTERVAL_SECS` (`RateLimited`). Часы назад (`now < at`)
+    /// считаются «внутри интервала». Неактивная пара: ошибка `active`.
+    fn check_inband(&self, pair: &PairId, seq: u64, now_unix: u64) -> Result<(), FriendsError> {
+        let fr = self.active(pair)?;
+        if seq <= fr.last_addr_seq {
+            return Err(FriendsError::StaleSeq);
+        }
+        if let Some((_, at)) = self.inband.iter().find(|(p, _)| p == pair)
+            && now_unix.saturating_sub(*at) < MIN_INBAND_UPDATE_INTERVAL_SECS
+        {
+            return Err(FriendsError::RateLimited);
+        }
+        Ok(())
+    }
+
     /// Обновление по проверенному соединению (`pair = conn.remote_pair()`): только `Active`;
     /// подпись только с ключами этого друга (иначе `BadAddrUpdate`); `StaleSeq`; не чаще одного
     /// принятого обновления на пару за `MIN_INBAND_UPDATE_INTERVAL_SECS` (`RateLimited`,
@@ -814,19 +832,14 @@ impl FriendBook {
         update: &SignedAddrUpdate,
         now_unix: u64,
     ) -> Result<(), FriendsError> {
+        // дешёвые проверки по ещё не проверенному номеру (ведут только к отказу), затем подпись
+        self.check_inband(pair, update.unverified_seq(), now_unix)?;
         let fr = self.active(pair)?;
         let verified = update
             .verify(&fr.friend_ed, &fr.our_ed)
             .map_err(|_| FriendsError::BadAddrUpdate)?;
-        if verified.seq() <= fr.last_addr_seq {
-            return Err(FriendsError::StaleSeq);
-        }
-        if let Some((_, at)) = self.inband.iter().find(|(p, _)| p == pair)
-            && now_unix >= *at
-            && now_unix - *at < MIN_INBAND_UPDATE_INTERVAL_SECS
-        {
-            return Err(FriendsError::RateLimited);
-        }
+        // повторная проверка по проверенному номеру, затем фиксация
+        self.check_inband(pair, verified.seq(), now_unix)?;
         self.apply_verified(keys, pair, &verified, now_unix)?;
         // записи удалённых друзей в памяти не копятся
         let friends = &self.data.friends;
@@ -862,15 +875,20 @@ impl FriendBook {
         })
     }
 
-    /// Адреса для набора (очищенные, по порядку). Неизвестная пара: пусто.
+    /// Адреса для набора (очищенные, по порядку). Неизвестная пара и не `Active` друг
+    /// (`Blocked`, `RevokedByPeer`): пусто, чтобы не стучать и не раскрывать новый адрес;
+    /// сохранённые адреса остаются в списке (после `unblock` они снова видны).
     pub fn usable_addrs(&self, pair: &PairId, now_unix: u64) -> Vec<SocketAddr> {
         match self.get(pair) {
-            Some(f) => chervo_addr::usable(&f.known_addrs, now_unix),
-            None => Vec::new(),
+            Some(f) if f.state == FriendState::Active => {
+                chervo_addr::usable(&f.known_addrs, now_unix)
+            }
+            _ => Vec::new(),
         }
     }
 
     /// `Findability::NeedToken`, если нет постоянного адреса ни у нас (`own_stable`), ни у друга.
+    /// Для не `Active` друга адресов нет (как в `usable_addrs`).
     pub fn findability(
         &self,
         pair: &PairId,
@@ -878,10 +896,11 @@ impl FriendBook {
         now_unix: u64,
     ) -> Result<Findability, FriendsError> {
         let f = self.get(pair).ok_or(FriendsError::UnknownPair)?;
-        Ok(chervo_addr::findability(
-            own_stable,
-            &f.known_addrs,
-            now_unix,
-        ))
+        let known: &[chervo_addr::KnownAddr] = if f.state == FriendState::Active {
+            &f.known_addrs
+        } else {
+            &[]
+        };
+        Ok(chervo_addr::findability(own_stable, known, now_unix))
     }
 }

@@ -222,15 +222,25 @@ async fn write_frame<T: SendStream>(tx: &mut T, frame: &[u8]) -> Result<(), Addr
     Ok(())
 }
 
-/// Сторона, открывшая соединение. `remote_pair != *pair` -> `WrongPeer` (ничего не
-/// отправлено). Открывает поток, пишет кадр, закрывает запись, читает один кадр целиком
-/// (с байтом вида) и требует конец потока.
+/// Соединение принадлежит паре вызывающего, а привязанный к паре токен выпущен именно для
+/// неё (токен для другого друга не уходит по этому соединению).
+fn peer_matches<C: Connection>(conn: &C, pair: &PairId, ours: Option<&IssuedAddrUpdate>) -> bool {
+    let remote = conn.remote_pair();
+    remote == *pair
+        && ours
+            .and_then(IssuedAddrUpdate::pair)
+            .is_none_or(|p| p == remote)
+}
+
+/// Сторона, открывшая соединение. `remote_pair != *pair` или токен выпущен для другой пары
+/// -> `WrongPeer` (ничего не отправлено). Открывает поток, пишет кадр, закрывает запись,
+/// читает один кадр целиком (с байтом вида) и требует конец потока.
 pub async fn exchange_addr_info<C: Connection>(
     conn: &C,
     pair: &PairId,
     ours: Option<&IssuedAddrUpdate>,
 ) -> Result<PeerAddrInfo, AddrFlowError> {
-    if conn.remote_pair() != *pair {
+    if !peer_matches(conn, pair, ours) {
         return Err(AddrFlowError::WrongPeer);
     }
     let frame = encode_addr_info(normalize(conn.remote_addr()), ours)?;
@@ -245,8 +255,8 @@ pub async fn exchange_addr_info<C: Connection>(
 }
 
 /// Принимающая сторона; диспетчер (этап 13) уже прочитал нулевой байт `STREAM_ADDR_INFO`.
-/// `remote_pair != *pair` -> `WrongPeer` (ничего не записано). Читает остаток кадра,
-/// требует конец потока, пишет свой кадр и закрывает запись.
+/// `remote_pair != *pair` или токен выпущен для другой пары -> `WrongPeer` (ничего не
+/// записано). Читает остаток кадра, требует конец потока, пишет свой кадр и закрывает запись.
 pub async fn answer_addr_info<C: Connection>(
     conn: &C,
     pair: &PairId,
@@ -254,7 +264,7 @@ pub async fn answer_addr_info<C: Connection>(
     mut rx: C::Rx,
     ours: Option<&IssuedAddrUpdate>,
 ) -> Result<PeerAddrInfo, AddrFlowError> {
-    if conn.remote_pair() != *pair {
+    if !peer_matches(conn, pair, ours) {
         return Err(AddrFlowError::WrongPeer);
     }
     let (observed_me, update) = read_frame(&mut rx, true).await?;
