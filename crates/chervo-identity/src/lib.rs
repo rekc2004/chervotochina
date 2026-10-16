@@ -16,6 +16,7 @@ mod error;
 mod ids;
 mod keys;
 mod kk;
+mod knock;
 mod kx;
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 mod os;
@@ -28,6 +29,7 @@ pub use kk::{
     BINDING_LEN, ChannelBinding, KK_KIND_V1, KK_MSG1_LEN, KK_MSG2_LEN, KK_MSG3_LEN,
     KK_PROLOGUE_TAG, KkInitiator, KkResponder, KxPeer, NOISE_PARAMS, kk_initiate, kk_respond,
 };
+pub use knock::{KNOCK_ID_LABEL, KNOCK_KDF_LABEL, KNOCK_LEN, KNOCK_TAG_LABEL, KnockKeys};
 pub use kx::{KxPublicKey, PairKx};
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 pub use os::OsKeyStore;

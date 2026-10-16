@@ -362,6 +362,7 @@ name = "chervo-identity"
 version = "0.0.0"
 dependencies = [
  "apple-native-keyring-store",
+ "blake2",
  "curve25519-dalek 5.0.0",
  "ed25519-dalek",
  "getrandom 0.4.3",

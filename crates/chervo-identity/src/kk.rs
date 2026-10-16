@@ -47,8 +47,8 @@ impl fmt::Debug for ChannelBinding {
 /// Пара глазами Noise KK: наш ключ обмена и ключ обмена друга.
 pub struct KxPeer {
     pair: PairId,
-    ours: PairKx,
-    theirs: KxPublicKey,
+    pub(crate) ours: PairKx,
+    pub(crate) theirs: KxPublicKey,
 }
 
 impl KxPeer {
