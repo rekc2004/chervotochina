@@ -388,6 +388,8 @@ pub async fn raw_full(
 struct CountSock {
     inner: Arc<dyn quinn::AsyncUdpSocket>,
     rx: Arc<std::sync::atomic::AtomicU64>,
+    /// Журнал принятого: (источник, длина, первые байты) для диагностики падений.
+    log: std::sync::Mutex<Vec<String>>,
 }
 
 impl quinn::AsyncUdpSocket for CountSock {
@@ -409,6 +411,11 @@ impl quinn::AsyncUdpSocket for CountSock {
         if let std::task::Poll::Ready(Ok(n)) = &r {
             self.rx
                 .fetch_add(*n as u64, std::sync::atomic::Ordering::Relaxed);
+            let mut log = self.log.lock().unwrap_or_else(|e| e.into_inner());
+            for (b, m) in bufs.iter().zip(meta.iter()).take(*n) {
+                let head = &b[..m.len.min(8)];
+                log.push(format!("от {} длина {} голова {head:02x?}", m.addr, m.len));
+            }
         }
         r
     }
@@ -433,6 +440,8 @@ impl quinn::AsyncUdpSocket for CountSock {
 /// Сырое гнездо с клиентским quinn поверх; считает все пакеты, которые к нему дошли.
 pub struct Attacker {
     sock: Arc<CountSock>,
+    /// Клон гнезда ОС для отправки (общий порт с `ep`).
+    tx: std::net::UdpSocket,
     pub ep: quinn::Endpoint,
 }
 
@@ -441,10 +450,12 @@ impl Attacker {
         use quinn::Runtime;
         let std_sock = std::net::UdpSocket::bind(lo()).unwrap();
         std_sock.set_nonblocking(true).unwrap();
+        let tx = std_sock.try_clone().unwrap();
         let raw = quinn::TokioRuntime.wrap_udp_socket(std_sock).unwrap();
         let sock = Arc::new(CountSock {
             inner: raw,
             rx: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            log: std::sync::Mutex::new(Vec::new()),
         });
         let ep = quinn::Endpoint::new_with_abstract_socket(
             quinn::EndpointConfig::default(),
@@ -453,19 +464,35 @@ impl Attacker {
             Arc::new(quinn::TokioRuntime),
         )
         .unwrap();
-        Self { sock, ep }
+        Self { sock, tx, ep }
     }
 
-    /// Датаграмма с этого гнезда.
+    /// Датаграмма с этого гнезда. Шлёт через клон обычного гнезда ОС (тот же порт): `try_send`
+    /// гнезда quinn/tokio сразу после создания даёт `WouldBlock` (реактор ещё не выставил
+    /// готовность записи), и датаграмма молча терялась. Здесь потеря исключена: при `WouldBlock`
+    /// отправка повторяется.
     pub fn send(&self, dest: SocketAddr, bytes: &[u8]) {
-        use quinn::AsyncUdpSocket;
-        let _ = self.sock.try_send(&quinn::udp::Transmit {
-            destination: dest,
-            ecn: None,
-            contents: bytes,
-            segment_size: None,
-            src_ip: None,
-        });
+        for _ in 0..1000 {
+            match self.tx.send_to(bytes, dest) {
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::yield_now(),
+                Ok(_) => return,
+                Err(e) => panic!("отправка атакующего {} -> {dest}: {e:?}", bytes.len()),
+            }
+        }
+        panic!(
+            "отправка атакующего {} -> {dest}: гнездо не готово",
+            bytes.len()
+        );
+    }
+
+    /// Журнал пришедших пакетов и адрес гнезда (для сообщений о падении).
+    pub fn dump(&self) -> String {
+        let log = self.sock.log.lock().unwrap_or_else(|e| e.into_inner());
+        let me = self
+            .ep
+            .local_addr()
+            .map_or_else(|e| e.to_string(), |a| a.to_string());
+        format!("гнездо {me}: {} пакетов: {:?}", log.len(), *log)
     }
 
     /// Сколько пакетов пришло этому гнезду.

@@ -175,10 +175,29 @@ async fn silent_to_replayed_knock() {
         let friend_sock = Attacker::new();
         friend_sock.send(dest, &knock);
         sleep_ms(200).await;
+        // предусловие: оригинал дошёл и открыл допуск (иначе копия стала бы «первым» стуком)
+        assert_eq!(b.stats().knock_ok, u64::from(req), "оригинал стука не принят");
         let at = Attacker::new();
         at.send(dest, &knock);
         sleep_ms(100).await;
         let _ = at.initial(dest, Duration::from_secs(2)).await;
+        if req {
+            // то же условие, что в `silent`, но с подробностями: что пришло атакующему и счётчики
+            let st = b.stats();
+            assert_eq!(
+                at.received(),
+                0,
+                "replay: сервер {dest}, гнездо друга {:?}; {}; ok={} replay={} bad={} skewed={} dropped={} retry={}",
+                friend_sock.ep.local_addr(),
+                at.dump(),
+                st.knock_ok,
+                st.knock_replay,
+                st.knock_bad,
+                st.knock_skewed,
+                st.dropped_unadmitted,
+                st.retry_sent,
+            );
+        }
         Outcome {
             received: at.received(),
             stats: b.stats(),
