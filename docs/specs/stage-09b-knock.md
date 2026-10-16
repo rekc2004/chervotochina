@@ -49,7 +49,7 @@ pub fn window_at(unix_ms: i64) -> u64;   // floor(unix_ms / 30000), отрица
 Модули: `src/knock.rs` (обёртка гнезда `KnockSocket`, таблица, кэш повторов, `AdmitTable` с пинами-RAII, отправка стука). `connect`: пин → стук → `knock_lead` → `connect_with` → досылка стуков (п.6) → далее как этап 9. `admit`: после проверки `remote_address_validated()` списать попытку допуска; нет → `ignore`, `admit_exhausted += 1`. `set_peers`: пересобрать `KnockKeys` (ошибка → пара вне таблицы) и таблицу. Проверка `PeerFilter` до допуска (заблокированная пара = незнакомец).
 `chervo-timesync`:
 ```rust
-pub const DEFAULT_SERVERS: &[&str] = &["ntp1.vniiftri.ru", "ntp2.vniiftri.ru", "ntp3.vniiftri.ru", "ntp4.vniiftri.ru", "ntp21.vniiftri.ru"]; // [Д] шаг 0
+pub const DEFAULT_SERVERS: &[&str] = &["0.ru.pool.ntp.org", "1.ru.pool.ntp.org", "2.ru.pool.ntp.org", "3.ru.pool.ntp.org", "ntp1.vniiftri.ru", "ntp2.vniiftri.ru", "ntp3.vniiftri.ru", "ntp4.vniiftri.ru", "ntp21.vniiftri.ru"]; // pool.ntp.org ru: [П] по ntppool.org/zone/ru; vniiftri: [НП], проверить на реальной машине (решение владельца 2026-10-16)
 pub struct SyncConfig { pub servers: Vec<String>, pub timeout: Duration /*2 с*/, pub min_valid: usize /*2*/,
                         pub max_spread: Duration /*1 с*/, pub max_abs_offset: Duration /*7 сут*/ } // Default
 pub struct ClockOffset { pub offset_ms: i64, pub valid: u8, pub queried: u8 }
