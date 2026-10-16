@@ -122,20 +122,28 @@ impl Drop for TestDir {
 
 /// Секунды Unix идут вместе с приостановленным временем tokio.
 pub struct TestClock {
+    skew: AtomicU64,
     start: Instant,
 }
 
 impl TestClock {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
+            skew: AtomicU64::new(0),
             start: Instant::now(),
         })
+    }
+
+    /// Часы уходят вперёд на `secs` секунд (скачок часов пользователя).
+    pub fn skew(&self, secs: u64) {
+        self.skew.fetch_add(secs, Ordering::SeqCst);
     }
 }
 
 impl Clock for TestClock {
     fn now_unix(&self) -> u64 {
         BASE_UNIX
+            + self.skew.load(Ordering::SeqCst)
             + Instant::now()
                 .saturating_duration_since(self.start)
                 .as_secs()

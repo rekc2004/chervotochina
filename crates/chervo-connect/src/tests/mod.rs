@@ -11,6 +11,7 @@ mod addrinfo;
 mod candidates;
 mod diag;
 mod engine;
+mod invite;
 mod kit;
 mod limiter;
 mod publish;

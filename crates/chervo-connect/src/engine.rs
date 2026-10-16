@@ -19,13 +19,14 @@ use chervo_token::{InviteError, Sas, SignedAddrUpdate, TokenError};
 use chervo_transport::{Connection, EventSource, ManagedTransport, PeerAddr};
 use chervo_transport::{TransportError, TransportEvent};
 use tokio::sync::{broadcast, watch};
-use tokio::task::JoinHandle;
+use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::Instant;
 
 use crate::allow::AllowSet;
 use crate::clock::{Clock, RouteProbe};
 use crate::config::ConnectConfig;
 use crate::diag::{Diagnosis, NoDirectPath};
+use crate::invite::Invite;
 use crate::limiter::{Limiter, add_sat};
 use crate::plan::{Candidate, PathKind, friend_plan, guest_plan, path_kind, select};
 
@@ -180,8 +181,8 @@ pub(crate) struct LiveConn<C> {
     pub(crate) since: Instant,
 }
 
-/// Гостевая пара живого приглашения (заполняется частью C4). Для приглашённого `token_addrs`
-/// — адреса токена; для пригласившего пусто.
+/// Гостевая пара живого приглашения (регистрируется частью C4). Для приглашённого
+/// `token_addrs` — адреса токена; для пригласившего пусто.
 pub(crate) struct Guest {
     pub(crate) token_addrs: Vec<SocketAddr>,
     pub(crate) peer: Box<dyn Fn() -> Option<KxPeer> + Send + Sync>,
@@ -195,6 +196,8 @@ pub(crate) struct State<C> {
     pub(crate) inflight: HashSet<PairId>,
     pub(crate) friends: HashMap<PairId, FriendRt>,
     pub(crate) guests: HashMap<PairId, Guest>,
+    /// Живые приглашения (только в памяти: после перезапуска теряются, `drop_all_pending`).
+    pub(crate) invites: HashMap<PairId, Invite<C>>,
     pub(crate) fast_global_until: Option<Instant>,
     pub(crate) key_problems: HashMap<PairId, KeyStatus>,
     pub(crate) last_success_any: Option<Instant>,
@@ -248,8 +251,9 @@ where
         self.shut.load(Ordering::SeqCst)
     }
 
-    /// Запустить задачу, которая завершается при остановке движка.
-    pub(crate) fn spawn_task<F>(&self, f: F)
+    /// Запустить задачу, которая завершается при остановке движка. Возвращает ручку отмены
+    /// (сессии приглашений отменяются при отмене и сроке приглашения).
+    pub(crate) fn spawn_task<F>(&self, f: F) -> AbortHandle
     where
         F: Future<Output = ()> + Send + 'static,
     {
@@ -260,9 +264,11 @@ where
                 () = wait_shutdown(rx) => {},
             }
         });
+        let abort = handle.abort_handle();
         let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
         tasks.retain(|h| !h.is_finished());
         tasks.push(handle);
+        abort
     }
 
     pub(crate) fn shutdown_now(&self) {
@@ -489,12 +495,6 @@ where
         }
     }
 
-    /// Гостевое соединение обрабатывает часть C4. До неё соединение закрывается: ни потоков
-    /// ADDR_INFO, ни прикладных данных на гостевых парах не бывает.
-    pub(crate) fn on_guest_connection(&self, conn: T::Conn) {
-        conn.close();
-    }
-
     // ---------------------------------------------------------------- планировщик
 
     /// Гость с адресами токена или пара-друг, готовая к набору.
@@ -513,7 +513,9 @@ where
             }
         }
         for (pair, g) in &st.guests {
-            if st.book.get(pair).is_none() && !g.token_addrs.is_empty() {
+            // гость набирается, пока нет сессии и не отправлен M1 (после M1 повторов нет)
+            let dialable = st.invites.get(pair).is_none_or(|i| !i.no_dial());
+            if st.book.get(pair).is_none() && !g.token_addrs.is_empty() && dialable {
                 pairs.push((*pair, st.friends.get(pair).and_then(|r| r.last_dial_at)));
             }
         }
@@ -766,12 +768,82 @@ where
     pub(crate) async fn run_expire(self: Arc<Self>) {
         loop {
             tokio::time::sleep(period(self.cfg.expire_interval)).await;
+            self.expire_invites();
             let unix = self.clock.now_unix();
             let mut st = self.lock();
             if matches!(st.book.expire(&*self.store, unix), Ok(n) if n > 0) {
                 let _ = self.publish(&mut st);
             }
         }
+    }
+
+    /// Единственный способ изменить книгу (см. `Engine::update_book`).
+    pub(crate) fn update_book<R>(
+        &self,
+        f: impl FnOnce(&mut FriendBook, &S) -> Result<R, FriendsError>,
+    ) -> Result<R, ConnectError> {
+        self.update_book_with(|_| {}, f)
+    }
+
+    /// `update_book` с шагом `pre` над состоянием под тем же замком, до `f` и публикации:
+    /// приглашение снимается вместе с изменением книги, одной публикацией.
+    pub(crate) fn update_book_with<R>(
+        &self,
+        pre: impl FnOnce(&mut State<T::Conn>),
+        f: impl FnOnce(&mut FriendBook, &S) -> Result<R, FriendsError>,
+    ) -> Result<R, ConnectError> {
+        if self.is_shut() {
+            return Err(ConnectError::Shutdown);
+        }
+        let mut to_close: Vec<T::Conn> = Vec::new();
+        let (result, published) = {
+            let mut st = self.lock();
+            pre(&mut st);
+            let before: Vec<PairId> = st.book.friends().iter().map(|x| x.pair).collect();
+            let seqs: HashMap<PairId, u64> = st
+                .book
+                .friends()
+                .iter()
+                .map(|x| (x.pair, x.last_addr_seq))
+                .collect();
+            let result = f(&mut st.book, &self.store);
+            let published = self.publish(&mut st);
+            self.cleanup_inactive(&mut st, &before, &mut to_close);
+            // новый номер обновления от друга (например, вставленный токен) сбрасывает
+            // ограничитель только адресов этого друга; быстрого окна он не открывает
+            let now = Instant::now();
+            let advanced: Vec<PairId> = st
+                .book
+                .friends()
+                .iter()
+                .filter(|x| seqs.get(&x.pair).is_some_and(|s| x.last_addr_seq > *s))
+                .map(|x| x.pair)
+                .collect();
+            for pair in advanced {
+                let addrs = Self::friend_addrs(&st, &pair);
+                st.limiter.reset_pair(&addrs, now);
+            }
+            (result, published)
+        };
+        for c in &to_close {
+            c.close();
+        }
+        let value = result.map_err(ConnectError::Friends)?;
+        published?;
+        Ok(value)
+    }
+
+    /// Гостевая пара живого приглашения: регистрация и публикация (гость входит в набор пар
+    /// транспорта и в набор разрешённых).
+    pub(crate) fn add_guest(
+        &self,
+        pair: PairId,
+        token_addrs: Vec<SocketAddr>,
+        peer: Box<dyn Fn() -> Option<KxPeer> + Send + Sync>,
+    ) -> Result<(), ConnectError> {
+        let mut st = self.lock();
+        st.guests.insert(pair, Guest { token_addrs, peer });
+        self.publish(&mut st)
     }
 }
 
@@ -810,6 +882,7 @@ where
             inflight: HashSet::new(),
             friends: HashMap::new(),
             guests: HashMap::new(),
+            invites: HashMap::new(),
             fast_global_until: Some(add_sat(now, cfg.fast_window)),
             key_problems: HashMap::new(),
             last_success_any: None,
@@ -849,44 +922,7 @@ where
         &self,
         f: impl FnOnce(&mut FriendBook, &S) -> Result<R, FriendsError>,
     ) -> Result<R, ConnectError> {
-        if self.inner.is_shut() {
-            return Err(ConnectError::Shutdown);
-        }
-        let mut to_close: Vec<T::Conn> = Vec::new();
-        let (result, published) = {
-            let mut st = self.inner.lock();
-            let before: Vec<PairId> = st.book.friends().iter().map(|x| x.pair).collect();
-            let seqs: HashMap<PairId, u64> = st
-                .book
-                .friends()
-                .iter()
-                .map(|x| (x.pair, x.last_addr_seq))
-                .collect();
-            let result = f(&mut st.book, &self.inner.store);
-            let published = self.inner.publish(&mut st);
-            self.inner.cleanup_inactive(&mut st, &before, &mut to_close);
-            // новый номер обновления от друга (например, вставленный токен) сбрасывает
-            // ограничитель только адресов этого друга; быстрого окна он не открывает
-            let now = Instant::now();
-            let advanced: Vec<PairId> = st
-                .book
-                .friends()
-                .iter()
-                .filter(|x| seqs.get(&x.pair).is_some_and(|s| x.last_addr_seq > *s))
-                .map(|x| x.pair)
-                .collect();
-            for pair in advanced {
-                let addrs = Inner::<T, S>::friend_addrs(&st, &pair);
-                st.limiter.reset_pair(&addrs, now);
-            }
-            (result, published)
-        };
-        for c in &to_close {
-            c.close();
-        }
-        let value = result.map_err(ConnectError::Friends)?;
-        published?;
-        Ok(value)
+        self.inner.update_book(f)
     }
 
     pub fn read_book<R>(&self, f: impl FnOnce(&FriendBook) -> R) -> R {
@@ -944,25 +980,15 @@ where
         self.inner.shutdown_now();
     }
 
-    /// Гостевая пара живого приглашения: часть C4 регистрирует её при выдаче и приёме
-    /// приглашения. `peer` собирает `KxPeer` для публикации (`None`: пары нет в наборе).
-    #[allow(dead_code)]
+    /// Только для тестов: гостевая пара без приглашения.
+    #[cfg(test)]
     pub(crate) fn add_guest(
         &self,
         pair: PairId,
         token_addrs: Vec<SocketAddr>,
         peer: Box<dyn Fn() -> Option<KxPeer> + Send + Sync>,
     ) -> Result<(), ConnectError> {
-        let mut st = self.inner.lock();
-        st.guests.insert(pair, Guest { token_addrs, peer });
-        self.inner.publish(&mut st)
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn remove_guest(&self, pair: &PairId) -> Result<(), ConnectError> {
-        let mut st = self.inner.lock();
-        st.guests.remove(pair);
-        self.inner.publish(&mut st)
+        self.inner.add_guest(pair, token_addrs, peer)
     }
 }
 

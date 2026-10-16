@@ -21,6 +21,7 @@ mod config;
 mod diag;
 mod dispatch;
 mod engine;
+mod invite;
 mod limiter;
 mod plan;
 mod texts;
