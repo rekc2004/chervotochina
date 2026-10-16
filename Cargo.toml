@@ -5,6 +5,7 @@ members = [
     "crates/chervo-addr",
     "crates/chervo-transport",
     "crates/chervo-transport-quinn",
+    "crates/chervo-timesync",
     "crates/chervo-token",
     "crates/chervo-friends",
     "crates/chervo-connect",
@@ -25,6 +26,7 @@ chervo-identity = { path = "crates/chervo-identity", version = "0.0.0" }
 chervo-addr = { path = "crates/chervo-addr", version = "0.0.0" }
 chervo-transport = { path = "crates/chervo-transport", version = "0.0.0" }
 chervo-transport-quinn = { path = "crates/chervo-transport-quinn", version = "0.0.0" }
+chervo-timesync = { path = "crates/chervo-timesync", version = "0.0.0" }
 chervo-token = { path = "crates/chervo-token", version = "0.0.0" }
 chervo-friends = { path = "crates/chervo-friends", version = "0.0.0" }
 chervo-connect = { path = "crates/chervo-connect", version = "0.0.0" }

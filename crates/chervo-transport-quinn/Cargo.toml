@@ -15,6 +15,7 @@ tokio.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+chervo-timesync.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [lints]

@@ -379,6 +379,13 @@ name = "chervo-receive"
 version = "0.0.0"
 
 [[package]]
+name = "chervo-timesync"
+version = "0.0.0"
+dependencies = [
+ "getrandom 0.4.3",
+]
+
+[[package]]
 name = "chervo-token"
 version = "0.0.0"
 dependencies = [
@@ -401,6 +408,7 @@ name = "chervo-transport-quinn"
 version = "0.0.0"
 dependencies = [
  "chervo-identity",
+ "chervo-timesync",
  "chervo-transport",
  "quinn",
  "ring",
