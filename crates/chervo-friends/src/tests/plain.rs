@@ -56,6 +56,22 @@ fn plain_roundtrip_and_layout() {
     assert_eq!(bytes_of(&back), b, "кодирование каноническое");
 }
 
+/// Ёмкость выбрана по точному размеру: буфер не перевыделялся (иначе остались бы копии
+/// открытого текста в освобождённой памяти).
+#[test]
+fn plain_encode_exact_capacity() {
+    let full = encode(&sample()).unwrap();
+    assert_eq!(full.capacity(), full.len());
+    let empty = encode(&BookData::default()).unwrap();
+    assert_eq!(empty.capacity(), empty.len());
+    let many = BookData {
+        friends: (0..200u8).map(friend).collect(),
+        pending: vec![pending(1, PendingRole::Inviter)],
+    };
+    let b = encode(&many).unwrap();
+    assert_eq!(b.capacity(), b.len());
+}
+
 #[test]
 fn plain_limits() {
     // 1025 друзей: запись отказывает, разбор отказывает

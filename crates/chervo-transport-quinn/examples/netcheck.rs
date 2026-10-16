@@ -212,7 +212,7 @@ async fn listen(dir: &Path, addr: SocketAddr, offset_ms: i64, no_knock: bool) ->
     for n in 1..=PAIRS {
         peers.push(load_peer(dir, 'b', n)?);
     }
-    t.set_peers(peers);
+    t.set_peers(peers).map_err(|e| e.to_string())?;
     ev("bound", "");
     // счётчики стука: только числа, без адресов; печатаются при изменении
     let tstat = t.clone();
@@ -339,7 +339,8 @@ async fn client(dir: &Path, o: Opts) -> Res<()> {
         .map_err(|e| e.to_string())?,
     );
     t.set_clock_offset(o.offset_ms).map_err(|e| e.to_string())?;
-    t.set_peers(vec![load_peer(dir, 'a', o.pair)?]);
+    t.set_peers(vec![load_peer(dir, 'a', o.pair)?])
+        .map_err(|e| e.to_string())?;
     let pid = pair_id(dir, o.pair)?;
     let started = Instant::now();
     if let Some(s) = o.change_addr_at {
@@ -437,7 +438,8 @@ async fn probe_cmd(dir: &Path, to: SocketAddr, mode: &str) -> Res<()> {
     let friend = load_peer(dir, 'a', 1)?;
     let pid = friend.pair();
     let keys = friend.knock_keys().map_err(|e| e.to_string())?;
-    t.set_peers(vec![load_peer(dir, 'a', 1)?]);
+    t.set_peers(vec![load_peer(dir, 'a', 1)?])
+        .map_err(|e| e.to_string())?;
     let w = now_window();
     match mode {
         "noise" => {

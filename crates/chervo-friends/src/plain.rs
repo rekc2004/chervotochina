@@ -54,13 +54,37 @@ fn source_from(b: u8) -> Option<AddrSource> {
     })
 }
 
+/// Точный размер записи (при успешном `encode`): версия, счётчики, друзья, pending.
+fn encoded_len(data: &BookData) -> usize {
+    let friends: usize = data
+        .friends
+        .iter()
+        .map(|f| {
+            let perm = match f.permission {
+                Permission::Ask => 1,
+                Permission::AutoAccept(_) => 1 + 8 + 4,
+            };
+            let addrs: usize = f
+                .known_addrs
+                .iter()
+                .map(|a| (if a.addr.is_ipv4() { 1 + 4 } else { 1 + 16 }) + 2 + 1 + 8 + 1)
+                .sum();
+            // pair, длина имени, имя, три ключа, состояние, право, два u64, число адресов
+            16 + 1 + f.name.len() + 3 * 32 + 1 + perm + 8 + 8 + 1 + addrs
+        })
+        .sum();
+    // версия, число друзей, число pending; pending: pair, роль, срок
+    1 + 2 + 2 + friends + data.pending.len() * (16 + 1 + 8)
+}
+
 /// Запись; те же проверки, что у разбора (файл, который нельзя прочитать, не пишется).
 pub(crate) fn encode(data: &BookData) -> Result<Zeroizing<Vec<u8>>, FriendsError> {
     if data.friends.len() > MAX_FRIENDS || data.pending.len() > MAX_PENDING {
         return Err(FriendsError::LimitExceeded);
     }
     let mut seen = HashSet::new();
-    let mut out: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(4096));
+    // точный размер заранее: буфер не перевыделяется, копии открытого текста не остаются
+    let mut out: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(encoded_len(data)));
     out.push(PLAIN_VERSION);
     let n_friends = u16::try_from(data.friends.len()).map_err(|_| FriendsError::LimitExceeded)?;
     out.extend_from_slice(&n_friends.to_be_bytes());

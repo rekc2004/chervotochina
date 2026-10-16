@@ -46,6 +46,9 @@ pub struct FriendBook {
     path: PathBuf,
     key: Option<Zeroizing<[u8; 32]>>,
     data: BookData,
+    /// Подписанные отзывы, чей ключ пары уже удалён, а запись списка сохранить не удалось
+    /// (по одному на пару). Повтор `remove`/`rekey` отдаёт этот текст. Только в памяти.
+    unsent: Vec<(PairId, String)>,
 }
 
 impl fmt::Debug for FriendBook {
@@ -130,6 +133,7 @@ impl FriendBook {
                 path: path.to_path_buf(),
                 key,
                 data: BookData::default(),
+                unsent: Vec::new(),
             }),
             Some(file) => {
                 let k = key.ok_or(FriendsError::ListKeyMissing)?;
@@ -138,6 +142,7 @@ impl FriendBook {
                     path: path.to_path_buf(),
                     key: Some(k),
                     data,
+                    unsent: Vec::new(),
                 })
             }
         }
@@ -165,6 +170,7 @@ impl FriendBook {
             path: path.to_path_buf(),
             key,
             data: BookData::default(),
+            unsent: Vec::new(),
         })
     }
 
@@ -211,17 +217,41 @@ impl FriendBook {
         Ok(k)
     }
 
-    /// seal, запись в `<path>.tmp`, `sync_all`, `rename` поверх `path`.
+    /// seal, запись в `<path>.tmp` (новый файл 0600), `sync_all`, `rename` поверх `path`, fsync каталога.
     fn save<K: ListKeyStore + ?Sized>(&mut self, keys: &K) -> Result<(), FriendsError> {
         let k = self.ensure_key(keys)?;
         let bytes = vault::seal(&k, &self.data)?;
         let tmp = tmp_path(&self.path);
         let written = (|| -> std::io::Result<()> {
-            let mut f = std::fs::File::create(&tmp)?;
+            // старый `.tmp` (в том числе симлинк) убирается, не открывается; `create_new` не
+            // следует симлинкам; на unix права 0600
+            match std::fs::remove_file(&tmp) {
+                Err(e) if e.kind() != ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+            let mut f = opts.open(&tmp)?;
             f.write_all(&bytes)?;
             f.sync_all()?;
             drop(f);
-            std::fs::rename(&tmp, &self.path)
+            std::fs::rename(&tmp, &self.path)?;
+            // fsync каталога: перемещение записи переживает сбой питания. `rename` уже
+            // выполнен, поэтому ошибка здесь не откатывает запись.
+            #[cfg(unix)]
+            if let Some(dir) = self.path.parent() {
+                let dir = if dir.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    dir
+                };
+                if let Ok(d) = std::fs::File::open(dir) {
+                    let _ = d.sync_all();
+                }
+            }
+            Ok(())
         })();
         if written.is_err() {
             let _ = std::fs::remove_file(&tmp);
@@ -483,15 +513,33 @@ impl FriendBook {
         &mut self,
         store: &S,
         pair: &PairId,
+        text: Option<&str>,
     ) -> Result<(), FriendsError> {
         SecretStore::delete(store, pair).map_err(map_identity)?;
-        self.commit(store, |d| {
+        let saved = self.commit(store, |d| {
             d.friends.retain(|x| x.pair != *pair);
             Ok(())
-        })
+        });
+        self.unsent.retain(|(p, _)| p != pair);
+        if saved.is_err()
+            && let Some(t) = text
+        {
+            // ключ уже удалён, запись осталась: текст отзыва не теряем до повтора
+            self.unsent.push((*pair, t.to_owned()));
+        }
+        saved
     }
 
-    /// Отзыв (`Removed`), если ключ загрузился; затем удалить ключ и запись.
+    fn unsent_for(&self, pair: &PairId) -> Option<String> {
+        self.unsent
+            .iter()
+            .find(|(p, _)| p == pair)
+            .map(|(_, t)| t.clone())
+    }
+
+    /// Отзыв (`Removed`), если ключ загрузился; затем удалить ключ и запись. Если запись
+    /// списка сохранить не удалось (`Io`), ключ уже удалён, а подписанный текст отзыва
+    /// хранится в памяти: повтор `remove` вернёт его (до перезапуска программы).
     pub fn remove<S: SecretStore + ListKeyStore + ?Sized>(
         &mut self,
         store: &S,
@@ -499,13 +547,17 @@ impl FriendBook {
         now_unix: u64,
     ) -> Result<Option<String>, FriendsError> {
         let fr = self.get(pair).ok_or(FriendsError::UnknownPair)?;
-        let text = Self::revocation_for(store, fr, RevocationReason::Removed, now_unix)?;
-        self.drop_friend(store, pair)?;
+        let text = match self.unsent_for(pair) {
+            Some(t) => Some(t),
+            None => Self::revocation_for(store, fr, RevocationReason::Removed, now_unix)?,
+        };
+        self.drop_friend(store, pair, text.as_deref())?;
         Ok(text)
     }
 
     /// «Пересоздать ключ»: отзыв (`Rekey`) старым ключом, удалить ключ и запись. Ключ не
-    /// загрузился: ошибка, ничего не удалено.
+    /// загрузился: ошибка, ничего не удалено. Сбой записи списка после удаления ключа:
+    /// как у `remove`, повтор `rekey` вернёт сохранённый в памяти текст отзыва.
     pub fn rekey<S: SecretStore + ListKeyStore + ?Sized>(
         &mut self,
         store: &S,
@@ -513,18 +565,23 @@ impl FriendBook {
         now_unix: u64,
     ) -> Result<String, FriendsError> {
         let fr = self.get(pair).ok_or(FriendsError::UnknownPair)?;
-        let text = match load(store, &fr.pair, &fr.our_ed) {
-            Ok(key) => issue_revocation(&key, RevocationReason::Rekey, now_unix)
-                .map_err(|_| FriendsError::BadRevocation)?,
-            Err(IdentityError::UnsupportedKeyVersion) => {
-                return Err(FriendsError::KeyNeedsDecision);
-            }
-            Err(
-                IdentityError::KeyMissing | IdentityError::KeyMismatch | IdentityError::CorruptKey,
-            ) => return Err(FriendsError::KeyMissingOrChanged),
-            Err(e) => return Err(map_identity(e)),
+        let text = match self.unsent_for(pair) {
+            Some(t) => t,
+            None => match load(store, &fr.pair, &fr.our_ed) {
+                Ok(key) => issue_revocation(&key, RevocationReason::Rekey, now_unix)
+                    .map_err(|_| FriendsError::BadRevocation)?,
+                Err(IdentityError::UnsupportedKeyVersion) => {
+                    return Err(FriendsError::KeyNeedsDecision);
+                }
+                Err(
+                    IdentityError::KeyMissing
+                    | IdentityError::KeyMismatch
+                    | IdentityError::CorruptKey,
+                ) => return Err(FriendsError::KeyMissingOrChanged),
+                Err(e) => return Err(map_identity(e)),
+            },
         };
-        self.drop_friend(store, pair)?;
+        self.drop_friend(store, pair, Some(&text))?;
         Ok(text)
     }
 

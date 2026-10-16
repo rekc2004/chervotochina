@@ -91,7 +91,7 @@ pub fn lo() -> SocketAddr {
 
 pub fn bind(cfg: QuinnConfig, peers: Vec<KxPeer>) -> QuinnTransport {
     let t = QuinnTransport::bind(lo(), cfg, Arc::new(AllowAll)).unwrap();
-    t.set_peers(peers);
+    t.set_peers(peers).unwrap();
     t
 }
 

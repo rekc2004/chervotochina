@@ -81,7 +81,7 @@ impl Party {
         let (mut peers, bad) = self.book.kx_peers(&self.store).unwrap();
         assert!(bad.is_empty());
         peers.extend(extra);
-        self.t.set_peers(peers);
+        self.t.set_peers(peers).unwrap();
     }
 }
 
@@ -359,11 +359,14 @@ async fn invite_end_to_end_quinn() {
     let key_c = create(&MemStore::default(), &PairId::generate().unwrap()).unwrap();
     let _ = InviteeSession::start(&tok, &key_c).unwrap();
     let pair_c = PairId::generate().unwrap();
-    c_party.t.set_peers(vec![KxPeer::new(
-        pair_c,
-        tok.guest_secret().unwrap().into_kx(),
-        tok.inviter_x(),
-    )]);
+    c_party
+        .t
+        .set_peers(vec![KxPeer::new(
+            pair_c,
+            tok.guest_secret().unwrap().into_kx(),
+            tok.inviter_x(),
+        )])
+        .unwrap();
     let r = c_party
         .t
         .connect(&PeerAddr {
@@ -464,7 +467,8 @@ async fn invite_token_holder_after_m1_gets_nothing() {
         pair_c,
         tok.guest_secret().unwrap().into_kx(),
         tok.inviter_x(),
-    )]);
+    )])
+    .unwrap();
     let addr = PeerAddr {
         pair: pair_c,
         addrs: vec![a.addr],

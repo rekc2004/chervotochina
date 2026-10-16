@@ -72,6 +72,18 @@ impl std::fmt::Display for ClockOffsetError {
 
 impl std::error::Error for ClockOffsetError {}
 
+/// В наборе пар две записи с одним `PairId`: набор отвергнут целиком, прежний остаётся.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DuplicatePairError;
+
+impl std::fmt::Display for DuplicatePairError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("duplicate pair id in peer set")
+    }
+}
+
+impl std::error::Error for DuplicatePairError {}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuinnConfig {
     /// От `Incoming` (вызываемый) или от `connect` (звонящий) до конца KK.
@@ -356,7 +368,15 @@ impl QuinnTransport {
     /// наборе, закрываются отказом с пустой причиной (событие `PeerRemoved`, счётчик
     /// `removed_closed`). Порядок замков: реестр, затем набор пар; соединения закрываются
     /// после снятия замков.
-    pub fn set_peers(&self, peers: Vec<KxPeer>) {
+    ///
+    /// `PairId` в наборе уникален: повтор отвергается целиком (`DuplicatePairError`), прежний
+    /// набор остаётся. Иначе тройка соединения, найденная по `PairId`, могла бы оказаться
+    /// не той записью, с которой прошёл KK (гость записался бы как друг).
+    pub fn set_peers(&self, peers: Vec<KxPeer>) -> Result<(), DuplicatePairError> {
+        let mut seen = std::collections::HashSet::with_capacity(peers.len());
+        if !peers.iter().all(|p| seen.insert(p.pair())) {
+            return Err(DuplicatePairError);
+        }
         self.inner.gate.set_min_burst(peers.len());
         self.inner.knock.set_peers(&peers);
         let removed = self.inner.registry.replace_peers(&self.inner.peers, peers);
@@ -368,6 +388,7 @@ impl QuinnTransport {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let _ = self.inner.events.send(TransportEvent::PeerRemoved { pair });
         }
+        Ok(())
     }
 
     pub fn rebind(&self, sock: std::net::UdpSocket) -> Result<(), TransportError> {

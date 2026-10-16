@@ -99,7 +99,7 @@ async fn peer_not_allowed_no_network() {
     let filter = Arc::new(BlockSet::default());
     filter.0.lock().unwrap().insert(pid);
     let a = chervo_transport_quinn::QuinnTransport::bind(lo(), test_cfg(), filter).unwrap();
-    a.set_peers(vec![pa]);
+    a.set_peers(vec![pa]).unwrap();
     let (sock, addr) = decoy();
     let r = a
         .connect(&PeerAddr {

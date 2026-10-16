@@ -45,7 +45,7 @@ async fn wait_dead(c: &QuinnConn) {
 async fn set_peers_removal_closes_live() {
     let (_k, a, _b, ca, cb) = live().await;
     assert!(alive(&ca) && alive(&cb));
-    a.set_peers(Vec::new());
+    a.set_peers(Vec::new()).unwrap();
     wait_dead(&ca).await;
     wait_dead(&cb).await;
     assert!(!alive(&ca) && !alive(&cb));
@@ -56,7 +56,7 @@ async fn set_peers_key_change_closes_live() {
     let (k, a, _b, ca, cb) = live().await;
     // тот же PairId, другой ключ собеседника
     let other = Keys::new();
-    a.set_peers(vec![k.a.peer(other.b.kx_public)]);
+    a.set_peers(vec![k.a.peer(other.b.kx_public)]).unwrap();
     wait_dead(&ca).await;
     wait_dead(&cb).await;
 }
@@ -65,8 +65,8 @@ async fn set_peers_key_change_closes_live() {
 async fn set_peers_unchanged_keeps_live() {
     let (k, a, b, ca, cb) = live().await;
     // свежие `KxPeer` с теми же ключами и новая сторона набора: соединение не трогают
-    a.set_peers(vec![k.peer_a(), Keys::new().peer_a()]);
-    b.set_peers(vec![k.peer_b()]);
+    a.set_peers(vec![k.peer_a(), Keys::new().peer_a()]).unwrap();
+    b.set_peers(vec![k.peer_b()]).unwrap();
     tokio::time::sleep(Duration::from_millis(600)).await;
     assert!(alive(&ca) && alive(&cb));
     assert_eq!(a.stats().removed_closed, 0);
@@ -76,7 +76,7 @@ async fn set_peers_unchanged_keeps_live() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn set_peers_closed_with_refused_empty_reason() {
     let (_k, a, _b, ca, cb) = live().await;
-    a.set_peers(Vec::new());
+    a.set_peers(Vec::new()).unwrap();
     // собеседник видит единый отказ: код 0 и пустая причина
     assert_eq!(wait_closed(&cb.conn, Duration::from_secs(3)).await, REFUSED);
     // сторона, закрывшая сама, видит локальное закрытие
@@ -108,8 +108,8 @@ async fn removed_during_kk_refused() {
     tokio::time::timeout(Duration::from_secs(5), hb.reached.notified())
         .await
         .expect("вызываемый не дошёл до promote");
-    a.set_peers(Vec::new());
-    b.set_peers(Vec::new());
+    a.set_peers(Vec::new()).unwrap();
+    b.set_peers(Vec::new()).unwrap();
     ha.proceed.notify_one();
     hb.proceed.notify_one();
     let r = call.await.unwrap();
@@ -129,7 +129,7 @@ async fn removed_during_kk_refused() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn removed_peer_cannot_reconnect() {
     let (k, a, b, ca, _cb) = live().await;
-    a.set_peers(Vec::new());
+    a.set_peers(Vec::new()).unwrap();
     wait_dead(&ca).await;
     // A больше не звонит этой паре
     assert!(matches!(
@@ -156,7 +156,7 @@ async fn peer_removed_event_and_counter() {
     let (k, a, _b, ca, _cb) = live().await;
     let mut ev = a.events();
     assert_eq!(a.stats().removed_closed, 0);
-    a.set_peers(Vec::new());
+    a.set_peers(Vec::new()).unwrap();
     let got = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             if let Ok(TransportEvent::PeerRemoved { pair }) = ev.recv().await {
@@ -170,6 +170,39 @@ async fn peer_removed_event_and_counter() {
     assert_eq!(a.stats().removed_closed, 1);
     wait_dead(&ca).await;
     // повторная замена ничего не закрывает: счётчик не растёт
-    a.set_peers(Vec::new());
+    a.set_peers(Vec::new()).unwrap();
+    assert_eq!(a.stats().removed_closed, 1);
+}
+
+/// Ревью этапа 11, п.1: гость и друг с одним `PairId` в одном наборе. Набор отвергается
+/// целиком, прежний остаётся; гостевое соединение не записывается как соединение друга и
+/// закрывается при удалении гостя.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_dup_pairid_guest_misattributed() {
+    let k = Keys::new();
+    let g = Keys::new(); // g.b играет роль гостевого секрета
+    let guest = || k.a.peer(g.b.kx_public);
+    let friend = || k.a.peer(k.b.kx_public);
+    let a = Arc::new(bind(cfg(), vec![guest()]));
+    // повтор PairId: ошибка в обоих порядках, набор не меняется
+    assert_eq!(
+        a.set_peers(vec![friend(), guest()]),
+        Err(crate::DuplicatePairError)
+    );
+    assert_eq!(
+        a.set_peers(vec![guest(), friend()]),
+        Err(crate::DuplicatePairError)
+    );
+    // держатель токена по-прежнему проходит как гость (прежний набор цел)
+    let hpid = chervo_identity::PairId::generate().unwrap();
+    let h = Arc::new(bind(cfg(), vec![g.b.peer_as(hpid, k.a.kx_public)]));
+    let ch = h.connect(&peer_addr(hpid, &a)).await.unwrap();
+    let ca = a.accept().await.unwrap();
+    // гость удалён, друг остаётся: соединение держателя токена закрыто, а не живёт как друг
+    a.set_peers(vec![friend()]).unwrap();
+    wait_dead(&ca).await;
+    wait_dead(&ch).await;
+    assert!(!alive(&ca));
+    assert!(!alive(&ch));
     assert_eq!(a.stats().removed_closed, 1);
 }

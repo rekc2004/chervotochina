@@ -567,3 +567,98 @@ fn no_plaintext_on_disk() {
         assert!(!contains(&data, "СекретноеИмяДруга".as_bytes()));
     }
 }
+
+/// Сбой записи списка: на месте файла каталог, `rename` не проходит (`Io`).
+fn break_file(dir: &TestDir) {
+    std::fs::remove_file(dir.file()).unwrap();
+    std::fs::create_dir(dir.file()).unwrap();
+}
+
+#[test]
+fn rekey_save_failure_keeps_revocation_text() {
+    let (dir, store, mut book) = fresh();
+    let a = add_friend(&mut book, &store, "А");
+    break_file(&dir);
+    assert_eq!(
+        book.rekey(&store, &a.pair, 66).err(),
+        Some(FriendsError::Io)
+    );
+    // ключ удалён, запись осталась
+    assert!(!store.has(&a.pair));
+    assert_eq!(book.friends().len(), 1);
+    std::fs::remove_dir(dir.file()).unwrap();
+    // повтор отдаёт тот же подписанный текст, а не KeyMissingOrChanged
+    let text = book.rekey(&store, &a.pair, 99).unwrap();
+    let n = revocation_of(&text);
+    assert_eq!(n.revoked_ed, a.our_ed);
+    assert_eq!(n.reason, RevocationReason::Rekey);
+    assert_eq!(n.issued_at, 66);
+    assert!(book.friends().is_empty());
+    // текст выдан один раз: дальше пара неизвестна
+    assert_eq!(
+        book.rekey(&store, &a.pair, 1).err(),
+        Some(FriendsError::UnknownPair)
+    );
+}
+
+#[test]
+fn remove_save_failure_keeps_revocation_text() {
+    let (dir, store, mut book) = fresh();
+    let a = add_friend(&mut book, &store, "А");
+    break_file(&dir);
+    assert_eq!(
+        book.remove(&store, &a.pair, 55).err(),
+        Some(FriendsError::Io)
+    );
+    assert!(!store.has(&a.pair));
+    std::fs::remove_dir(dir.file()).unwrap();
+    let text = book.remove(&store, &a.pair, 77).unwrap().unwrap();
+    let n = revocation_of(&text);
+    assert_eq!(n.reason, RevocationReason::Removed);
+    assert_eq!(n.issued_at, 55);
+    assert!(book.friends().is_empty());
+}
+
+#[test]
+fn apply_revocation_save_failure_is_retryable() {
+    let (dir, store, mut book) = fresh();
+    let a = add_friend(&mut book, &store, "А");
+    // отзыв от друга: его ключи, подпись его ключом пары
+    let text = issue_revocation(&a.remote.key, RevocationReason::Removed, 5).unwrap();
+    break_file(&dir);
+    assert_eq!(
+        book.apply_revocation(&store, &text).err(),
+        Some(FriendsError::Io)
+    );
+    std::fs::remove_dir(dir.file()).unwrap();
+    // текст у вызывающего остался, повтор применяется
+    assert_eq!(book.apply_revocation(&store, &text).unwrap(), Some(a.pair));
+}
+
+#[cfg(unix)]
+#[test]
+fn save_uses_0600_and_does_not_follow_tmp_symlink() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let (dir, store, mut book) = fresh();
+    let victim = dir.file().with_file_name("victim.txt");
+    std::fs::write(&victim, b"keep").unwrap();
+    let mut tmp = dir.file().into_os_string();
+    tmp.push(".tmp");
+    symlink(&victim, &tmp).unwrap();
+    add_friend(&mut book, &store, "А");
+    // симлинк не открыт: чужой файл цел, список записан
+    assert_eq!(std::fs::read(&victim).unwrap(), b"keep");
+    let mode = std::fs::metadata(dir.file()).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+    assert!(
+        std::fs::symlink_metadata(&tmp).is_err(),
+        ".tmp остался после rename"
+    );
+    assert_eq!(
+        FriendBook::open(&dir.file(), &store)
+            .unwrap()
+            .friends()
+            .len(),
+        1
+    );
+}

@@ -287,7 +287,8 @@ pub fn issue_invite(
         .map_err(|_| TokenError::SigningFailed)?;
     b.extend_from_slice(&sig);
     let token_hash = hash_token(&b);
-    let text = format!("{INVITE_PREFIX}{}", base32::encode(&b));
+    let encoded = Zeroizing::new(base32::encode(&b));
+    let text = format!("{INVITE_PREFIX}{}", encoded.as_str());
     drop(guest);
     Ok((
         PendingInvite {

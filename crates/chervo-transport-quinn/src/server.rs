@@ -174,7 +174,9 @@ async fn callee_handshake(
     if !inner.filter.is_allowed(&pair) {
         return Err(Fail::Failed);
     }
-    // тройка берётся из снимка, с которым прошёл KK; `promote` сверит её с текущим набором
+    // тройка берётся из снимка, с которым прошёл KK; `PairId` в снимке уникален (`set_peers`
+    // отвергает повторы), поэтому `find` однозначно даёт запись, совпавшую в KK;
+    // `promote` сверит её с текущим набором
     let (ours_pub, theirs_pub) = snapshot
         .iter()
         .find(|p| p.pair() == pair)

@@ -26,6 +26,7 @@ pub use invite::{
 };
 pub use revocation::{RevocationNotice, RevocationReason, issue_revocation};
 pub use sas::{Sas, decode_decision, encode_decision};
+use zeroize::Zeroizing;
 
 /// Предел длины текста токена, байт; проверяется до всего остального.
 pub const MAX_TOKEN_TEXT_LEN: usize = 2048;
@@ -71,11 +72,13 @@ pub fn decode(text: &str) -> Result<Token, TokenError> {
     if !text.is_ascii() {
         return Err(TokenError::BadEncoding);
     }
-    let norm: Vec<u8> = text
-        .bytes()
-        .filter(|b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
-        .map(|b| b.to_ascii_uppercase())
-        .collect();
+    // текст приглашения несёт гостевой секрет: копии обнуляются при выходе
+    let norm: Zeroizing<Vec<u8>> = Zeroizing::new(
+        text.bytes()
+            .filter(|b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+            .map(|b| b.to_ascii_uppercase())
+            .collect(),
+    );
     let (prefix, rest) = norm.split_at_checked(4).ok_or(TokenError::BadPrefix)?;
     let want_kind = if prefix == INVITE_PREFIX.as_bytes() {
         KIND_INVITE
@@ -84,7 +87,7 @@ pub fn decode(text: &str) -> Result<Token, TokenError> {
     } else {
         return Err(TokenError::BadPrefix);
     };
-    let bytes = base32::decode(rest).ok_or(TokenError::BadEncoding)?;
+    let bytes = Zeroizing::new(base32::decode(rest).ok_or(TokenError::BadEncoding)?);
     let (version, kind) = match (bytes.first(), bytes.get(1)) {
         (Some(v), Some(k)) => (*v, *k),
         _ => return Err(TokenError::Malformed),

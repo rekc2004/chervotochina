@@ -150,7 +150,7 @@ pub fn bind_with(
     filter: Arc<dyn PeerFilter>,
 ) -> QuinnTransport {
     let t = QuinnTransport::bind(lo(), cfg, filter).unwrap();
-    t.set_peers(peers);
+    t.set_peers(peers).unwrap();
     t
 }
 
