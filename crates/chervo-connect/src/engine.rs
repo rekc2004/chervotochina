@@ -1,0 +1,978 @@
+//! Ядро слоя соединения: состояние, публикация набора пар, планировщик набора номера,
+//! соединения и события транспорта (спецификация 13, C3).
+//!
+//! Всё изменяемое состояние лежит под одним `std::sync::Mutex`. Замок никогда не держится
+//! через `.await`: перед ожиданием гарды сбрасываются (в блоках).
+
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt;
+use std::future::Future;
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
+
+use chervo_addr::{NatView, OwnAddrs, normalize};
+use chervo_friends::{FriendBook, FriendsError, KeyStatus};
+use chervo_identity::{KxPeer, ListKeyStore, PairId, SecretStore};
+use chervo_token::{InviteError, Sas, SignedAddrUpdate, TokenError};
+use chervo_transport::{Connection, EventSource, ManagedTransport, PeerAddr};
+use chervo_transport::{TransportError, TransportEvent};
+use tokio::sync::{broadcast, watch};
+use tokio::task::JoinHandle;
+use tokio::time::Instant;
+
+use crate::allow::AllowSet;
+use crate::clock::{Clock, RouteProbe};
+use crate::config::ConnectConfig;
+use crate::diag::{Diagnosis, NoDirectPath};
+use crate::limiter::{Limiter, add_sat};
+use crate::plan::{Candidate, PathKind, friend_plan, guest_plan, path_kind, select};
+
+const EVENTS_CAPACITY: usize = 256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ConnectError {
+    Friends(FriendsError),
+    Token(TokenError),
+    Invite(InviteError),
+    NoAddresses,
+    UnknownPair,
+    NotActive,
+    InviteSessionsExhausted,
+    Internal,
+    Shutdown,
+}
+
+impl fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let text = match self {
+            Self::Friends(_) => "friends list error",
+            Self::Token(_) => "token error",
+            Self::Invite(_) => "invite error",
+            Self::NoAddresses => "no addresses to publish",
+            Self::UnknownPair => "unknown pair",
+            Self::NotActive => "friend is not active",
+            Self::InviteSessionsExhausted => "invite sessions exhausted",
+            Self::Internal => "internal error",
+            Self::Shutdown => "engine is shut down",
+        };
+        f.write_str(text)
+    }
+}
+
+impl std::error::Error for ConnectError {}
+
+impl From<FriendsError> for ConnectError {
+    fn from(e: FriendsError) -> Self {
+        Self::Friends(e)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InviteOutcome {
+    Added,
+    Declined,
+    PeerUnreachable,
+    Expired,
+    Failed,
+}
+
+/// Откуда брать адреса для приглашения.
+pub enum InviteAddrs {
+    Auto {
+        same_network: bool,
+    },
+    /// Введены пользователем (проброс, белый IP); также тесты.
+    Manual(Vec<SocketAddr>),
+}
+
+/// `Debug` скрыт: в событиях есть SAS.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EngineEvent {
+    Connected {
+        pair: PairId,
+        path: PathKind,
+    },
+    Disconnected {
+        pair: PairId,
+    },
+    SasReady {
+        pair: PairId,
+        sas: Sas,
+    },
+    InviteFinished {
+        pair: PairId,
+        outcome: InviteOutcome,
+    },
+    KeyProblem {
+        pair: PairId,
+        status: KeyStatus,
+    },
+    OwnAddrsChanged,
+    ClockSkew {
+        pair: PairId,
+    },
+    Unreachable {
+        pair: PairId,
+        diagnosis: Diagnosis,
+    },
+    Internal,
+}
+
+impl fmt::Debug for EngineEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("EngineEvent(..)")
+    }
+}
+
+pub struct EngineEvents {
+    rx: broadcast::Receiver<EngineEvent>,
+}
+
+impl EngineEvents {
+    /// Отставание пропускается молча; `None`: движок остановлен.
+    pub async fn recv(&mut self) -> Option<EngineEvent> {
+        loop {
+            match self.rx.recv().await {
+                Ok(e) => return Some(e),
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    }
+}
+
+impl fmt::Debug for EngineEvents {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("EngineEvents(..)")
+    }
+}
+
+/// Одна неудача набора для диагностики.
+pub(crate) struct DialRecord {
+    pub(crate) at: Instant,
+    pub(crate) no_response: bool,
+}
+
+/// Память по одному другу (или гостю): только в оперативной памяти.
+#[derive(Default)]
+pub(crate) struct FriendRt {
+    /// Последний отправленный набор и выпущенный для него токен.
+    pub(crate) last_sent: Option<(chervo_addr::PublishSet, chervo_token::IssuedAddrUpdate)>,
+    pub(crate) last_sent_at: Option<Instant>,
+    pub(crate) want_addr_info: bool,
+    pub(crate) sending: bool,
+    /// Обновление, отклонённое по частоте: ждёт срока (unix) и повтора тактом.
+    pub(crate) deferred: Option<(SignedAddrUpdate, u64)>,
+    pub(crate) fast_until: Option<Instant>,
+    pub(crate) consecutive_fails: u32,
+    pub(crate) history: VecDeque<DialRecord>,
+    pub(crate) last_reported: Option<NoDirectPath>,
+    pub(crate) last_dial_at: Option<Instant>,
+}
+
+pub(crate) struct LiveConn<C> {
+    pub(crate) conn: C,
+    pub(crate) id: u64,
+    pub(crate) since: Instant,
+}
+
+/// Гостевая пара живого приглашения (заполняется частью C4). Для приглашённого `token_addrs`
+/// — адреса токена; для пригласившего пусто.
+pub(crate) struct Guest {
+    pub(crate) token_addrs: Vec<SocketAddr>,
+    pub(crate) peer: Box<dyn Fn() -> Option<KxPeer> + Send + Sync>,
+}
+
+pub(crate) struct State<C> {
+    pub(crate) book: FriendBook,
+    pub(crate) own: OwnAddrs,
+    pub(crate) limiter: Limiter,
+    pub(crate) live: HashMap<PairId, LiveConn<C>>,
+    pub(crate) inflight: HashSet<PairId>,
+    pub(crate) friends: HashMap<PairId, FriendRt>,
+    pub(crate) guests: HashMap<PairId, Guest>,
+    pub(crate) fast_global_until: Option<Instant>,
+    pub(crate) key_problems: HashMap<PairId, KeyStatus>,
+    pub(crate) last_success_any: Option<Instant>,
+}
+
+pub(crate) struct Inner<T: ManagedTransport, S> {
+    pub(crate) transport: Arc<T>,
+    pub(crate) allow: Arc<AllowSet>,
+    pub(crate) store: Arc<S>,
+    pub(crate) clock: Arc<dyn Clock>,
+    pub(crate) probe: Arc<dyn RouteProbe>,
+    pub(crate) cfg: ConnectConfig,
+    pub(crate) state: Mutex<State<T::Conn>>,
+    pub(crate) events: broadcast::Sender<EngineEvent>,
+    pub(crate) shutdown: watch::Sender<bool>,
+    pub(crate) shut: AtomicBool,
+    pub(crate) tasks: Mutex<Vec<JoinHandle<()>>>,
+}
+
+async fn wait_shutdown(mut rx: watch::Receiver<bool>) {
+    let _ = rx.wait_for(|v| *v).await;
+}
+
+/// Пауза цикла не короче миллисекунды: нулевой период превратил бы цикл в busy loop.
+pub(crate) fn period(d: Duration) -> Duration {
+    d.max(Duration::from_millis(1))
+}
+
+pub struct Engine<T: ManagedTransport, S: SecretStore + ListKeyStore + 'static>
+where
+    T::Conn: Clone,
+{
+    pub(crate) inner: Arc<Inner<T, S>>,
+}
+
+impl<T, S> Inner<T, S>
+where
+    T: ManagedTransport,
+    T::Conn: Clone,
+    S: SecretStore + ListKeyStore + 'static,
+{
+    pub(crate) fn lock(&self) -> MutexGuard<'_, State<T::Conn>> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(crate) fn emit(&self, e: EngineEvent) {
+        let _ = self.events.send(e);
+    }
+
+    pub(crate) fn is_shut(&self) -> bool {
+        self.shut.load(Ordering::SeqCst)
+    }
+
+    /// Запустить задачу, которая завершается при остановке движка.
+    pub(crate) fn spawn_task<F>(&self, f: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let rx = self.shutdown.subscribe();
+        let handle = tokio::spawn(async move {
+            tokio::select! {
+                () = f => {},
+                () = wait_shutdown(rx) => {},
+            }
+        });
+        let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
+        tasks.retain(|h| !h.is_finished());
+        tasks.push(handle);
+    }
+
+    pub(crate) fn shutdown_now(&self) {
+        self.shut.store(true, Ordering::SeqCst);
+        let _ = self.shutdown.send(true);
+        let handles: Vec<JoinHandle<()>> = {
+            let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
+            std::mem::take(&mut *tasks)
+        };
+        for h in &handles {
+            h.abort();
+        }
+        let conns: Vec<T::Conn> = {
+            let mut st = self.lock();
+            st.inflight.clear();
+            st.live.drain().map(|(_, l)| l.conn).collect()
+        };
+        for c in &conns {
+            c.close();
+        }
+    }
+
+    // ---------------------------------------------------------------- публикация
+
+    /// Набор пар транспорта и разрешённые пары: друзья `Active` и гостевые пары живых
+    /// приглашений, которые ещё не стали друзьями. При `DuplicatePairError` прежний набор
+    /// разрешений восстанавливается, транспорт сохраняет прежний набор пар.
+    pub(crate) fn publish(&self, st: &mut State<T::Conn>) -> Result<(), ConnectError> {
+        let (mut peers, bad) = st
+            .book
+            .kx_peers(&*self.store)
+            .map_err(ConnectError::Friends)?;
+        let mut allowed: HashSet<PairId> = peers.iter().map(KxPeer::pair).collect();
+        for (pair, guest) in &st.guests {
+            if st.book.get(pair).is_some() || allowed.contains(pair) {
+                continue;
+            }
+            if let Some(p) = (guest.peer)() {
+                allowed.insert(*pair);
+                peers.push(p);
+            }
+        }
+        let old = self.allow.replace(allowed);
+        if self.transport.set_peers(peers).is_err() {
+            self.allow.replace(old);
+            self.emit(EngineEvent::Internal);
+            return Err(ConnectError::Internal);
+        }
+        let mut now_bad: HashMap<PairId, KeyStatus> = HashMap::new();
+        for (pair, status) in bad {
+            if st.key_problems.get(&pair) != Some(&status) {
+                self.emit(EngineEvent::KeyProblem { pair, status });
+            }
+            now_bad.insert(pair, status);
+        }
+        st.key_problems = now_bad;
+        Ok(())
+    }
+
+    /// После изменения книги: пары, переставшие быть `Active`, теряют наблюдения, соединения
+    /// и память. Закрываемые соединения возвращаются вызывающему.
+    pub(crate) fn cleanup_inactive(
+        &self,
+        st: &mut State<T::Conn>,
+        before: &[PairId],
+        to_close: &mut Vec<T::Conn>,
+    ) {
+        for pair in before {
+            if !st.book.is_active(pair) {
+                st.own.forget_reporter(pair);
+                if let Some(l) = st.live.remove(pair) {
+                    to_close.push(l.conn);
+                }
+                st.key_problems.remove(pair);
+            }
+        }
+        let State {
+            friends,
+            guests,
+            book,
+            ..
+        } = st;
+        friends.retain(|p, _| book.get(p).is_some() || guests.contains_key(p));
+    }
+
+    // -------------------------------------------------------------- быстрое окно
+
+    pub(crate) fn fast_active(&self, st: &State<T::Conn>, pair: &PairId, now: Instant) -> bool {
+        st.fast_global_until.is_some_and(|t| t > now)
+            || st
+                .friends
+                .get(pair)
+                .and_then(|r| r.fast_until)
+                .is_some_and(|t| t > now)
+    }
+
+    /// Быстрое окно пары: только по нашим собственным событиям.
+    pub(crate) fn start_fast_pair(&self, st: &mut State<T::Conn>, pair: PairId, now: Instant) {
+        let until = add_sat(now, self.cfg.fast_window);
+        st.friends.entry(pair).or_default().fast_until = Some(until);
+    }
+
+    pub(crate) fn start_fast_global(&self, st: &mut State<T::Conn>, now: Instant) {
+        st.fast_global_until = Some(add_sat(now, self.cfg.fast_window));
+    }
+
+    /// Все адреса пары из книги (для сброса ограничителя после нового номера обновления).
+    pub(crate) fn friend_addrs(st: &State<T::Conn>, pair: &PairId) -> Vec<SocketAddr> {
+        st.book.get(pair).map_or_else(Vec::new, |f| {
+            f.known_addrs.iter().map(|k| normalize(k.addr)).collect()
+        })
+    }
+
+    // --------------------------------------------------------------- соединения
+
+    /// Соединение пришло из `connect` или `accept`.
+    pub(crate) fn on_connection(self: &Arc<Self>, conn: T::Conn) {
+        if self.is_shut() {
+            conn.close();
+            return;
+        }
+        let pair = conn.remote_pair();
+        let id = conn.conn_id();
+        let now = Instant::now();
+        let unix = self.clock.now_unix();
+        let mut closing: Vec<T::Conn> = Vec::new();
+        let mut events: Vec<EngineEvent> = Vec::new();
+        let mut sends: Vec<(PairId, T::Conn)> = Vec::new();
+        {
+            let mut st = self.lock();
+            if st.guests.contains_key(&pair) && st.book.get(&pair).is_none() {
+                drop(st);
+                self.on_guest_connection(conn);
+                return;
+            }
+            if !st.book.is_active(&pair) {
+                drop(st);
+                conn.close();
+                return;
+            }
+            if st.live.get(&pair).is_some_and(|l| l.id == id) {
+                return;
+            }
+            let own_stable = st.own.stable_reachable(unix);
+            let path = path_kind(
+                conn.remote_addr(),
+                conn.is_initiator(),
+                st.book
+                    .get(&pair)
+                    .map_or(&[][..], |f| f.known_addrs.as_slice()),
+                own_stable,
+            );
+            st.live.insert(
+                pair,
+                LiveConn {
+                    conn: conn.clone(),
+                    id,
+                    since: now,
+                },
+            );
+            events.push(EngineEvent::Connected { pair, path });
+            // сверх предела закрывается самое давнее соединение (других видов потоков в этом
+            // этапе нет, поэтому «занятых» соединений среди них не бывает)
+            while st.live.len() > self.cfg.max_live {
+                let oldest = st
+                    .live
+                    .iter()
+                    .filter(|(p, _)| **p != pair)
+                    .min_by_key(|(_, l)| l.since)
+                    .map(|(p, _)| *p);
+                let Some(victim) = oldest else { break };
+                if let Some(l) = st.live.remove(&victim) {
+                    closing.push(l.conn);
+                    events.push(EngineEvent::Disconnected { pair: victim });
+                }
+            }
+            let _ = st
+                .book
+                .note_contact(&*self.store, &pair, conn.remote_addr(), unix);
+            let rt = st.friends.entry(pair).or_default();
+            rt.consecutive_fails = 0;
+            rt.history.clear();
+            rt.last_reported = None;
+            rt.fast_until = None;
+            rt.want_addr_info = conn.is_initiator();
+            self.collect_sends(&mut st, now, &mut sends);
+        }
+        for c in &closing {
+            c.close();
+        }
+        for e in events {
+            self.emit(e);
+        }
+        let inner = self.clone();
+        let watched = conn.clone();
+        self.spawn_task(async move {
+            watched.closed().await;
+            inner.on_closed(pair, id);
+        });
+        let inner = self.clone();
+        let streams = conn.clone();
+        self.spawn_task(async move { inner.run_streams(pair, streams).await });
+        for (p, c) in sends {
+            self.spawn_send(p, c);
+        }
+    }
+
+    /// Соединение закрыто: запись снимается, только если она ещё принадлежит этому соединению.
+    pub(crate) fn on_closed(&self, pair: PairId, id: u64) {
+        let removed = {
+            let mut st = self.lock();
+            if st.live.get(&pair).is_some_and(|l| l.id == id) {
+                st.live.remove(&pair);
+                if let Some(rt) = st.friends.get_mut(&pair) {
+                    rt.want_addr_info = false;
+                }
+                true
+            } else {
+                false
+            }
+        };
+        if removed {
+            self.emit(EngineEvent::Disconnected { pair });
+        }
+    }
+
+    /// Гостевое соединение обрабатывает часть C4. До неё соединение закрывается: ни потоков
+    /// ADDR_INFO, ни прикладных данных на гостевых парах не бывает.
+    pub(crate) fn on_guest_connection(&self, conn: T::Conn) {
+        conn.close();
+    }
+
+    // ---------------------------------------------------------------- планировщик
+
+    /// Гость с адресами токена или пара-друг, готовая к набору.
+    fn plan_dials(
+        &self,
+        st: &mut State<T::Conn>,
+        local: &[SocketAddr],
+        now: Instant,
+        unix: u64,
+        out: &mut Vec<(PairId, Vec<Candidate>)>,
+    ) {
+        let mut pairs: Vec<(PairId, Option<Instant>)> = Vec::new();
+        for f in st.book.friends() {
+            if st.book.is_active(&f.pair) && !st.key_problems.contains_key(&f.pair) {
+                pairs.push((f.pair, st.friends.get(&f.pair).and_then(|r| r.last_dial_at)));
+            }
+        }
+        for (pair, g) in &st.guests {
+            if st.book.get(pair).is_none() && !g.token_addrs.is_empty() {
+                pairs.push((*pair, st.friends.get(pair).and_then(|r| r.last_dial_at)));
+            }
+        }
+        // давно не набиравшиеся пары первыми: при лимите одновременных наборов никто не голодает
+        pairs.sort_by_key(|(_, last)| *last);
+        for (pair, _) in pairs {
+            if st.inflight.len() >= self.cfg.max_concurrent_dials {
+                break;
+            }
+            if st.live.contains_key(&pair) || st.inflight.contains(&pair) {
+                continue;
+            }
+            let plan = match st.guests.get(&pair) {
+                Some(g) if st.book.get(&pair).is_none() => guest_plan(&g.token_addrs, local),
+                _ => friend_plan(&st.book.usable_known(&pair, unix), local),
+            };
+            if plan.cands.is_empty() {
+                continue;
+            }
+            let chosen = select(&plan, &mut st.limiter, now);
+            if chosen.is_empty() {
+                continue;
+            }
+            st.inflight.insert(pair);
+            st.friends.entry(pair).or_default().last_dial_at = Some(now);
+            out.push((pair, chosen));
+        }
+    }
+
+    fn spawn_dial(self: &Arc<Self>, pair: PairId, chosen: Vec<Candidate>) {
+        let inner = self.clone();
+        self.spawn_task(async move {
+            let peer = PeerAddr {
+                pair,
+                addrs: chosen.iter().map(|c| c.addr).collect(),
+            };
+            let res = inner.transport.connect(&peer).await;
+            inner.on_dial_result(pair, &chosen, res);
+        });
+    }
+
+    fn on_dial_result(
+        self: &Arc<Self>,
+        pair: PairId,
+        chosen: &[Candidate],
+        res: Result<T::Conn, TransportError>,
+    ) {
+        let now = Instant::now();
+        let unix = self.clock.now_unix();
+        let local = self.transport.local_addrs();
+        let mut events: Vec<EngineEvent> = Vec::new();
+        match res {
+            Ok(conn) => {
+                {
+                    let mut st = self.lock();
+                    st.inflight.remove(&pair);
+                    st.limiter.succeeded(conn.remote_addr());
+                    st.last_success_any = Some(now);
+                }
+                self.on_connection(conn);
+            }
+            Err(e) => {
+                {
+                    let mut st = self.lock();
+                    st.inflight.remove(&pair);
+                    let fast = self.fast_active(&st, &pair, now);
+                    let plain: Vec<SocketAddr> =
+                        chosen.iter().filter(|c| !c.hint).map(|c| c.addr).collect();
+                    let hints: Vec<SocketAddr> =
+                        chosen.iter().filter(|c| c.hint).map(|c| c.addr).collect();
+                    st.limiter.failed(&plain, false, fast, now);
+                    st.limiter.failed(&hints, true, fast, now);
+                    let rt = st.friends.entry(pair).or_default();
+                    rt.consecutive_fails = rt.consecutive_fails.saturating_add(1);
+                    rt.history.push_back(DialRecord {
+                        at: now,
+                        no_response: e == TransportError::NoResponse,
+                    });
+                    while rt.history.len() > 32 {
+                        rt.history.pop_front();
+                    }
+                    let reached = rt.consecutive_fails >= self.cfg.unreachable_after_fails;
+                    if e == TransportError::Busy {
+                        // одиночный набор на пару исключает `Busy`: это ошибка слоя
+                        events.push(EngineEvent::Internal);
+                    }
+                    if reached {
+                        self.evaluate_unreachable(&mut st, &pair, &local, now, unix, &mut events);
+                    }
+                }
+            }
+        }
+        for e in events {
+            self.emit(e);
+        }
+    }
+
+    /// Диагноз пары; `Unreachable` выдаётся один раз на смену причины.
+    pub(crate) fn evaluate_unreachable(
+        &self,
+        st: &mut State<T::Conn>,
+        pair: &PairId,
+        local: &[SocketAddr],
+        now: Instant,
+        unix: u64,
+        events: &mut Vec<EngineEvent>,
+    ) {
+        if st.book.get(pair).is_none() {
+            return;
+        }
+        let Some(d) = self.diagnose_locked(st, pair, local, now, unix) else {
+            return;
+        };
+        let rt = st.friends.entry(*pair).or_default();
+        if rt.last_reported != Some(d.reason) {
+            rt.last_reported = Some(d.reason);
+            events.push(EngineEvent::Unreachable {
+                pair: *pair,
+                diagnosis: d,
+            });
+        }
+    }
+
+    /// Конец быстрых окон без успеха: диагноз для пар без соединения.
+    fn fast_window_ends(
+        &self,
+        st: &mut State<T::Conn>,
+        local: &[SocketAddr],
+        now: Instant,
+        unix: u64,
+        events: &mut Vec<EngineEvent>,
+    ) {
+        let mut due: Vec<PairId> = Vec::new();
+        if st.fast_global_until.is_some_and(|t| t <= now) {
+            st.fast_global_until = None;
+            due.extend(
+                st.book
+                    .friends()
+                    .iter()
+                    .filter(|f| st.book.is_active(&f.pair))
+                    .map(|f| f.pair),
+            );
+        }
+        for (pair, rt) in &mut st.friends {
+            if rt.fast_until.is_some_and(|t| t <= now) {
+                rt.fast_until = None;
+                due.push(*pair);
+            }
+        }
+        for pair in due {
+            if st.live.contains_key(&pair) || !st.book.is_active(&pair) {
+                continue;
+            }
+            self.evaluate_unreachable(st, &pair, local, now, unix, events);
+        }
+    }
+
+    pub(crate) fn tick(self: &Arc<Self>) {
+        let now = Instant::now();
+        let unix = self.clock.now_unix();
+        let local = self.transport.local_addrs();
+        let mut events: Vec<EngineEvent> = Vec::new();
+        let mut dials: Vec<(PairId, Vec<Candidate>)> = Vec::new();
+        let mut sends: Vec<(PairId, T::Conn)> = Vec::new();
+        {
+            let mut st = self.lock();
+            self.fast_window_ends(&mut st, &local, now, unix, &mut events);
+            self.retry_deferred(&mut st, now, unix);
+            self.collect_sends(&mut st, now, &mut sends);
+            self.plan_dials(&mut st, &local, now, unix, &mut dials);
+        }
+        for e in events {
+            self.emit(e);
+        }
+        for (pair, conn) in sends {
+            self.spawn_send(pair, conn);
+        }
+        for (pair, chosen) in dials {
+            self.spawn_dial(pair, chosen);
+        }
+    }
+
+    pub(crate) async fn run_scheduler(self: Arc<Self>) {
+        loop {
+            tokio::time::sleep(period(self.cfg.tick)).await;
+            self.tick();
+        }
+    }
+
+    // ------------------------------------------------------ соединения: приём
+
+    pub(crate) async fn run_accept(self: Arc<Self>) {
+        loop {
+            match self.transport.accept().await {
+                Ok(conn) => self.on_connection(conn),
+                Err(TransportError::Closed) => {
+                    self.emit(EngineEvent::Internal);
+                    return;
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
+        }
+    }
+
+    // ------------------------------------------------------- события транспорта
+
+    pub(crate) async fn run_events(self: Arc<Self>, mut events: T::Events) {
+        while let Some(ev) = events.recv().await {
+            match ev {
+                TransportEvent::RemoteAddrChanged { pair } => {
+                    let unix = self.clock.now_unix();
+                    let mut st = self.lock();
+                    let addr = st.live.get(&pair).map(|l| l.conn.remote_addr());
+                    if let Some(addr) = addr {
+                        let _ = st.book.note_contact(&*self.store, &pair, addr, unix);
+                    }
+                }
+                TransportEvent::ClockSkewSuspected { pair } => {
+                    self.emit(EngineEvent::ClockSkew { pair });
+                }
+                TransportEvent::Lagged => self.resync_live().await,
+                // замену и удаление обрабатывает `closed()` соединения
+                _ => {}
+            }
+        }
+        self.emit(EngineEvent::Internal);
+    }
+
+    /// После потери событий: записи с уже закрытым соединением снимаются.
+    async fn resync_live(&self) {
+        let snapshot: Vec<(PairId, u64, T::Conn)> = {
+            let st = self.lock();
+            st.live
+                .iter()
+                .map(|(p, l)| (*p, l.id, l.conn.clone()))
+                .collect()
+        };
+        for (pair, id, conn) in snapshot {
+            if tokio::time::timeout(Duration::ZERO, conn.closed())
+                .await
+                .is_ok()
+            {
+                self.on_closed(pair, id);
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------- срок
+
+    pub(crate) async fn run_expire(self: Arc<Self>) {
+        loop {
+            tokio::time::sleep(period(self.cfg.expire_interval)).await;
+            let unix = self.clock.now_unix();
+            let mut st = self.lock();
+            if matches!(st.book.expire(&*self.store, unix), Ok(n) if n > 0) {
+                let _ = self.publish(&mut st);
+            }
+        }
+    }
+}
+
+impl<T, S> Engine<T, S>
+where
+    T: ManagedTransport,
+    T::Conn: Clone,
+    S: SecretStore + ListKeyStore + 'static,
+{
+    /// Внутри среды tokio. Порядок: `drop_all_pending`, ручной проброс, первый снимок
+    /// адресов, публикация, запуск задач. Быстрое окно начинается сразу.
+    pub fn start(
+        transport: Arc<T>,
+        allow: Arc<AllowSet>,
+        mut book: FriendBook,
+        store: Arc<S>,
+        clock: Arc<dyn Clock>,
+        probe: Arc<dyn RouteProbe>,
+        cfg: ConnectConfig,
+    ) -> Result<(Self, EngineEvents), ConnectError> {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return Err(ConnectError::Internal);
+        }
+        book.drop_all_pending(&*store)
+            .map_err(ConnectError::Friends)?;
+        let mut own = OwnAddrs::new();
+        own.set_manual_forward(cfg.manual_forward);
+        let (events, rx) = broadcast::channel(EVENTS_CAPACITY);
+        let (shutdown, _) = watch::channel(false);
+        let now = Instant::now();
+        let state = State {
+            book,
+            own,
+            limiter: Limiter::new(&cfg),
+            live: HashMap::new(),
+            inflight: HashSet::new(),
+            friends: HashMap::new(),
+            guests: HashMap::new(),
+            fast_global_until: Some(add_sat(now, cfg.fast_window)),
+            key_problems: HashMap::new(),
+            last_success_any: None,
+        };
+        let inner = Arc::new(Inner {
+            transport,
+            allow,
+            store,
+            clock,
+            probe,
+            cfg,
+            state: Mutex::new(state),
+            events,
+            shutdown,
+            shut: AtomicBool::new(false),
+            tasks: Mutex::new(Vec::new()),
+        });
+        let transport_events = inner.transport.subscribe();
+        {
+            let mut st = inner.lock();
+            // первый снимок только запоминается: сравнивать пока не с чем
+            inner.snapshot_local(&mut st);
+            inner.publish(&mut st)?;
+        }
+        inner.spawn_task(inner.clone().run_watcher());
+        inner.spawn_task(inner.clone().run_accept());
+        inner.spawn_task(inner.clone().run_scheduler());
+        inner.spawn_task(inner.clone().run_events(transport_events));
+        inner.spawn_task(inner.clone().run_expire());
+        Ok((Self { inner }, EngineEvents { rx }))
+    }
+
+    /// Единственный способ изменить книгу: выполнить `f`, затем публикация (разрешения и
+    /// `set_peers`), `forget_reporter` для пар, переставших быть `Active`, и снятие их
+    /// живых соединений. Публикация выполняется и после ошибки `f`.
+    pub fn update_book<R>(
+        &self,
+        f: impl FnOnce(&mut FriendBook, &S) -> Result<R, FriendsError>,
+    ) -> Result<R, ConnectError> {
+        if self.inner.is_shut() {
+            return Err(ConnectError::Shutdown);
+        }
+        let mut to_close: Vec<T::Conn> = Vec::new();
+        let (result, published) = {
+            let mut st = self.inner.lock();
+            let before: Vec<PairId> = st.book.friends().iter().map(|x| x.pair).collect();
+            let seqs: HashMap<PairId, u64> = st
+                .book
+                .friends()
+                .iter()
+                .map(|x| (x.pair, x.last_addr_seq))
+                .collect();
+            let result = f(&mut st.book, &self.inner.store);
+            let published = self.inner.publish(&mut st);
+            self.inner.cleanup_inactive(&mut st, &before, &mut to_close);
+            // новый номер обновления от друга (например, вставленный токен) сбрасывает
+            // ограничитель только адресов этого друга; быстрого окна он не открывает
+            let now = Instant::now();
+            let advanced: Vec<PairId> = st
+                .book
+                .friends()
+                .iter()
+                .filter(|x| seqs.get(&x.pair).is_some_and(|s| x.last_addr_seq > *s))
+                .map(|x| x.pair)
+                .collect();
+            for pair in advanced {
+                let addrs = Inner::<T, S>::friend_addrs(&st, &pair);
+                st.limiter.reset_pair(&addrs, now);
+            }
+            (result, published)
+        };
+        for c in &to_close {
+            c.close();
+        }
+        let value = result.map_err(ConnectError::Friends)?;
+        published?;
+        Ok(value)
+    }
+
+    pub fn read_book<R>(&self, f: impl FnOnce(&FriendBook) -> R) -> R {
+        let st = self.inner.lock();
+        f(&st.book)
+    }
+
+    /// Только `Active`; быстрое окно этой пары и сброс её ограничителя.
+    pub fn connect_now(&self, pair: &PairId) -> Result<(), ConnectError> {
+        if self.inner.is_shut() {
+            return Err(ConnectError::Shutdown);
+        }
+        let now = Instant::now();
+        let mut st = self.inner.lock();
+        if st.book.get(pair).is_none() {
+            return Err(ConnectError::UnknownPair);
+        }
+        if !st.book.is_active(pair) {
+            return Err(ConnectError::NotActive);
+        }
+        if st.live.contains_key(pair) {
+            return Ok(());
+        }
+        let addrs = Inner::<T, S>::friend_addrs(&st, pair);
+        st.limiter.reset_pair(&addrs, now);
+        self.inner.start_fast_pair(&mut st, *pair, now);
+        Ok(())
+    }
+
+    pub fn connection(&self, pair: &PairId) -> Option<T::Conn> {
+        self.inner.lock().live.get(pair).map(|l| l.conn.clone())
+    }
+
+    /// `None`: соединение есть или причину пока не решить.
+    pub fn diagnose(&self, pair: &PairId) -> Result<Option<Diagnosis>, ConnectError> {
+        let now = Instant::now();
+        let unix = self.inner.clock.now_unix();
+        let local = self.inner.transport.local_addrs();
+        let st = self.inner.lock();
+        if st.book.get(pair).is_none() {
+            return Err(ConnectError::UnknownPair);
+        }
+        if !st.book.is_active(pair) {
+            return Err(ConnectError::NotActive);
+        }
+        Ok(self.inner.diagnose_locked(&st, pair, &local, now, unix))
+    }
+
+    pub fn nat_view(&self) -> NatView {
+        let unix = self.inner.clock.now_unix();
+        self.inner.lock().own.nat_view(unix)
+    }
+
+    pub fn shutdown(&self) {
+        self.inner.shutdown_now();
+    }
+
+    /// Гостевая пара живого приглашения: часть C4 регистрирует её при выдаче и приёме
+    /// приглашения. `peer` собирает `KxPeer` для публикации (`None`: пары нет в наборе).
+    #[allow(dead_code)]
+    pub(crate) fn add_guest(
+        &self,
+        pair: PairId,
+        token_addrs: Vec<SocketAddr>,
+        peer: Box<dyn Fn() -> Option<KxPeer> + Send + Sync>,
+    ) -> Result<(), ConnectError> {
+        let mut st = self.inner.lock();
+        st.guests.insert(pair, Guest { token_addrs, peer });
+        self.inner.publish(&mut st)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn remove_guest(&self, pair: &PairId) -> Result<(), ConnectError> {
+        let mut st = self.inner.lock();
+        st.guests.remove(pair);
+        self.inner.publish(&mut st)
+    }
+}
+
+impl<T, S> Drop for Engine<T, S>
+where
+    T: ManagedTransport,
+    T::Conn: Clone,
+    S: SecretStore + ListKeyStore + 'static,
+{
+    fn drop(&mut self) {
+        self.inner.shutdown_now();
+    }
+}

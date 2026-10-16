@@ -334,8 +334,14 @@ dependencies = [
 name = "chervo-connect"
 version = "0.0.0"
 dependencies = [
+ "chervo-addr",
+ "chervo-friends",
  "chervo-identity",
+ "chervo-token",
  "chervo-transport",
+ "chervo-transport-quinn",
+ "tokio",
+ "zeroize",
 ]
 
 [[package]]
