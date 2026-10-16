@@ -11,5 +11,6 @@ mod attacks;
 mod flood;
 mod gate;
 mod kit;
+mod knock;
 mod misc;
 mod tlsx;

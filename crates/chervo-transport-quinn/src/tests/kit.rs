@@ -378,3 +378,123 @@ pub async fn raw_full(
     raw.tx.finish().unwrap();
     (raw.conn, raw.msg1)
 }
+
+// ---------------------------------------------------------------------------------------------
+// Атакующий для тестов стука: считает все принятые гнездом пакеты
+// ---------------------------------------------------------------------------------------------
+
+/// Гнездо-счётчик: считает пакеты, пришедшие quinn.
+#[derive(Debug)]
+struct CountSock {
+    inner: Arc<dyn quinn::AsyncUdpSocket>,
+    rx: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl quinn::AsyncUdpSocket for CountSock {
+    fn create_io_poller(self: Arc<Self>) -> std::pin::Pin<Box<dyn quinn::UdpPoller>> {
+        self.inner.clone().create_io_poller()
+    }
+
+    fn try_send(&self, t: &quinn::udp::Transmit) -> std::io::Result<()> {
+        self.inner.try_send(t)
+    }
+
+    fn poll_recv(
+        &self,
+        cx: &mut std::task::Context,
+        bufs: &mut [std::io::IoSliceMut<'_>],
+        meta: &mut [quinn::udp::RecvMeta],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let r = self.inner.poll_recv(cx, bufs, meta);
+        if let std::task::Poll::Ready(Ok(n)) = &r {
+            self.rx
+                .fetch_add(*n as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+        r
+    }
+
+    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.inner.local_addr()
+    }
+
+    fn max_transmit_segments(&self) -> usize {
+        self.inner.max_transmit_segments()
+    }
+
+    fn max_receive_segments(&self) -> usize {
+        self.inner.max_receive_segments()
+    }
+
+    fn may_fragment(&self) -> bool {
+        self.inner.may_fragment()
+    }
+}
+
+/// Сырое гнездо с клиентским quinn поверх; считает все пакеты, которые к нему дошли.
+pub struct Attacker {
+    sock: Arc<CountSock>,
+    pub ep: quinn::Endpoint,
+}
+
+impl Attacker {
+    pub fn new() -> Self {
+        use quinn::Runtime;
+        let std_sock = std::net::UdpSocket::bind(lo()).unwrap();
+        std_sock.set_nonblocking(true).unwrap();
+        let raw = quinn::TokioRuntime.wrap_udp_socket(std_sock).unwrap();
+        let sock = Arc::new(CountSock {
+            inner: raw,
+            rx: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        });
+        let ep = quinn::Endpoint::new_with_abstract_socket(
+            quinn::EndpointConfig::default(),
+            None,
+            sock.clone(),
+            Arc::new(quinn::TokioRuntime),
+        )
+        .unwrap();
+        Self { sock, ep }
+    }
+
+    /// Датаграмма с этого гнезда.
+    pub fn send(&self, dest: SocketAddr, bytes: &[u8]) {
+        use quinn::AsyncUdpSocket;
+        let _ = self.sock.try_send(&quinn::udp::Transmit {
+            destination: dest,
+            ecn: None,
+            contents: bytes,
+            segment_size: None,
+            src_ip: None,
+        });
+    }
+
+    /// Сколько пакетов пришло этому гнезду.
+    pub fn received(&self) -> u64 {
+        self.sock.rx.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Initial нашим клиентским QUIC; `true`, если TLS-рукопожатие удалось за `wait`.
+    pub async fn initial(&self, dest: SocketAddr, wait: Duration) -> bool {
+        matches!(
+            tokio::time::timeout(wait, raw_tls(&self.ep, dest)).await,
+            Ok(Ok(_))
+        )
+    }
+}
+
+/// Окно «сейчас» по системным часам.
+pub fn now_window() -> u64 {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    crate::window_at(ms as i64)
+}
+
+/// Адрес `PeerAddr` для сырого эндпоинта.
+pub fn peer_addr_raw(pair: PairId, addr: SocketAddr) -> PeerAddr {
+    PeerAddr {
+        pair,
+        addrs: vec![addr],
+    }
+}

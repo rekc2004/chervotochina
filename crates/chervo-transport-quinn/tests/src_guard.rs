@@ -61,6 +61,12 @@ fn src_guard() {
         "into_0rtt",
         "send_datagram",
         "IdentityError::",
+        // стук: только свои гнёзда, нет прямого `Endpoint::new` и `.rebind(`; тайм-синхронизация
+        // не вызывается из транспорта; обязательность стука не отключается в коде крейта
+        "Endpoint::new(",
+        ".rebind(",
+        "chervo_timesync",
+        "knock_required: false",
     ] {
         assert_eq!(count(&srcs, bad), 0, "запрещено в src/: {bad}");
     }
@@ -98,10 +104,19 @@ fn src_guard() {
                 "источник ChannelBinding вне conn.rs: {name}"
             );
         }
+        // отправка стука и любая прямая отправка в гнездо только в knock.rs
+        if name != "knock.rs" {
+            assert!(!s.contains("try_send("), "try_send( вне knock.rs: {name}");
+        }
         if name != "tls.rs" {
             assert!(!s.contains("dangerous()"), "dangerous() вне tls.rs: {name}");
         }
     }
+
+    assert!(
+        count(&srcs, "try_send(") >= 1,
+        "try_send( должен быть в knock.rs"
+    );
 
     // CLOSE_REFUSED: ровно два использования (не объявление и не комментарий), оба в conn.rs:
     // внутри fn refuse и внутри fn close_endpoint (закрытие гнезда при shutdown)

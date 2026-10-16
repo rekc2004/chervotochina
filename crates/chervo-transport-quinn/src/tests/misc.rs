@@ -28,7 +28,7 @@ async fn replaced(
     }
 }
 
-fn alive(c: &QuinnConn) -> bool {
+pub(super) fn alive(c: &QuinnConn) -> bool {
     c.conn.close_reason().is_none()
 }
 
@@ -52,7 +52,7 @@ async fn ekm_unique_per_connection() {
 }
 
 /// Собирает всё, что отдаёт `accept`, пока не истечёт срок.
-fn collect_accepts(t: Arc<QuinnTransport>, ms: u64) -> Arc<Mutex<Vec<QuinnConn>>> {
+pub(super) fn collect_accepts(t: Arc<QuinnTransport>, ms: u64) -> Arc<Mutex<Vec<QuinnConn>>> {
     let out = Arc::new(Mutex::new(Vec::new()));
     let o = out.clone();
     tokio::spawn(async move {
@@ -67,7 +67,7 @@ fn collect_accepts(t: Arc<QuinnTransport>, ms: u64) -> Arc<Mutex<Vec<QuinnConn>>
 }
 
 /// Единственное живое соединение стороны (по `stable_id`), если оно ровно одно.
-fn survivors(all: &[QuinnConn]) -> Vec<QuinnConn> {
+pub(super) fn survivors(all: &[QuinnConn]) -> Vec<QuinnConn> {
     let mut ids = HashSet::new();
     all.iter()
         .filter(|c| alive(c) && ids.insert(c.conn.stable_id()))

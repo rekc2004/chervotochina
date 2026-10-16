@@ -496,7 +496,7 @@ impl KnockState {
     // --- вызываемый ---
 
     /// Распознать и обработать стук. `true`: датаграмма опознана как стук (её нельзя отдавать quinn).
-    fn try_knock(&self, addr: SocketAddr, seg: &[u8]) -> bool {
+    pub(crate) fn try_knock(&self, addr: SocketAddr, seg: &[u8]) -> bool {
         let Some(id) = seg.get(..16).and_then(|s| <[u8; 16]>::try_from(s).ok()) else {
             return false;
         };
