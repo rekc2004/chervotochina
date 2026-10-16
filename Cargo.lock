@@ -356,8 +356,11 @@ dependencies = [
  "chervo-addr",
  "chervo-identity",
  "chervo-token",
+ "chervo-transport",
+ "chervo-transport-quinn",
  "getrandom 0.4.3",
  "ring",
+ "tokio",
  "zeroize",
 ]
 

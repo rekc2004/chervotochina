@@ -13,5 +13,10 @@ ring.workspace = true
 getrandom.workspace = true
 zeroize.workspace = true
 
+[dev-dependencies]
+chervo-transport.workspace = true
+chervo-transport-quinn.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
 [lints]
 workspace = true

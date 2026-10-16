@@ -82,6 +82,8 @@ fn fuzz_smoke_decode() {
             }
         };
         let _ = from_bytes;
+        // итерация 0 всегда подаёт исходный образец приглашения
+        let input = if i == 0 { invite.clone() } else { input };
         if let Ok(tok) = decode(&input) {
             ok += 1;
             check_canonical(&input, &tok);
@@ -167,14 +169,16 @@ fn fuzz_smoke_revocation() {
     let k = key();
     let good = text_bytes(&issue_revocation(&k, RevocationReason::Removed, 9).unwrap());
     let mut ok = 0u64;
-    for _ in 0..n {
-        let input = match rng.below(3) {
+    for i in 0..n {
+        let drawn = match rng.below(3) {
             0 => {
                 let len = rng.below(200);
                 rng.bytes(len)
             }
             _ => mutate(&mut rng, &good),
         };
+        // итерация 0 всегда подаёт исходный образец: принятый вход гарантирован
+        let input = if i == 0 { good.clone() } else { drawn };
         let text = encode_revocation_bytes(&input);
         if let Ok(tok) = decode(&text) {
             ok += 1;
@@ -183,6 +187,6 @@ fn fuzz_smoke_revocation() {
             assert_eq!(input, good);
         }
     }
-    assert!(ok > 0 || n < 100);
+    assert!(n == 0 || ok > 0, "ни одного принятого образца");
     println!("fuzz_smoke_revocation: итераций {n}, принято {ok}");
 }

@@ -1,0 +1,590 @@
+//! Книга друзей: CRUD, права, блокировка, удаление, смена ключа, приём отзыва поверх
+//! зашифрованного файла списка (этап 11, часть О1). Только вызовы API `chervo-identity`,
+//! `chervo-token` и `vault`; своей криптографии нет.
+//!
+//! # Порядок приложения (проверяется сетевыми тестами `tests/invite_net.rs`)
+//!
+//! Сторона A (пригласившая): `begin_pair(Inviter, now + ttl)`, запомнить `key.public_key()`
+//! и `key.kx_public()`, `chervo_token::issue_invite`, `transport.set_peers(kx_peers +
+//! KxPeer(pair, key.into_kx(), pending.guest_public()))`, на соединение гостевой пары
+//! `begin_session`, `flow::inviter_exchange`, показать SAS, `flow::exchange_decision`.
+//! Оба подтвердили: `conn.close()`, `finish_pair(B_ed, B_x, ..)`, `set_peers(kx_peers)`.
+//! Иначе `abort_pair` и `set_peers` без гостя.
+//!
+//! Сторона B (приглашённая): `decode`, `check_time`, `begin_pair(Invitee,
+//! token.expires_at() + CLOCK_TOLERANCE_SECS)`, `InviteeSession::start`, `set_peers(+
+//! KxPeer(pair, token.guest_secret()?.into_kx(), token.inviter_x()))`, `connect`,
+//! `flow::invitee_exchange`, SAS, `flow::exchange_decision`. Оба подтвердили:
+//! `finish_pair(A_ed, A_x, ..)`, `set_peers(kx_peers)`; иначе `abort_pair`.
+//!
+//! После любого изменения книги (блокировка, удаление, отзыв, смена ключа) вызывающий делает
+//! `set_peers(kx_peers + гостевые пары)`: живые соединения исключённых пар рвутся.
+//! При старте приложения вызывается `drop_all_pending` (секреты незавершённых сессий жили
+//! только в памяти), раз в минуту `expire`.
+
+use std::ffi::OsString;
+use std::fmt;
+use std::io::{ErrorKind, Write};
+use std::path::{Path, PathBuf};
+
+use chervo_addr::KnownAddr;
+use chervo_identity::{
+    IdentityError, KxPeer, KxPublicKey, LIST_KEY_LEN, ListKeyStore, PairId, PairKey, PublicKey,
+    SecretStore, create, load,
+};
+use chervo_token::{RevocationReason, Token, decode, issue_revocation};
+use zeroize::Zeroizing;
+
+use crate::plain::name_ok;
+use crate::{
+    BookData, Friend, FriendState, FriendsError, MAX_ADDRS_PER_FRIEND, MAX_FILE_BYTES, MAX_FRIENDS,
+    MAX_PENDING, PendingEntry, PendingRole, Permission, vault,
+};
+
+/// Книга друзей. `Debug` не печатает содержимое.
+pub struct FriendBook {
+    path: PathBuf,
+    key: Option<Zeroizing<[u8; 32]>>,
+    data: BookData,
+}
+
+impl fmt::Debug for FriendBook {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("FriendBook(..)")
+    }
+}
+
+/// Данные нового друга при завершении приглашения. Без `Debug`: имя, адреса, ключи.
+pub struct NewFriend {
+    pub name: String,
+    pub friend_ed: PublicKey,
+    pub friend_x: KxPublicKey,
+    pub our_ed: PublicKey,
+    pub our_x: KxPublicKey,
+    pub addrs: Vec<KnownAddr>,
+    pub now_unix: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyStatus {
+    /// Ключа пары нет, он испорчен или не совпал с ожидаемым: показать `KEY_LOST_TEXT`.
+    MissingOrChanged,
+    /// Запись ключа неизвестной версии: спросить пользователя, автоматически ничего не делать.
+    NeedsDecision,
+}
+
+/// Результат `kx_peers`: пары для транспорта и пары с потерянным ключом.
+pub type KxPeerSet = (Vec<KxPeer>, Vec<(PairId, KeyStatus)>);
+
+fn map_identity(e: IdentityError) -> FriendsError {
+    match e {
+        IdentityError::RandomUnavailable => FriendsError::RandomUnavailable,
+        IdentityError::KeyAlreadyExists => FriendsError::AlreadyExists,
+        // StorageLocked, StorageUnavailable и прочее: одна и та же ошибка (Н1)
+        _ => FriendsError::KeyStorageUnavailable,
+    }
+}
+
+fn tmp_path(path: &Path) -> PathBuf {
+    let mut s: OsString = path.as_os_str().to_os_string();
+    s.push(".tmp");
+    PathBuf::from(s)
+}
+
+fn key_from(raw: &[u8]) -> Result<Zeroizing<[u8; 32]>, FriendsError> {
+    if raw.len() != LIST_KEY_LEN {
+        return Err(FriendsError::Corrupt);
+    }
+    let mut k = Zeroizing::new([0u8; 32]);
+    k.copy_from_slice(raw);
+    Ok(k)
+}
+
+fn read_file(path: &Path) -> Result<Option<Zeroizing<Vec<u8>>>, FriendsError> {
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(FriendsError::Io),
+    };
+    if meta.len() > MAX_FILE_BYTES as u64 {
+        return Err(FriendsError::Corrupt);
+    }
+    match std::fs::read(path) {
+        Ok(v) => Ok(Some(Zeroizing::new(v))),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(FriendsError::Io),
+    }
+}
+
+impl FriendBook {
+    /// Файла нет: пустая книга (ключ читается, если он есть). Файл есть, ключа нет:
+    /// `ListKeyMissing`, файл не трогается.
+    pub fn open<K: ListKeyStore + ?Sized>(path: &Path, keys: &K) -> Result<Self, FriendsError> {
+        let stored = keys.read_list_key().map_err(map_identity)?;
+        let key = match stored {
+            Some(raw) => Some(key_from(&raw)?),
+            None => None,
+        };
+        match read_file(path)? {
+            None => Ok(Self {
+                path: path.to_path_buf(),
+                key,
+                data: BookData::default(),
+            }),
+            Some(file) => {
+                let k = key.ok_or(FriendsError::ListKeyMissing)?;
+                let data = vault::open(&k, &file)?;
+                Ok(Self {
+                    path: path.to_path_buf(),
+                    key: Some(k),
+                    data,
+                })
+            }
+        }
+    }
+
+    /// Явно: переименовать нечитаемый файл в `"<path>.unreadable-<now>"` и начать пустую книгу.
+    pub fn start_over<K: ListKeyStore + ?Sized>(
+        path: &Path,
+        keys: &K,
+        now_unix: u64,
+    ) -> Result<Self, FriendsError> {
+        let stored = keys.read_list_key().map_err(map_identity)?;
+        let key = match stored {
+            Some(raw) => Some(key_from(&raw)?),
+            None => None,
+        };
+        let mut moved: OsString = path.as_os_str().to_os_string();
+        moved.push(format!(".unreadable-{now_unix}"));
+        match std::fs::rename(path, PathBuf::from(moved)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(_) => return Err(FriendsError::Io),
+        }
+        Ok(Self {
+            path: path.to_path_buf(),
+            key,
+            data: BookData::default(),
+        })
+    }
+
+    pub fn friends(&self) -> &[Friend] {
+        &self.data.friends
+    }
+
+    pub fn get(&self, pair: &PairId) -> Option<&Friend> {
+        self.data.friends.iter().find(|f| f.pair == *pair)
+    }
+
+    pub fn pending(&self) -> &[PendingEntry] {
+        &self.data.pending
+    }
+
+    /// Ключ списка: из памяти, из хранилища или (только если нет ни файла, ни ключа) новый.
+    fn ensure_key<K: ListKeyStore + ?Sized>(
+        &mut self,
+        keys: &K,
+    ) -> Result<Zeroizing<[u8; 32]>, FriendsError> {
+        if let Some(k) = &self.key {
+            return Ok(k.clone());
+        }
+        let found = keys.read_list_key().map_err(map_identity)?;
+        let k = match found {
+            Some(raw) => key_from(&raw)?,
+            None => {
+                if self.path.try_exists().map_err(|_| FriendsError::Io)? {
+                    return Err(FriendsError::ListKeyMissing);
+                }
+                let mut fresh = Zeroizing::new([0u8; 32]);
+                getrandom::fill(fresh.as_mut_slice())
+                    .map_err(|_| FriendsError::RandomUnavailable)?;
+                keys.write_list_key(fresh.as_slice())
+                    .map_err(map_identity)?;
+                let back = keys.read_list_key().map_err(map_identity)?;
+                match back {
+                    Some(b) if b.as_slice() == fresh.as_slice() => fresh,
+                    _ => return Err(FriendsError::KeyStorageUnavailable),
+                }
+            }
+        };
+        self.key = Some(k.clone());
+        Ok(k)
+    }
+
+    /// seal, запись в `<path>.tmp`, `sync_all`, `rename` поверх `path`.
+    fn save<K: ListKeyStore + ?Sized>(&mut self, keys: &K) -> Result<(), FriendsError> {
+        let k = self.ensure_key(keys)?;
+        let bytes = vault::seal(&k, &self.data)?;
+        let tmp = tmp_path(&self.path);
+        let written = (|| -> std::io::Result<()> {
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(&bytes)?;
+            f.sync_all()?;
+            drop(f);
+            std::fs::rename(&tmp, &self.path)
+        })();
+        if written.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(FriendsError::Io);
+        }
+        Ok(())
+    }
+
+    /// Применить изменение и сохранить; при любой ошибке состояние в памяти откатывается.
+    fn commit<K: ListKeyStore + ?Sized, T>(
+        &mut self,
+        keys: &K,
+        f: impl FnOnce(&mut BookData) -> Result<T, FriendsError>,
+    ) -> Result<T, FriendsError> {
+        let backup = self.data.clone();
+        let out = match f(&mut self.data) {
+            Ok(v) => v,
+            Err(e) => {
+                self.data = backup;
+                return Err(e);
+            }
+        };
+        if let Err(e) = self.save(keys) {
+            self.data = backup;
+            return Err(e);
+        }
+        Ok(out)
+    }
+
+    /// Начать пару: запись pending сохраняется ДО создания ключа (Н2); при ошибке создания
+    /// ключ и запись убираются.
+    pub fn begin_pair<S: SecretStore + ListKeyStore + ?Sized>(
+        &mut self,
+        store: &S,
+        role: PendingRole,
+        expires_at_unix: u64,
+    ) -> Result<(PairId, PairKey), FriendsError> {
+        if self.data.pending.len() >= MAX_PENDING {
+            return Err(FriendsError::LimitExceeded);
+        }
+        let pair = PairId::generate().map_err(map_identity)?;
+        self.commit(store, |d| {
+            d.pending.push(PendingEntry {
+                pair,
+                role,
+                expires_at_unix,
+            });
+            Ok(())
+        })?;
+        match create(store, &pair) {
+            Ok(key) => Ok((pair, key)),
+            Err(e) => {
+                let _ = SecretStore::delete(store, &pair);
+                let _ = self.commit(store, |d| {
+                    d.pending.retain(|p| p.pair != pair);
+                    Ok(())
+                });
+                Err(map_identity(e))
+            }
+        }
+    }
+
+    /// Прервать незавершённую пару: удалить ключ, затем запись. Ошибка хранилища: запись
+    /// остаётся (повтор позже).
+    pub fn abort_pair<S: SecretStore + ListKeyStore + ?Sized>(
+        &mut self,
+        store: &S,
+        pair: &PairId,
+    ) -> Result<(), FriendsError> {
+        if !self.data.pending.iter().any(|p| p.pair == *pair) {
+            return Err(FriendsError::UnknownPair);
+        }
+        SecretStore::delete(store, pair).map_err(map_identity)?;
+        self.commit(store, |d| {
+            d.pending.retain(|p| p.pair != *pair);
+            Ok(())
+        })
+    }
+
+    /// `abort_pair` для всех записей со сроком `<= now`. Возвращает число прерванных.
+    pub fn expire<S: SecretStore + ListKeyStore + ?Sized>(
+        &mut self,
+        store: &S,
+        now_unix: u64,
+    ) -> Result<usize, FriendsError> {
+        let due: Vec<PairId> = self
+            .data
+            .pending
+            .iter()
+            .filter(|p| p.expires_at_unix <= now_unix)
+            .map(|p| p.pair)
+            .collect();
+        let mut n = 0usize;
+        for pair in due {
+            self.abort_pair(store, &pair)?;
+            n = n.saturating_add(1);
+        }
+        Ok(n)
+    }
+
+    /// `abort_pair` для всех записей (при старте приложения).
+    pub fn drop_all_pending<S: SecretStore + ListKeyStore + ?Sized>(
+        &mut self,
+        store: &S,
+    ) -> Result<usize, FriendsError> {
+        let all: Vec<PairId> = self.data.pending.iter().map(|p| p.pair).collect();
+        let mut n = 0usize;
+        for pair in all {
+            self.abort_pair(store, &pair)?;
+            n = n.saturating_add(1);
+        }
+        Ok(n)
+    }
+
+    /// Завершить приглашение: pending превращается в друга `Active` с правом `Ask`.
+    pub fn finish_pair<S: SecretStore + ListKeyStore + ?Sized>(
+        &mut self,
+        store: &S,
+        pair: &PairId,
+        f: NewFriend,
+    ) -> Result<(), FriendsError> {
+        if !self.data.pending.iter().any(|p| p.pair == *pair) {
+            return Err(FriendsError::UnknownPair);
+        }
+        if !name_ok(&f.name) {
+            return Err(FriendsError::InvalidName);
+        }
+        if f.friend_ed == f.our_ed || f.friend_x == f.our_x {
+            return Err(FriendsError::KeyMissingOrChanged);
+        }
+        if self.data.friends.iter().any(|x| x.pair == *pair) {
+            return Err(FriendsError::AlreadyExists);
+        }
+        if self.data.friends.len() >= MAX_FRIENDS {
+            return Err(FriendsError::LimitExceeded);
+        }
+        let mut addrs = f.addrs;
+        addrs.truncate(MAX_ADDRS_PER_FRIEND);
+        let friend = Friend {
+            pair: *pair,
+            name: f.name,
+            friend_ed: f.friend_ed,
+            friend_x: f.friend_x,
+            our_ed: f.our_ed,
+            state: FriendState::Active,
+            permission: Permission::Ask,
+            known_addrs: addrs,
+            last_addr_seq: 0,
+            added_at_unix: f.now_unix,
+        };
+        self.commit(store, |d| {
+            d.pending.retain(|p| p.pair != *pair);
+            d.friends.push(friend);
+            Ok(())
+        })
+    }
+
+    pub fn rename<K: ListKeyStore + ?Sized>(
+        &mut self,
+        keys: &K,
+        pair: &PairId,
+        name: &str,
+    ) -> Result<(), FriendsError> {
+        if !name_ok(name) {
+            return Err(FriendsError::InvalidName);
+        }
+        self.commit(keys, |d| {
+            let fr = d
+                .friends
+                .iter_mut()
+                .find(|x| x.pair == *pair)
+                .ok_or(FriendsError::UnknownPair)?;
+            fr.name = name.to_owned();
+            Ok(())
+        })
+    }
+
+    /// По умолчанию всегда `Ask`; `AutoAccept` только явно и с ненулевыми лимитами.
+    pub fn set_permission<K: ListKeyStore + ?Sized>(
+        &mut self,
+        keys: &K,
+        pair: &PairId,
+        p: Permission,
+    ) -> Result<(), FriendsError> {
+        if let Permission::AutoAccept(l) = p
+            && (l.max_files == 0 || l.max_total_bytes == 0)
+        {
+            return Err(FriendsError::InvalidLimits);
+        }
+        self.commit(keys, |d| {
+            let fr = d
+                .friends
+                .iter_mut()
+                .find(|x| x.pair == *pair)
+                .ok_or(FriendsError::UnknownPair)?;
+            fr.permission = p;
+            Ok(())
+        })
+    }
+
+    fn switch_state<K: ListKeyStore + ?Sized>(
+        &mut self,
+        keys: &K,
+        pair: &PairId,
+        from: FriendState,
+        to: FriendState,
+    ) -> Result<(), FriendsError> {
+        self.commit(keys, |d| {
+            let fr = d
+                .friends
+                .iter_mut()
+                .find(|x| x.pair == *pair && x.state == from)
+                .ok_or(FriendsError::UnknownPair)?;
+            fr.state = to;
+            Ok(())
+        })
+    }
+
+    /// `Active` -> `Blocked`. Вызывающий затем делает `set_peers`.
+    pub fn block<K: ListKeyStore + ?Sized>(
+        &mut self,
+        keys: &K,
+        pair: &PairId,
+    ) -> Result<(), FriendsError> {
+        self.switch_state(keys, pair, FriendState::Active, FriendState::Blocked)
+    }
+
+    /// `Blocked` -> `Active`.
+    pub fn unblock<K: ListKeyStore + ?Sized>(
+        &mut self,
+        keys: &K,
+        pair: &PairId,
+    ) -> Result<(), FriendsError> {
+        self.switch_state(keys, pair, FriendState::Blocked, FriendState::Active)
+    }
+
+    /// Текст отзыва, подписанный нашим ключом пары; `required` — ошибка, если ключ не загрузился.
+    fn revocation_for<S: SecretStore + ?Sized>(
+        store: &S,
+        fr: &Friend,
+        reason: RevocationReason,
+        now_unix: u64,
+    ) -> Result<Option<String>, FriendsError> {
+        match load(store, &fr.pair, &fr.our_ed) {
+            Ok(key) => issue_revocation(&key, reason, now_unix)
+                .map(Some)
+                .map_err(|_| FriendsError::BadRevocation),
+            Err(
+                IdentityError::KeyMissing
+                | IdentityError::KeyMismatch
+                | IdentityError::CorruptKey
+                | IdentityError::UnsupportedKeyVersion,
+            ) => Ok(None),
+            Err(e) => Err(map_identity(e)),
+        }
+    }
+
+    fn drop_friend<S: SecretStore + ListKeyStore + ?Sized>(
+        &mut self,
+        store: &S,
+        pair: &PairId,
+    ) -> Result<(), FriendsError> {
+        SecretStore::delete(store, pair).map_err(map_identity)?;
+        self.commit(store, |d| {
+            d.friends.retain(|x| x.pair != *pair);
+            Ok(())
+        })
+    }
+
+    /// Отзыв (`Removed`), если ключ загрузился; затем удалить ключ и запись.
+    pub fn remove<S: SecretStore + ListKeyStore + ?Sized>(
+        &mut self,
+        store: &S,
+        pair: &PairId,
+        now_unix: u64,
+    ) -> Result<Option<String>, FriendsError> {
+        let fr = self.get(pair).ok_or(FriendsError::UnknownPair)?;
+        let text = Self::revocation_for(store, fr, RevocationReason::Removed, now_unix)?;
+        self.drop_friend(store, pair)?;
+        Ok(text)
+    }
+
+    /// «Пересоздать ключ»: отзыв (`Rekey`) старым ключом, удалить ключ и запись. Ключ не
+    /// загрузился: ошибка, ничего не удалено.
+    pub fn rekey<S: SecretStore + ListKeyStore + ?Sized>(
+        &mut self,
+        store: &S,
+        pair: &PairId,
+        now_unix: u64,
+    ) -> Result<String, FriendsError> {
+        let fr = self.get(pair).ok_or(FriendsError::UnknownPair)?;
+        let text = match load(store, &fr.pair, &fr.our_ed) {
+            Ok(key) => issue_revocation(&key, RevocationReason::Rekey, now_unix)
+                .map_err(|_| FriendsError::BadRevocation)?,
+            Err(IdentityError::UnsupportedKeyVersion) => {
+                return Err(FriendsError::KeyNeedsDecision);
+            }
+            Err(
+                IdentityError::KeyMissing | IdentityError::KeyMismatch | IdentityError::CorruptKey,
+            ) => return Err(FriendsError::KeyMissingOrChanged),
+            Err(e) => return Err(map_identity(e)),
+        };
+        self.drop_friend(store, pair)?;
+        Ok(text)
+    }
+
+    /// Отзыв от друга: `decode`; друг с теми же `friend_ed` и `friend_x`, не `RevokedByPeer`,
+    /// получает `RevokedByPeer`, наш ключ пары удаляется. Иначе `Ok(None)`.
+    pub fn apply_revocation<S: SecretStore + ListKeyStore + ?Sized>(
+        &mut self,
+        store: &S,
+        text: &str,
+    ) -> Result<Option<PairId>, FriendsError> {
+        let notice = match decode(text) {
+            Ok(Token::Revocation(n)) => n,
+            _ => return Err(FriendsError::BadRevocation),
+        };
+        let pair = match self.data.friends.iter().find(|f| {
+            f.friend_ed == notice.revoked_ed
+                && f.friend_x == notice.revoked_x
+                && f.state != FriendState::RevokedByPeer
+        }) {
+            Some(f) => f.pair,
+            None => return Ok(None),
+        };
+        // сначала ключ (идемпотентно), затем запись: при сбое сохранения отзыв можно применить снова
+        SecretStore::delete(store, &pair).map_err(map_identity)?;
+        self.commit(store, |d| {
+            let fr = d
+                .friends
+                .iter_mut()
+                .find(|x| x.pair == pair)
+                .ok_or(FriendsError::UnknownPair)?;
+            fr.state = FriendState::RevokedByPeer;
+            Ok(())
+        })?;
+        Ok(Some(pair))
+    }
+
+    /// Только `Active`: `load` -> `into_kx` -> `KxPeer`. Пары с потерянным ключом попадают во
+    /// второй список; ключ молча не создаётся.
+    pub fn kx_peers<S: SecretStore + ?Sized>(&self, store: &S) -> Result<KxPeerSet, FriendsError> {
+        let mut peers = Vec::new();
+        let mut bad = Vec::new();
+        for fr in self
+            .data
+            .friends
+            .iter()
+            .filter(|f| f.state == FriendState::Active)
+        {
+            match load(store, &fr.pair, &fr.our_ed) {
+                Ok(key) => peers.push(KxPeer::new(fr.pair, key.into_kx(), fr.friend_x)),
+                Err(
+                    IdentityError::KeyMissing
+                    | IdentityError::KeyMismatch
+                    | IdentityError::CorruptKey,
+                ) => bad.push((fr.pair, KeyStatus::MissingOrChanged)),
+                Err(IdentityError::UnsupportedKeyVersion) => {
+                    bad.push((fr.pair, KeyStatus::NeedsDecision));
+                }
+                Err(e) => return Err(map_identity(e)),
+            }
+        }
+        Ok((peers, bad))
+    }
+}
