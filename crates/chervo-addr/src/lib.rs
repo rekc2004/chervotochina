@@ -22,7 +22,7 @@ use std::net::SocketAddr;
 pub use book::{
     CONTACT_REFRESH_SECS, CONTACT_TTL_SECS, Findability, HINT_TTL_SECS, MAX_CONTACT_ADDRS,
     NEED_TOKEN_TEXT, NO_PUBLIC_ADDR_TEXT, SHORT_LIVED_TTL_SECS, findability, from_invite,
-    merge_update, note_contact, prune, usable,
+    merge_update, note_contact, prune, usable, usable_entries,
 };
 pub use class::{AddrClass, classify, is_eui64, normalize, update_allowed};
 pub use own::{

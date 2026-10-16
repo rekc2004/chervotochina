@@ -75,6 +75,9 @@ pub enum NatView {
     Symmetric,
     Eim,
     Unknown,
+    /// Задан внешний порт ручного проброса (`set_manual_forward`) и есть живое наблюдение
+    /// друга: постоянный адрес достижим, IP по-прежнему со слов друга.
+    ManualForward,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -164,6 +167,8 @@ pub struct OwnAddrs {
     local: Option<LocalSnapshot>,
     gateway: Option<GatewayInfo>,
     obs: Vec<Obs>,
+    /// Внешний порт ручного проброса (настройка пользователя); не сбрасывается `set_local`.
+    manual: Option<u16>,
 }
 
 impl fmt::Debug for OwnAddrs {
@@ -211,6 +216,13 @@ impl OwnAddrs {
 
     pub fn set_gateway(&mut self, g: Option<GatewayInfo>) {
         self.gateway = g;
+    }
+
+    /// Внешний порт ручного проброса (пользователь пробросил внешний порт на наш порт
+    /// прослушивания). `Some(0)` равно `None`. Настройка пользователя: смена маршрута
+    /// (`set_local`) её не сбрасывает.
+    pub fn set_manual_forward(&mut self, port: Option<u16>) {
+        self.manual = port.filter(|p| *p != 0);
     }
 
     /// `via` = `conn.remote_addr()`, `observed` = то, что сообщает друг. Вызывающий
@@ -327,6 +339,9 @@ impl OwnAddrs {
         {
             return NatView::DoubleNat;
         }
+        if self.manual.is_some() && !live.is_empty() {
+            return NatView::ManualForward;
+        }
         if let Some((_, first)) = live.first()
             && live.iter().any(|(_, a)| a.port() != first.port())
         {
@@ -342,11 +357,11 @@ impl OwnAddrs {
         NatView::Unknown
     }
 
-    /// Постоянный адрес достижим: вид сети `Public` или `PortMapped`.
+    /// Постоянный адрес достижим: вид сети `Public`, `PortMapped` или `ManualForward`.
     pub fn stable_reachable(&self, now_unix: u64) -> bool {
         matches!(
             self.nat_view(now_unix),
-            NatView::Public | NatView::PortMapped
+            NatView::Public | NatView::PortMapped | NatView::ManualForward
         )
     }
 
@@ -403,6 +418,14 @@ impl OwnAddrs {
             && m.port() != 0
         {
             push(SocketAddr::V4(m), false, false);
+        }
+        // (2b) ручной проброс: IP со слов друга (новейшее наблюдение), порт задан пользователем;
+        // IP не проверен, поэтому `hint`
+        if self.nat_view(now_unix) == NatView::ManualForward
+            && let Some(port) = self.manual
+            && let Some((_, newest)) = self.live_v4(now_unix).into_iter().max_by_key(|(o, _)| o.at)
+        {
+            push(SocketAddr::new(IpAddr::V4(*newest.ip()), port), false, true);
         }
         // (3)
         if let Some(o) = self.observed_v4(now_unix) {

@@ -50,16 +50,31 @@ async fn timed_connect(
     (r.map(|_| ()), d)
 }
 
-/// Запускает `count` задач-незнакомцев, которые бесконечно звонят и получают отказ.
+/// Незнакомец с `count` разными парами: один исходящий звонок на пару (`Busy`), поэтому
+/// параллельная нагрузка идёт по разным парам. Для вызываемого все они чужие.
+fn strangers_with_pairs(
+    count: usize,
+    callee: &QuinnTransport,
+) -> (Arc<QuinnTransport>, Vec<PeerAddr>) {
+    let pids: Vec<PairId> = (0..count).map(|_| PairId::generate().unwrap()).collect();
+    let stranger = Arc::new(bind(
+        test_cfg(),
+        pids.iter().map(|p| stranger_peer(*p)).collect(),
+    ));
+    let targets = pids.iter().map(|p| peer_addr(*p, callee)).collect();
+    (stranger, targets)
+}
+
+/// Запускает по задаче-незнакомцу на каждую цель; задачи бесконечно звонят и получают отказ.
 fn spawn_strangers(
     stranger: Arc<QuinnTransport>,
-    target: PeerAddr,
-    count: usize,
+    targets: Vec<PeerAddr>,
     stop: Arc<AtomicBool>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
-    (0..count)
-        .map(|_| {
-            let (t, target, stop) = (stranger.clone(), target.clone(), stop.clone());
+    targets
+        .into_iter()
+        .map(|target| {
+            let (t, stop) = (stranger.clone(), stop.clone());
             tokio::spawn(async move {
                 while !stop.load(Ordering::Relaxed) {
                     let _ = t.connect(&target).await;
@@ -92,12 +107,10 @@ async fn friend_admitted_under_strangers() {
     let t0 = median(&mut t0s);
 
     // 20 незнакомцев параллельно, через 50 мс звонок друга
-    let spid = PairId::generate().unwrap();
-    let stranger = Arc::new(bind(test_cfg(), vec![stranger_peer(spid)]));
-    let sp = peer_addr(spid, &callee);
+    let (stranger, targets) = strangers_with_pairs(20, &callee);
     let mut strangers = Vec::new();
-    for _ in 0..20 {
-        let (t, p) = (stranger.clone(), sp.clone());
+    for p in targets {
+        let t = stranger.clone();
         strangers.push(tokio::spawn(async move { t.connect(&p).await.map(|_| ()) }));
     }
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -129,12 +142,10 @@ async fn friend_starved_documented() {
     let callee = bind(cfg, callees);
     let friend = bind(test_cfg(), callers);
 
-    let spid = PairId::generate().unwrap();
-    let stranger = Arc::new(bind(test_cfg(), vec![stranger_peer(spid)]));
-    let sp = peer_addr(spid, &callee);
+    let (stranger, targets) = strangers_with_pairs(10, &callee);
     let mut tasks = Vec::new();
-    for _ in 0..10 {
-        let (t, p) = (stranger.clone(), sp.clone());
+    for p in targets {
+        let t = stranger.clone();
         tasks.push(tokio::spawn(async move { t.connect(&p).await.map(|_| ()) }));
     }
     for t in tasks {
@@ -215,11 +226,9 @@ async fn friend_latency_under_flood() {
                 let friend = bind(test_cfg(), vec![friend_peer_kx]);
                 let fpeer = peer_addr(friend_pid, &callee);
 
-                let spid = PairId::generate().unwrap();
-                let stranger = Arc::new(bind(test_cfg(), vec![stranger_peer(spid)]));
+                let (stranger, targets) = strangers_with_pairs(strangers, &callee);
                 let stop = Arc::new(AtomicBool::new(false));
-                let tasks =
-                    spawn_strangers(stranger, peer_addr(spid, &callee), strangers, stop.clone());
+                let tasks = spawn_strangers(stranger, targets, stop.clone());
                 tokio::time::sleep(Duration::from_millis(500)).await;
 
                 let s0 = callee.stats();

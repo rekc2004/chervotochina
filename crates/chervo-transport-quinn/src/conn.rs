@@ -1,6 +1,7 @@
 //! Соединение, потоки, экспортёр TLS и единый отказ.
 
 use std::fmt;
+use std::future::Future;
 use std::net::SocketAddr;
 
 use chervo_identity::{BINDING_LEN, ChannelBinding, PairId};
@@ -154,6 +155,21 @@ impl Connection for QuinnConn {
 
     fn close(&self) {
         refuse(&self.conn);
+    }
+
+    fn conn_id(&self) -> u64 {
+        self.conn.stable_id() as u64
+    }
+
+    fn is_initiator(&self) -> bool {
+        self.initiator
+    }
+
+    fn closed(&self) -> impl Future<Output = ()> + Send {
+        let conn = self.conn.clone();
+        async move {
+            let _ = conn.closed().await;
+        }
     }
 }
 

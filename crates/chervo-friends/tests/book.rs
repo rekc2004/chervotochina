@@ -1507,3 +1507,29 @@ fn observation_not_published_to_others() {
     let in_token: Vec<SocketAddr> = verified.addrs().iter().map(|u| u.addr).collect();
     assert_eq!(in_token, set.socket_addrs());
 }
+
+#[test]
+fn usable_known_empty_for_blocked() {
+    let (mut a, pa, mut b, pb) = duo();
+    let set = publish_set("8.8.8.8", 4000);
+    let tok = a.book.issue_addr_update(&a.store, &pa, &set, NOW).unwrap();
+    b.book
+        .apply_addr_update_text(&b.store, &tok.text(), NOW)
+        .unwrap();
+    // Active: записи с флагами, адреса и порядок как у `usable_addrs`
+    let known = b.book.usable_known(&pb, NOW + 1);
+    assert!(!known.is_empty());
+    assert_eq!(
+        known.iter().map(|k| k.addr).collect::<Vec<_>>(),
+        b.book.usable_addrs(&pb, NOW + 1)
+    );
+    assert!(known.iter().all(|k| k.source == AddrSource::AddressUpdate));
+    // неизвестная пара: пусто
+    assert!(b.book.usable_known(&stranger_pair(), NOW).is_empty());
+    // Blocked: пусто, записи сохранены и после unblock снова видны
+    b.book.block(&b.store, &pb).unwrap();
+    assert!(b.book.usable_known(&pb, NOW + 1).is_empty());
+    assert!(!b.book.get(&pb).unwrap().known_addrs.is_empty());
+    b.book.unblock(&b.store, &pb).unwrap();
+    assert_eq!(b.book.usable_known(&pb, NOW + 1).len(), known.len());
+}

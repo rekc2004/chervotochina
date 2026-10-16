@@ -364,12 +364,24 @@ impl PendingInvite {
 
     /// Разбор M1. Принимается ровно один раз: после успеха `used`, ошибка `used` не ставит.
     /// Возвращает M2 (раскрытие `r_A`), SAS и ключи B.
-    pub fn on_m1(&mut self, m1: &[u8]) -> Result<([u8; M2_LEN], Sas, InviteeKeys), InviteError> {
+    ///
+    /// `now_unix` читается вызывающим сразу перед вызовом (после чтения M1): срок проверяется
+    /// здесь, а не только при `begin_session`. Порядок проверок: нет сессии, использовано,
+    /// истёк срок (`now_unix >= expires_at`), затем разбор M1. Просроченное приглашение
+    /// `used` не ставит.
+    pub fn on_m1(
+        &mut self,
+        m1: &[u8],
+        now_unix: u64,
+    ) -> Result<([u8; M2_LEN], Sas, InviteeKeys), InviteError> {
         if self.sessions == 0 {
             return Err(InviteError::NoSession);
         }
         if self.used {
             return Err(InviteError::Used);
+        }
+        if now_unix >= self.expires_at {
+            return Err(InviteError::Expired);
         }
         if m1.len() != M1_LEN || m1.first() != Some(&MSG_M1) || m1.get(1) != Some(&PROTO_V1) {
             return Err(InviteError::Malformed);

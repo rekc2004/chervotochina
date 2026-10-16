@@ -170,6 +170,21 @@ pub fn usable(addrs: &[KnownAddr], now_unix: u64) -> Vec<SocketAddr> {
     out
 }
 
+/// Те же записи и порядок, что у `usable`, но с флагами (`source`, `short_lived`, `hint`):
+/// слою соединения нужны источник и подсказка для лимитера и порядка. Повторы адреса
+/// убираются, остаётся первая запись в порядке набора.
+pub fn usable_entries(addrs: &[KnownAddr], now_unix: u64) -> Vec<KnownAddr> {
+    let mut live: Vec<&KnownAddr> = addrs.iter().filter(|k| !dead(k, now_unix)).collect();
+    live.sort_by_key(|k| (group(k), k.addr.is_ipv6()));
+    let mut out: Vec<KnownAddr> = Vec::with_capacity(live.len());
+    for k in live {
+        if !out.iter().any(|o| o.addr == k.addr) {
+            out.push(k.clone());
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Findability {
     Ok,

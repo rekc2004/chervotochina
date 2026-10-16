@@ -400,7 +400,7 @@ async fn clock_skew_outside_tolerance() {
         let r = a.connect(&peer_addr(k.pid, &b)).await;
         assert_eq!(
             r.err(),
-            Some(chervo_transport::TransportError::TimedOut),
+            Some(chervo_transport::TransportError::NoResponse),
             "расхождение {skew} мс"
         );
         assert!(b.stats().knock_skewed >= 1, "knock_skewed = 0");

@@ -105,6 +105,18 @@ impl Connection for MemConn {
     }
 
     fn close(&self) {}
+
+    fn conn_id(&self) -> u64 {
+        0
+    }
+
+    fn is_initiator(&self) -> bool {
+        false
+    }
+
+    fn closed(&self) -> impl Future<Output = ()> + Send {
+        std::future::pending()
+    }
 }
 
 /// Пара концов: (A принимает поток, B открывает поток) и трубы, чтобы вмешиваться снаружи.
@@ -154,10 +166,11 @@ fn run_inviter(
     std::thread::spawn(move || {
         block_on(async {
             pending.begin_session(1_000_100).unwrap();
-            let (mut ch, sas, _keys) = match inviter_exchange(&conn, &mut pending).await {
-                Ok(v) => v,
-                Err(e) => return (Err(e), None),
-            };
+            let (mut ch, sas, _keys) =
+                match inviter_exchange(&conn, &mut pending, || 1_000_100).await {
+                    Ok(v) => v,
+                    Err(e) => return (Err(e), None),
+                };
             let theirs = exchange_decision(&mut ch, confirm).await;
             (theirs, Some(sas.digits()))
         })
@@ -222,10 +235,10 @@ fn flow_truncated_m1_and_m2() {
     l.b_to_a.finished.store(true, Ordering::SeqCst);
     let mut pending = h.pending;
     pending.begin_session(1_000_100).unwrap();
-    let r = block_on(inviter_exchange(&l.a, &mut pending));
+    let r = block_on(inviter_exchange(&l.a, &mut pending, || 1_000_100));
     assert_eq!(r.err(), Some(FlowError::Truncated));
     // состояние не потрачено: настоящий M1 ещё принимается
-    assert!(pending.on_m1(&h.m1).is_ok());
+    assert!(pending.on_m1(&h.m1, 1_000_100).is_ok());
 
     // A прислал неполный M2
     let h = honest();
@@ -249,7 +262,7 @@ fn flow_wrong_messages() {
         .extend(other.m1.iter().copied());
     let mut pending = h.pending;
     pending.begin_session(1_000_100).unwrap();
-    let r = block_on(inviter_exchange(&l.a, &mut pending));
+    let r = block_on(inviter_exchange(&l.a, &mut pending, || 1_000_100));
     assert_eq!(r.err(), Some(FlowError::Invite(InviteError::WrongToken)));
     // ничего не записано в ответ
     assert!(l.a_to_b.buf.lock().unwrap().is_empty());
@@ -258,7 +271,7 @@ fn flow_wrong_messages() {
     let h = honest();
     let mut other = honest();
     other.pending.begin_session(1_000_100).unwrap();
-    let (other_m2, _, _) = other.pending.on_m1(&other.m1).unwrap();
+    let (other_m2, _, _) = other.pending.on_m1(&other.m1, 1_000_100).unwrap();
     let l = link();
     l.a_to_b
         .buf
@@ -282,7 +295,9 @@ fn flow_decision_errors() {
         std::thread::spawn(move || {
             block_on(async {
                 pending.begin_session(1_000_100).unwrap();
-                let (mut ch, _sas, _k) = inviter_exchange(&conn, &mut pending).await.unwrap();
+                let (mut ch, _sas, _k) = inviter_exchange(&conn, &mut pending, || 1_000_100)
+                    .await
+                    .unwrap();
                 let r = exchange_decision(&mut ch, true).await;
                 (r, ())
             })
@@ -305,7 +320,88 @@ fn futures_are_send(
     m: &[u8; M1_LEN],
 ) {
     fn is_send<T: Send>(_: &T) {}
-    is_send(&inviter_exchange(c, p));
+    is_send(&inviter_exchange(c, p, || 1_000_100));
     is_send(&invitee_exchange(c, s, m));
     let _ = issue_invite;
+}
+
+// ---------- срок приглашения проверяется при приёме M1 (этап 13, C2) ----------
+
+#[test]
+fn on_m1_after_expiry_rejected() {
+    let mut h = honest();
+    // сессия открыта до истечения срока (expires_at = 1_000_900)
+    h.pending.begin_session(1_000_100).unwrap();
+    // M1 пришёл ровно в момент истечения
+    assert_eq!(
+        h.pending.on_m1(&h.m1, 1_000_900).err(),
+        Some(InviteError::Expired)
+    );
+    // и позже: срок не возвращается
+    assert_eq!(
+        h.pending.on_m1(&h.m1, 2_000_000).err(),
+        Some(InviteError::Expired)
+    );
+    // `used` не поставлен: тот же M1 при времени до истечения принимается
+    assert!(h.pending.on_m1(&h.m1, 1_000_899).is_ok());
+}
+
+#[test]
+fn on_m1_order_no_session_used_expired() {
+    // нет сессии важнее истечения
+    let mut h = honest();
+    assert_eq!(
+        h.pending.on_m1(&h.m1, 5_000_000).err(),
+        Some(InviteError::NoSession)
+    );
+    // использовано важнее истечения
+    let mut h = honest();
+    h.pending.begin_session(1_000_100).unwrap();
+    assert!(h.pending.on_m1(&h.m1, 1_000_100).is_ok());
+    assert_eq!(
+        h.pending.on_m1(&h.m1, 5_000_000).err(),
+        Some(InviteError::Used)
+    );
+    // истечение важнее разбора M1 (мусор вместо M1)
+    let mut h = honest();
+    h.pending.begin_session(1_000_100).unwrap();
+    assert_eq!(
+        h.pending.on_m1(&[0u8; 3], 1_000_900).err(),
+        Some(InviteError::Expired)
+    );
+    assert_eq!(
+        h.pending.on_m1(&[0u8; 3], 1_000_100).err(),
+        Some(InviteError::Malformed)
+    );
+}
+
+#[test]
+fn inviter_exchange_reads_clock_after_m1() {
+    use std::sync::atomic::AtomicU64;
+    let h = honest();
+    let l = link();
+    let clock = Arc::new(AtomicU64::new(1_000_100));
+    let calls = Arc::new(AtomicU64::new(0));
+    let (c2, n2) = (clock.clone(), calls.clone());
+    let mut pending = h.pending;
+    let conn = l.a;
+    let t = std::thread::spawn(move || {
+        pending.begin_session(1_000_100).unwrap();
+        let r = block_on(inviter_exchange(&conn, &mut pending, move || {
+            n2.fetch_add(1, Ordering::SeqCst);
+            c2.load(Ordering::SeqCst)
+        }));
+        (r.err(), pending)
+    });
+    // M1 ещё не доставлен: часы не вызывались
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    // срок истекает, пока M1 «в пути»; M1 доходит после этого
+    clock.store(1_000_900, Ordering::SeqCst);
+    l.b_to_a.buf.lock().unwrap().extend(h.m1.iter().copied());
+    let (err, mut pending) = t.join().unwrap();
+    assert_eq!(err, Some(FlowError::Invite(InviteError::Expired)));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    // M1 не потрачен
+    assert!(pending.on_m1(&h.m1, 1_000_100).is_ok());
 }

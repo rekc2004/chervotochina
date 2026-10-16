@@ -562,3 +562,129 @@ fn for_connection_lan_rule() {
         assert!(!PublishCtx::for_connection(sa(s)).include_lan, "{s}");
     }
 }
+
+// ---------- ручной проброс порта (этап 13, C2) ----------
+
+#[test]
+fn manual_forward_view_and_publish() {
+    let mut o = natted();
+    o.set_manual_forward(Some(8000));
+    report(&mut o, 1, "9.9.9.9:6000");
+    assert_eq!(o.nat_view(NOW), NatView::ManualForward);
+    assert!(o.stable_reachable(NOW));
+    // новейшее наблюдение даёт IP, порт задан пользователем; IP не проверен: hint
+    assert_eq!(publish(&o), vec![(sa("9.9.9.9:8000"), false, true)]);
+    // `observed_v4` для ручного проброса пуст: порт наблюдения не публикуется
+    assert!(o.observed_v4(NOW).is_none());
+    // два согласных друга: тот же адрес, один раз
+    report(&mut o, 2, "9.9.9.9:6000");
+    assert_eq!(publish(&o), vec![(sa("9.9.9.9:8000"), false, true)]);
+    // сняли проброс: прежний вид
+    o.set_manual_forward(None);
+    assert_eq!(o.nat_view(NOW), NatView::Eim);
+    assert_eq!(publish(&o), vec![(sa("9.9.9.9:6000"), false, true)]);
+}
+
+#[test]
+fn manual_forward_needs_observation() {
+    let mut o = natted();
+    o.set_manual_forward(Some(8000));
+    assert_eq!(o.nat_view(NOW), NatView::Unknown);
+    assert!(!o.stable_reachable(NOW));
+    assert!(publish(&o).is_empty());
+    // наблюдение появилось: вид и набор есть
+    report(&mut o, 1, "9.9.9.9:6000");
+    assert_eq!(publish(&o), vec![(sa("9.9.9.9:8000"), false, true)]);
+    // наблюдение истекло: снова без адреса
+    let later = NOW + OBSERVED_TTL_SECS;
+    assert_eq!(o.nat_view(later), NatView::Unknown);
+    assert!(o.publishable(PublishCtx::default(), later).is_empty());
+    // наблюдение с локального пути не считается
+    let mut lan = natted();
+    lan.set_manual_forward(Some(8000));
+    lan.observe(pid(1), sa("192.168.1.9:5000"), sa("9.9.9.9:6000"), NOW);
+    assert_eq!(lan.nat_view(NOW), NatView::Unknown);
+}
+
+#[test]
+fn manual_forward_not_over_conflict_or_double_nat() {
+    // разные IP у разных друзей: конфликт сильнее ручного проброса
+    let mut o = natted();
+    o.set_manual_forward(Some(8000));
+    report(&mut o, 1, "9.9.9.9:6000");
+    report(&mut o, 2, "9.9.9.10:6000");
+    assert_eq!(o.nat_view(NOW), NatView::Conflicting);
+    assert!(!o.stable_reachable(NOW));
+    assert!(publish(&o).is_empty());
+    // WAN шлюза не равен наблюдению: двойной NAT сильнее
+    let mut d = natted();
+    d.set_manual_forward(Some(8000));
+    d.set_gateway(Some(GatewayInfo {
+        wan_ip: Some(v4("1.2.3.4")),
+        mapping: None,
+    }));
+    report(&mut d, 1, "9.9.9.9:6000");
+    assert_eq!(d.nat_view(NOW), NatView::DoubleNat);
+    assert!(publish(&d).is_empty());
+    // WAN шлюза совпал с наблюдением: ручной проброс действует
+    let mut ok = natted();
+    ok.set_manual_forward(Some(8000));
+    ok.set_gateway(Some(GatewayInfo {
+        wan_ip: Some(v4("9.9.9.9")),
+        mapping: None,
+    }));
+    report(&mut ok, 1, "9.9.9.9:6000");
+    assert_eq!(ok.nat_view(NOW), NatView::ManualForward);
+    // CGNAT по маршруту и белый IP по маршруту остаются прежними видами
+    let mut cg = OwnAddrs::new();
+    cg.set_local(snap(Some("100.64.1.2"), None, &["0.0.0.0:4000"]));
+    cg.set_manual_forward(Some(8000));
+    report(&mut cg, 1, "9.9.9.9:6000");
+    assert_eq!(cg.nat_view(NOW), NatView::BehindCgnat);
+    let mut white = OwnAddrs::new();
+    white.set_local(snap(Some("8.8.4.4"), None, &["0.0.0.0:4000"]));
+    white.set_manual_forward(Some(8000));
+    assert_eq!(white.nat_view(NOW), NatView::Public);
+    assert_eq!(publish(&white), vec![(sa("8.8.4.4:4000"), false, false)]);
+}
+
+#[test]
+fn manual_forward_zero_is_none() {
+    let mut o = natted();
+    report(&mut o, 1, "9.9.9.9:6000");
+    o.set_manual_forward(Some(8000));
+    assert_eq!(o.nat_view(NOW), NatView::ManualForward);
+    o.set_manual_forward(Some(0));
+    assert_eq!(o.nat_view(NOW), NatView::Unknown);
+    assert_eq!(publish(&o), vec![(sa("9.9.9.9:6000"), false, true)]);
+    // Some(0) с самого начала тоже ничего не включает
+    let mut z = natted();
+    z.set_manual_forward(Some(0));
+    report(&mut z, 1, "9.9.9.9:6000");
+    assert_eq!(z.nat_view(NOW), NatView::Unknown);
+}
+
+#[test]
+fn manual_forward_survives_set_local() {
+    let mut o = natted();
+    o.set_manual_forward(Some(8000));
+    // смена сети сбрасывает наблюдения, но не настройку пользователя
+    assert!(o.set_local(snap(Some("192.168.7.2"), None, &["0.0.0.0:4000"])));
+    assert_eq!(o.nat_view(NOW), NatView::Unknown);
+    report(&mut o, 1, "9.9.9.9:6000");
+    assert_eq!(o.nat_view(NOW), NatView::ManualForward);
+    assert_eq!(publish(&o), vec![(sa("9.9.9.9:8000"), false, true)]);
+}
+
+#[test]
+fn stable_reachable_includes_manual() {
+    let mut o = natted();
+    report(&mut o, 1, "9.9.9.9:6000");
+    assert!(!o.stable_reachable(NOW));
+    o.set_manual_forward(Some(8000));
+    assert!(o.stable_reachable(NOW));
+    // без наблюдения достижимости нет
+    let mut n = natted();
+    n.set_manual_forward(Some(8000));
+    assert!(!n.stable_reachable(NOW));
+}

@@ -118,7 +118,7 @@ fn fuzz_smoke_m1() {
             }
             _ => mutate(&mut rng, &valid),
         };
-        match h.pending.on_m1(&input) {
+        match h.pending.on_m1(&input, 1_000_100) {
             Ok(_) => {
                 // только точная копия валидного M1; приглашение потрачено, начинаем заново
                 assert_eq!(input, valid);
@@ -131,7 +131,7 @@ fn fuzz_smoke_m1() {
         }
     }
     // после всех отказов состояние живо: настоящий M1 ещё принимается
-    assert!(h.pending.on_m1(&h.m1).is_ok());
+    assert!(h.pending.on_m1(&h.m1, 1_000_100).is_ok());
     println!("fuzz_smoke_m1: итераций {n}, принято {ok}, отказов {rejected}");
 }
 
@@ -141,7 +141,7 @@ fn fuzz_smoke_m2() {
     let mut rng = XorShift::new(0x0F0F_1234_5678_9ABC);
     let mut h = honest();
     h.pending.begin_session(1_000_100).unwrap();
-    let (m2, _sas, _keys) = h.pending.on_m1(&h.m1).unwrap();
+    let (m2, _sas, _keys) = h.pending.on_m1(&h.m1, 1_000_100).unwrap();
     let token = invite_of(&h.text);
     let mut ok = 0u64;
     for _ in 0..n {

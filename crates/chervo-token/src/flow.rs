@@ -38,13 +38,16 @@ async fn read_exact_n<R: RecvStream, const N: usize>(rx: &mut R) -> Result<[u8; 
 
 /// A: `accept_bi`, прочитать ровно `M1_LEN`, `pending.on_m1`, записать M2.
 /// Перед вызовом на соединение гостевой пары нужен `pending.begin_session`.
-pub async fn inviter_exchange<C: Connection>(
+/// `now` (секунды Unix) вызывается после чтения M1, непосредственно перед `on_m1`: срок
+/// приглашения проверяется по времени приёма M1, а не начала сессии.
+pub async fn inviter_exchange<C: Connection, F: Fn() -> u64 + Send>(
     conn: &C,
     pending: &mut PendingInvite,
+    now: F,
 ) -> Result<(InviteChannel<C>, Sas, InviteeKeys), FlowError> {
     let (mut tx, mut rx) = conn.accept_bi().await?;
     let m1: [u8; M1_LEN] = read_exact_n(&mut rx).await?;
-    let (m2, sas, keys) = pending.on_m1(&m1)?;
+    let (m2, sas, keys) = pending.on_m1(&m1, now())?;
     tx.write_all(&m2).await?;
     Ok((InviteChannel { tx, rx }, sas, keys))
 }

@@ -193,7 +193,9 @@ async fn exchange(
     let side_a = async {
         let conn = a.t.accept().await.unwrap();
         ia.pending.begin_session(now).unwrap();
-        let (mut ch, sas, keys) = inviter_exchange(&conn, &mut ia.pending).await.unwrap();
+        let (mut ch, sas, keys) = inviter_exchange(&conn, &mut ia.pending, || now)
+            .await
+            .unwrap();
         let got = exchange_decision(&mut ch, a_ok).await.unwrap();
         (conn, sas.digits(), keys, got)
     };
@@ -478,7 +480,7 @@ async fn invite_token_holder_after_m1_gets_nothing() {
         // приглашение использовано: Used уже на begin_session, M2 не отправляется
         let r = match ia.pending.begin_session(now) {
             Err(e) => Some(FlowError::Invite(e)),
-            Ok(()) => inviter_exchange(&conn, &mut ia.pending).await.err(),
+            Ok(()) => inviter_exchange(&conn, &mut ia.pending, || now).await.err(),
         };
         conn.close();
         r
@@ -522,8 +524,8 @@ async fn invite_wrong_token_never_connects() {
         })
         .await;
     assert!(
-        matches!(r, Err(TransportError::TimedOut)),
-        "connect должен дать TimedOut"
+        matches!(r, Err(TransportError::NoResponse)),
+        "connect должен дать NoResponse"
     );
     assert!(
         tokio::time::timeout(Duration::from_millis(300), a.t.accept())

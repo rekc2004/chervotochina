@@ -396,3 +396,73 @@ fn texts_present() {
     assert!(NO_PUBLIC_ADDR_TEXT.starts_with("Не удалось определить ваш внешний адрес"));
     assert!(!NEED_TOKEN_TEXT.is_empty() && !NO_PUBLIC_ADDR_TEXT.is_empty());
 }
+
+#[test]
+fn usable_entries_matches_usable() {
+    use chervo_addr::usable_entries;
+    let addrs = vec![
+        known("203.0.113.5:4000", AddrSource::Contact, NOW, false, false),
+        known(
+            "[2001:db8::1]:4000",
+            AddrSource::AddressUpdate,
+            NOW,
+            true,
+            false,
+        ),
+        known(
+            "198.51.100.9:4000",
+            AddrSource::AddressUpdate,
+            NOW,
+            false,
+            true,
+        ),
+        known(
+            "198.51.100.1:4000",
+            AddrSource::AddressUpdate,
+            NOW,
+            false,
+            false,
+        ),
+        known("192.0.2.77:4000", AddrSource::Invite, NOW, false, false),
+        // повтор адреса: остаётся первая запись в порядке набора
+        known("203.0.113.5:4000", AddrSource::Contact, NOW, false, false),
+        // просроченная подсказка и просроченный короткоживущий
+        known(
+            "198.51.100.200:4000",
+            AddrSource::AddressUpdate,
+            1,
+            false,
+            true,
+        ),
+        known(
+            "[2001:db8::2]:4000",
+            AddrSource::AddressUpdate,
+            1,
+            true,
+            false,
+        ),
+    ];
+    for now in [
+        NOW,
+        NOW + 1,
+        NOW + HINT_TTL_SECS + 1,
+        NOW + CONTACT_TTL_SECS + 1,
+    ] {
+        let plain = usable(&addrs, now);
+        let rich = usable_entries(&addrs, now);
+        assert_eq!(addrs_of(&rich), plain, "now = {now}");
+    }
+    // флаги сохранены
+    let rich = usable_entries(&addrs, NOW);
+    let hint = rich
+        .iter()
+        .find(|k| k.addr == sa("198.51.100.9:4000"))
+        .unwrap();
+    assert!(hint.hint && hint.source == AddrSource::AddressUpdate);
+    let v6 = rich
+        .iter()
+        .find(|k| k.addr == sa("[2001:db8::1]:4000"))
+        .unwrap();
+    assert!(v6.short_lived);
+    assert!(usable_entries(&[], NOW).is_empty());
+}

@@ -887,6 +887,17 @@ impl FriendBook {
         }
     }
 
+    /// Как `usable_addrs`, но записи с флагами (источник, подсказка): для слоя соединения.
+    /// Неизвестная пара и не `Active` друг: пусто.
+    pub fn usable_known(&self, pair: &PairId, now_unix: u64) -> Vec<KnownAddr> {
+        match self.get(pair) {
+            Some(f) if f.state == FriendState::Active => {
+                chervo_addr::usable_entries(&f.known_addrs, now_unix)
+            }
+            _ => Vec::new(),
+        }
+    }
+
     /// `Findability::NeedToken`, если нет постоянного адреса ни у нас (`own_stable`), ни у друга.
     /// Для не `Active` друга адресов нет (как в `usable_addrs`).
     pub fn findability(

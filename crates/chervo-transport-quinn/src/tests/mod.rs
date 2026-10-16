@@ -14,4 +14,5 @@ mod kit;
 mod knock;
 mod misc;
 mod peers;
+mod race;
 mod tlsx;

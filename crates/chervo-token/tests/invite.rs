@@ -12,7 +12,7 @@ use common::*;
 fn sas_equal_honest() {
     let mut h = honest();
     h.pending.begin_session(1_000_100).unwrap();
-    let (m2, sas_a, keys) = h.pending.on_m1(&h.m1).unwrap();
+    let (m2, sas_a, keys) = h.pending.on_m1(&h.m1, 1_000_100).unwrap();
     assert_eq!(keys.ed, h.b_key.public_key());
     assert_eq!(keys.x, h.b_key.kx_public());
     assert_eq!(m2.len(), M2_LEN);
@@ -27,7 +27,7 @@ fn sas_equal_honest() {
     // два разных приглашения дают разные SAS
     let mut h2 = honest();
     h2.pending.begin_session(1_000_100).unwrap();
-    let (_m2, sas2, _) = h2.pending.on_m1(&h2.m1).unwrap();
+    let (_m2, sas2, _) = h2.pending.on_m1(&h2.m1, 1_000_100).unwrap();
     assert_ne!(sas_a, sas2);
 }
 
@@ -35,7 +35,7 @@ fn sas_equal_honest() {
 fn sas_digits_format() {
     let mut h = honest();
     h.pending.begin_session(1_000_100).unwrap();
-    let (_m2, sas, _) = h.pending.on_m1(&h.m1).unwrap();
+    let (_m2, sas, _) = h.pending.on_m1(&h.m1, 1_000_100).unwrap();
     let d = sas.digits();
     assert_eq!(d.len(), 9);
     assert_eq!(d.as_bytes()[4], b' ');
@@ -52,7 +52,7 @@ fn sas_digits_format() {
     for _ in 0..30 {
         let mut h = honest();
         h.pending.begin_session(1_000_100).unwrap();
-        let (_m2, s, _) = h.pending.on_m1(&h.m1).unwrap();
+        let (_m2, s, _) = h.pending.on_m1(&h.m1, 1_000_100).unwrap();
         let d = s.digits();
         assert_eq!(d.len(), 9);
         distinct.insert(d);
@@ -83,12 +83,15 @@ fn sas_mitm_substituted_token_differs() {
     pend_m.begin_session(1_000_100).unwrap();
 
     // ретрансляция M1 B к A без изменений не проходит
-    assert_eq!(pend_a.on_m1(&m1_b).err(), Some(InviteError::WrongToken));
+    assert_eq!(
+        pend_a.on_m1(&m1_b, 1_000_100).err(),
+        Some(InviteError::WrongToken)
+    );
 
-    let (m2_a, sas_a, _) = pend_a.on_m1(&m1_m).unwrap();
+    let (m2_a, sas_a, _) = pend_a.on_m1(&m1_m, 1_000_100).unwrap();
     let sas_m_side = sess_m.on_m2(&m2_a).unwrap();
     assert_eq!(sas_a, sas_m_side);
-    let (m2_m, sas_m_to_b, _) = pend_m.on_m1(&m1_b).unwrap();
+    let (m2_m, sas_m_to_b, _) = pend_m.on_m1(&m1_b, 1_000_100).unwrap();
     let sas_b = sess_b.on_m2(&m2_m).unwrap();
     assert_eq!(sas_m_to_b, sas_b);
     assert_ne!(sas_a, sas_b, "SAS двух сессий не должны совпасть");
@@ -97,7 +100,7 @@ fn sas_mitm_substituted_token_differs() {
     let (sess_b2, _m1) = InviteeSession::start(&token_m, &b_key).unwrap();
     let mut honest_a = honest();
     honest_a.pending.begin_session(1_000_100).unwrap();
-    let (m2_other, _, _) = honest_a.pending.on_m1(&honest_a.m1).unwrap();
+    let (m2_other, _, _) = honest_a.pending.on_m1(&honest_a.m1, 1_000_100).unwrap();
     assert_eq!(
         sess_b2.on_m2(&m2_other).err(),
         Some(InviteError::CommitMismatch)
@@ -112,7 +115,7 @@ fn m1_wrong_token_hash() {
         let mut m = h.m1;
         m[i] ^= 0x01;
         assert_eq!(
-            h.pending.on_m1(&m).err(),
+            h.pending.on_m1(&m, 1_000_100).err(),
             Some(InviteError::WrongToken),
             "байт {i}"
         );
@@ -120,11 +123,11 @@ fn m1_wrong_token_hash() {
     // M1 от другого приглашения
     let other = honest();
     assert_eq!(
-        h.pending.on_m1(&other.m1).err(),
+        h.pending.on_m1(&other.m1, 1_000_100).err(),
         Some(InviteError::WrongToken)
     );
     // и после отказов настоящий принимается
-    assert!(h.pending.on_m1(&h.m1).is_ok());
+    assert!(h.pending.on_m1(&h.m1, 1_000_100).is_ok());
 }
 
 #[test]
@@ -136,7 +139,7 @@ fn m1_bad_signature() {
         let mut m = h.m1;
         m[i] ^= 0x04;
         assert_eq!(
-            h.pending.on_m1(&m).err(),
+            h.pending.on_m1(&m, 1_000_100).err(),
             Some(InviteError::BadSignature),
             "байт {i}"
         );
@@ -150,7 +153,10 @@ fn m1_bad_signature() {
     m.extend_from_slice(&[7u8; 32]);
     let sig = h.b_key.sign(SignDomain::Invite, &m).unwrap();
     m.extend_from_slice(&sig);
-    assert_eq!(h.pending.on_m1(&m).err(), Some(InviteError::BadSignature));
+    assert_eq!(
+        h.pending.on_m1(&m, 1_000_100).err(),
+        Some(InviteError::BadSignature)
+    );
     // подпись чужим ключом
     let other = key();
     let m = build_m1(
@@ -160,7 +166,10 @@ fn m1_bad_signature() {
         &[7u8; 32],
         &other,
     );
-    assert_eq!(h.pending.on_m1(&m).err(), Some(InviteError::BadSignature));
+    assert_eq!(
+        h.pending.on_m1(&m, 1_000_100).err(),
+        Some(InviteError::BadSignature)
+    );
     // контроль: правильно подписанный принимается
     let m = build_m1(
         &th,
@@ -169,7 +178,7 @@ fn m1_bad_signature() {
         &[7u8; 32],
         &h.b_key,
     );
-    assert!(h.pending.on_m1(&m).is_ok());
+    assert!(h.pending.on_m1(&m, 1_000_100).is_ok());
 }
 
 #[test]
@@ -212,13 +221,13 @@ fn m1_bad_keys() {
     for (name, m) in cases {
         assert_eq!(m.len(), M1_LEN);
         assert_eq!(
-            h.pending.on_m1(&m).err(),
+            h.pending.on_m1(&m, 1_000_100).err(),
             Some(InviteError::BadKey),
             "{name}"
         );
     }
     // отказы не расходуют приглашение
-    assert!(h.pending.on_m1(&h.m1).is_ok());
+    assert!(h.pending.on_m1(&h.m1, 1_000_100).is_ok());
 }
 
 #[test]
@@ -232,7 +241,7 @@ fn m1_every_wrong_length() {
         let mut v = h.m1.to_vec();
         v.resize(n, 0xAA);
         assert_eq!(
-            h.pending.on_m1(&v).err(),
+            h.pending.on_m1(&v, 1_000_100).err(),
             Some(InviteError::Malformed),
             "длина {n}"
         );
@@ -242,20 +251,23 @@ fn m1_every_wrong_length() {
         let mut m = h.m1;
         m[i] = val;
         assert_eq!(
-            h.pending.on_m1(&m).err(),
+            h.pending.on_m1(&m, 1_000_100).err(),
             Some(InviteError::Malformed),
             "{i}:{val}"
         );
     }
-    assert!(h.pending.on_m1(&h.m1).is_ok());
+    assert!(h.pending.on_m1(&h.m1, 1_000_100).is_ok());
 }
 
 #[test]
 fn m1_accepted_once() {
     let mut h = honest();
     h.pending.begin_session(1_000_100).unwrap();
-    assert!(h.pending.on_m1(&h.m1).is_ok());
-    assert_eq!(h.pending.on_m1(&h.m1).err(), Some(InviteError::Used));
+    assert!(h.pending.on_m1(&h.m1, 1_000_100).is_ok());
+    assert_eq!(
+        h.pending.on_m1(&h.m1, 1_000_100).err(),
+        Some(InviteError::Used)
+    );
     // ни новая сессия, ни другой M1 не оживляют приглашение
     assert_eq!(
         h.pending.begin_session(1_000_100).err(),
@@ -265,19 +277,31 @@ fn m1_accepted_once() {
         let token = invite_of(&h.text);
         InviteeSession::start(&token, &key()).unwrap()
     };
-    assert_eq!(h.pending.on_m1(&other_m1).err(), Some(InviteError::Used));
+    assert_eq!(
+        h.pending.on_m1(&other_m1, 1_000_100).err(),
+        Some(InviteError::Used)
+    );
     // даже мусор получает Used, а не Malformed
-    assert_eq!(h.pending.on_m1(&[]).err(), Some(InviteError::Used));
+    assert_eq!(
+        h.pending.on_m1(&[], 1_000_100).err(),
+        Some(InviteError::Used)
+    );
 }
 
 #[test]
 fn m1_without_session() {
     let mut h = honest();
-    assert_eq!(h.pending.on_m1(&h.m1).err(), Some(InviteError::NoSession));
-    assert_eq!(h.pending.on_m1(&[]).err(), Some(InviteError::NoSession));
+    assert_eq!(
+        h.pending.on_m1(&h.m1, 1_000_100).err(),
+        Some(InviteError::NoSession)
+    );
+    assert_eq!(
+        h.pending.on_m1(&[], 1_000_100).err(),
+        Some(InviteError::NoSession)
+    );
     // отказ не расходует M1: после begin_session тот же M1 принимается
     h.pending.begin_session(1_000_100).unwrap();
-    assert!(h.pending.on_m1(&h.m1).is_ok());
+    assert!(h.pending.on_m1(&h.m1, 1_000_100).is_ok());
 }
 
 #[test]
@@ -303,7 +327,7 @@ fn session_limits() {
 fn m2_commit_mismatch() {
     let mut h = honest();
     h.pending.begin_session(1_000_100).unwrap();
-    let (m2, _sas, _) = h.pending.on_m1(&h.m1).unwrap();
+    let (m2, _sas, _) = h.pending.on_m1(&h.m1, 1_000_100).unwrap();
     // два одинаковых сеанса B нужны, чтобы проверить несколько искажений: `on_m2` расходует состояние
     let token = invite_of(&h.text);
     for i in 2..M2_LEN {

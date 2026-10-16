@@ -143,6 +143,18 @@ impl Connection for MemConn {
     }
 
     fn close(&self) {}
+
+    fn conn_id(&self) -> u64 {
+        0
+    }
+
+    fn is_initiator(&self) -> bool {
+        false
+    }
+
+    fn closed(&self) -> impl Future<Output = ()> + Send {
+        std::future::pending()
+    }
 }
 
 struct Link {

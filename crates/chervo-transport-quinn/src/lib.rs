@@ -31,10 +31,13 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use chervo_identity::{KxPeer, PairId};
-use chervo_transport::{PeerAddr, PeerFilter, Transport, TransportError};
+use chervo_transport::{
+    EventSource, ManagedTransport, PeerAddr, PeerFilter, Transport, TransportError,
+};
 use quinn::Runtime;
 use tokio::sync::{Semaphore, broadcast, mpsc};
 
+pub use chervo_transport::{DuplicatePairError, TransportEvent};
 pub use conn::{QuinnConn, QuinnRecv, QuinnSend};
 pub use knock::window_at;
 
@@ -71,18 +74,6 @@ impl std::fmt::Display for ClockOffsetError {
 }
 
 impl std::error::Error for ClockOffsetError {}
-
-/// В наборе пар две записи с одним `PairId`: набор отвергнут целиком, прежний остаётся.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DuplicatePairError;
-
-impl std::fmt::Display for DuplicatePairError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("duplicate pair id in peer set")
-    }
-}
-
-impl std::error::Error for DuplicatePairError {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuinnConfig {
@@ -130,6 +121,10 @@ pub struct QuinnConfig {
     /// Записей кэша виденных стуков на одну пару (страховка памяти; сверх этого ещё
     /// не больше 32 nonce на пару и окно).
     pub replay_capacity: usize,
+    /// Гонка адресов в одном `connect`: адрес `i` стартует через `i * connect_stagger`.
+    pub connect_stagger: Duration,
+    /// Не больше стольких различных адресов на один `connect` (остальные отбрасываются).
+    pub max_race: usize,
 }
 
 impl Default for QuinnConfig {
@@ -159,28 +154,10 @@ impl Default for QuinnConfig {
             knock_resend_after: Duration::from_secs(1),
             admit_capacity: 1024,
             replay_capacity: 4096,
+            connect_stagger: Duration::from_millis(250),
+            max_race: 8,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum TransportEvent {
-    RemoteAddrChanged {
-        pair: PairId,
-    },
-    ConnectionReplaced {
-        pair: PairId,
-    },
-    /// Стук пары пришёл с верным тегом, но в окне вне допуска: у кого-то сбиты часы.
-    ClockSkewSuspected {
-        pair: PairId,
-    },
-    /// Живое соединение закрыто: тройки `(пара, наш X25519, X25519 собеседника)` нет в наборе
-    /// после `set_peers` (удаление, блокировка, смена ключа).
-    PeerRemoved {
-        pair: PairId,
-    },
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -219,6 +196,10 @@ pub struct TransportStats {
     pub connect_silent: u64,
     /// Живые соединения, закрытые из-за `set_peers` без их тройки.
     pub removed_closed: u64,
+    /// Серии повторных стуков (`reknock`), реально запущенные (с объединением вызовов).
+    pub reknock_runs: u64,
+    /// Установленные соединения гонки, закрытые отказом до KK (проиграли первому).
+    pub race_losers: u64,
 }
 
 /// Только тесты: детерминированная гонка между концом KK и `promote`.
@@ -246,6 +227,10 @@ pub(crate) struct Inner {
     pub(crate) preauth: Arc<Semaphore>,
     pub(crate) gate: KkGate,
     pub(crate) registry: Registry,
+    /// Пары с идущим исходящим звонком (не больше одного на пару).
+    pub(crate) dialing: Mutex<std::collections::HashSet<PairId>>,
+    /// Объединение повторных стуков: (серия идёт, нужен ещё один прогон).
+    pub(crate) reknock: Mutex<(bool, bool)>,
     pub(crate) queue_tx: mpsc::Sender<QuinnConn>,
     queue_rx: tokio::sync::Mutex<mpsc::Receiver<QuinnConn>>,
     pub(crate) client_quic: Arc<quinn::crypto::rustls::QuicClientConfig>,
@@ -339,6 +324,8 @@ impl QuinnTransport {
             preauth: Arc::new(Semaphore::new(cfg.max_preauth.max(1))),
             gate: KkGate::new(&cfg, counters.clone()),
             registry: Registry::default(),
+            dialing: Mutex::new(std::collections::HashSet::new()),
+            reknock: Mutex::new((false, false)),
             peers: Mutex::new(Arc::new(Vec::new())),
             #[cfg(test)]
             promote_hook: Mutex::new(None),
@@ -447,6 +434,41 @@ impl QuinnTransport {
 impl Drop for QuinnTransport {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+/// Подписка на события `QuinnTransport` для `ManagedTransport`.
+pub struct QuinnEvents(broadcast::Receiver<TransportEvent>);
+
+impl fmt::Debug for QuinnEvents {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("QuinnEvents(..)")
+    }
+}
+
+impl EventSource for QuinnEvents {
+    async fn recv(&mut self) -> Option<TransportEvent> {
+        match self.0.recv().await {
+            Ok(e) => Some(e),
+            Err(broadcast::error::RecvError::Lagged(_)) => Some(TransportEvent::Lagged),
+            Err(broadcast::error::RecvError::Closed) => None,
+        }
+    }
+}
+
+impl ManagedTransport for QuinnTransport {
+    type Events = QuinnEvents;
+
+    fn set_peers(&self, peers: Vec<KxPeer>) -> Result<(), DuplicatePairError> {
+        QuinnTransport::set_peers(self, peers)
+    }
+
+    fn reknock(&self) {
+        QuinnTransport::reknock(self);
+    }
+
+    fn subscribe(&self) -> Self::Events {
+        QuinnEvents(self.inner.events.subscribe())
     }
 }
 
