@@ -27,8 +27,10 @@ use crate::{KNOCK_ACCEPT_SPAN, KNOCK_HINT_SPAN, KNOCK_WINDOW_SECS, QuinnConfig, 
 
 /// Сколько раз цикл фильтра опрашивает гнездо подряд без единого пропущенного пакета.
 pub(crate) const MAX_FILTER_POLLS: usize = 16;
-/// Жизнь записи кэша повторов (4 окна).
+/// Базовая жизнь записи кэша повторов (4 окна); к ней добавляется модуль поправки часов.
 const REPLAY_LIFETIME: Duration = Duration::from_secs(120);
+/// Предел добавки к жизни записи за счёт поправки (защита от переполнения `Instant`).
+const REPLAY_OFFSET_CAP: Duration = Duration::from_secs(30 * 24 * 3600);
 /// Событие «сбиты часы» не чаще раза в минуту на пару.
 const SKEW_EVENT_EVERY: Duration = Duration::from_secs(60);
 /// Попыток отправки стука при `WouldBlock`.
@@ -143,21 +145,29 @@ impl Keyring {
 // Кэш повторов
 // ---------------------------------------------------------------------------------------------
 
-type ReplayKey = (PairId, [u8; 16]);
+pub(crate) type ReplayKey = (PairId, [u8; 16]);
 
-enum ReplayErr {
+pub(crate) enum ReplayErr {
     Seen,
     Full,
 }
 
-struct Replay {
+pub(crate) struct Replay {
     set: HashSet<ReplayKey>,
+    /// (момент, когда запись можно забыть, ключ).
     order: VecDeque<(Instant, ReplayKey)>,
     capacity: usize,
 }
 
+/// Срок жизни записи: стук принимается по исправленному и по системному времени, то есть в двух
+/// интервалах по 90 с, сдвинутых на поправку; запись держится дольше обоих.
+pub(crate) fn replay_lifetime(offset_ms: i64) -> Duration {
+    let extra = Duration::from_millis(offset_ms.unsigned_abs()).min(REPLAY_OFFSET_CAP);
+    REPLAY_LIFETIME + extra
+}
+
 impl Replay {
-    fn new(capacity: usize) -> Self {
+    pub(crate) fn new(capacity: usize) -> Self {
         Self {
             set: HashSet::new(),
             order: VecDeque::new(),
@@ -165,9 +175,17 @@ impl Replay {
         }
     }
 
-    fn check_insert(&mut self, key: ReplayKey, now: Instant) -> Result<(), ReplayErr> {
+    /// Новая запись; `offset_ms`: поправка часов на момент приёма.
+    pub(crate) fn check_insert(
+        &mut self,
+        key: ReplayKey,
+        now: Instant,
+        offset_ms: i64,
+    ) -> Result<(), ReplayErr> {
+        // Порядок очереди может нарушиться при смене поправки: это лишь задерживает удаление
+        // отдельных записей, раньше срока запись не удаляется.
         while let Some((t, k)) = self.order.front().copied() {
-            if now.saturating_duration_since(t) < REPLAY_LIFETIME {
+            if t > now {
                 break;
             }
             self.order.pop_front();
@@ -179,9 +197,25 @@ impl Replay {
         if self.set.len() >= self.capacity {
             return Err(ReplayErr::Full);
         }
+        let until = now
+            .checked_add(replay_lifetime(offset_ms))
+            .or_else(|| now.checked_add(REPLAY_LIFETIME))
+            .unwrap_or(now);
         self.set.insert(key);
-        self.order.push_back((now, key));
+        self.order.push_back((until, key));
         Ok(())
+    }
+
+    /// Поправка сменилась: у уже внесённых записей интервал приёма сдвинулся, продлить срок.
+    pub(crate) fn extend_for_offset(&mut self, now: Instant, offset_ms: i64) {
+        let Some(until) = now.checked_add(replay_lifetime(offset_ms)) else {
+            return;
+        };
+        for (t, _) in &mut self.order {
+            if *t < until {
+                *t = until;
+            }
+        }
     }
 }
 
@@ -392,7 +426,10 @@ impl KnockState {
     }
 
     pub(crate) fn set_offset(&self, offset_ms: i64) {
-        self.offset_ms.store(offset_ms, Ordering::Relaxed);
+        let old = self.offset_ms.swap(offset_ms, Ordering::Relaxed);
+        if old != offset_ms {
+            lock(&self.replay).extend_for_offset(Instant::now(), offset_ms);
+        }
     }
 
     pub(crate) fn offset(&self) -> i64 {
@@ -526,19 +563,20 @@ impl KnockState {
             Counters::bump(&self.counters.knock_bad);
             return true;
         };
+        // подсказка о часах только для пары, прошедшей `PeerFilter`
+        if !self.filter.is_allowed(&pair) {
+            return true;
+        }
         if !accept {
             Counters::bump(&self.counters.knock_skewed);
             self.skew_event(pair);
-            return true;
-        }
-        if !self.filter.is_allowed(&pair) {
             return true;
         }
         let Some(nonce) = seg.get(16..32).and_then(|s| <[u8; 16]>::try_from(s).ok()) else {
             return true;
         };
         let now = Instant::now();
-        match lock(&self.replay).check_insert((pair, nonce), now) {
+        match lock(&self.replay).check_insert((pair, nonce), now, off) {
             Ok(()) => {}
             Err(ReplayErr::Seen) => {
                 Counters::bump(&self.counters.knock_replay);
@@ -573,8 +611,34 @@ impl KnockState {
         }
     }
 
+    /// Вырезает из датаграммы (с сегментами GRO) опознанные стуки, остальное сдвигает к началу.
+    /// Возвращает новую длину.
+    fn strip_knocks(&self, addr: SocketAddr, buf: &mut [u8], len: usize, stride: usize) -> usize {
+        let len = len.min(buf.len());
+        let stride = stride.max(1);
+        let (mut out, mut pos) = (0usize, 0usize);
+        while pos < len {
+            let end = pos.saturating_add(stride).min(len);
+            let is_knock = end - pos == KNOCK_LEN
+                && buf.get(pos..end).is_some_and(|s| self.try_knock(addr, s));
+            if !is_knock {
+                if out != pos {
+                    buf.copy_within(pos..end, out);
+                }
+                out += end - pos;
+            }
+            pos = end;
+        }
+        out
+    }
+
     /// Фильтр партии: оставляет пропущенные записи в начале срезов, возвращает их число.
-    fn filter_batch(&self, bufs: &mut [IoSliceMut<'_>], meta: &mut [RecvMeta], n: usize) -> usize {
+    pub(crate) fn filter_batch(
+        &self,
+        bufs: &mut [IoSliceMut<'_>],
+        meta: &mut [RecvMeta],
+        n: usize,
+    ) -> usize {
         let n = n.min(bufs.len()).min(meta.len());
         let mut kept = 0usize;
         for i in 0..n {
@@ -590,17 +654,26 @@ impl KnockState {
                 }
                 adm.classify(addr, now)
             };
-            let data = bufs.get(i).and_then(|b| b.get(..m.len));
+            let stride = if m.stride == 0 { m.len } else { m.stride };
             let keep = match gate {
-                Gate::Open => true,
-                Gate::Pass => {
-                    // 48 байт, опознанных как стук, потребляются; остальное проходит
-                    !(m.len == KNOCK_LEN && data.is_some_and(|d| self.try_knock(addr, d)))
+                // Open и Pass: стук тоже распознаётся (досланные стуки, повтор после `rebind`
+                // попадают в кэш повторов), опознанные сегменты вырезаются, остальное проходит.
+                Gate::Open | Gate::Pass => {
+                    let new_len = bufs
+                        .get_mut(i)
+                        .map_or(m.len, |b| self.strip_knocks(addr, b, m.len, stride));
+                    if new_len != m.len
+                        && let Some(mm) = meta.get_mut(i)
+                    {
+                        mm.len = new_len;
+                    }
+                    new_len > 0
                 }
                 Gate::Closed => {
+                    let data = bufs.get(i).and_then(|b| b.get(..m.len));
                     let mut knocked = false;
                     if let Some(d) = data {
-                        for seg in d.chunks(m.stride.max(1)) {
+                        for seg in d.chunks(stride.max(1)) {
                             if seg.len() == KNOCK_LEN && self.try_knock(addr, seg) {
                                 knocked = true;
                             }

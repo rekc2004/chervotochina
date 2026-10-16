@@ -514,6 +514,215 @@ async fn simultaneous_knock_connect() {
     }
 }
 
+/// Повтор стука, ушедшего на адрес в состоянии `Open` (досланный при медленном рукопожатии или
+/// после `rebind`), с другого адреса не даёт допуска: стук на `Open`-адресе тоже в кэше повторов.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn silent_to_replay_of_knock_sent_to_open_address() {
+    let on = silent("replay_open", |req| async move {
+        let k = Keys::new();
+        let b = bind(kc(req), vec![k.peer_b()]);
+        let dest = addr_of(&b);
+        let w = now_window();
+        let first = friend_knock(&k, w);
+        let resent = friend_knock(&k, w);
+        assert_ne!(first, resent);
+        let friend_sock = Attacker::new();
+        friend_sock.send(dest, &first);
+        sleep_ms(200).await;
+        // допуск друга открыт; второй стук приходит на Open-адрес
+        friend_sock.send(dest, &resent);
+        sleep_ms(200).await;
+        let at = Attacker::new();
+        at.send(dest, &resent);
+        sleep_ms(100).await;
+        let _ = at.initial(dest, Duration::from_secs(2)).await;
+        Outcome {
+            received: at.received(),
+            stats: b.stats(),
+            skew_event: false,
+        }
+    })
+    .await;
+    assert!(on.stats.knock_replay >= 1, "knock_replay = 0");
+    assert_eq!(
+        on.stats.knock_ok, 2,
+        "оба стука друга приняты на его адресе"
+    );
+    assert_eq!(on.stats.retry_sent, 0);
+}
+
+/// Состояние стука без сети: ключи вызываемого, допуск открывается прямым стуком.
+fn bare_state(
+    k: &Keys,
+    filter: Arc<dyn chervo_transport::PeerFilter>,
+) -> (Arc<crate::knock::KnockState>, Arc<crate::limits::Counters>) {
+    use quinn::Runtime;
+    let counters = Arc::new(crate::limits::Counters::default());
+    let (events, _) = tokio::sync::broadcast::channel(8);
+    let std_sock = std::net::UdpSocket::bind(lo()).unwrap();
+    std_sock.set_nonblocking(true).unwrap();
+    let raw = quinn::TokioRuntime.wrap_udp_socket(std_sock).unwrap();
+    let state = crate::knock::KnockState::new(&kc(true), counters.clone(), filter, events, raw);
+    state.set_peers(&[k.peer_b()]);
+    (state, counters)
+}
+
+fn one_batch(
+    state: &crate::knock::KnockState,
+    addr: std::net::SocketAddr,
+    payload: &[u8],
+    stride: usize,
+) -> (usize, usize, Vec<u8>) {
+    use quinn::udp::RecvMeta;
+    use std::io::IoSliceMut;
+    let mut storage = [0u8; 2048];
+    storage[..payload.len()].copy_from_slice(payload);
+    let mut bufs = [IoSliceMut::new(&mut storage)];
+    let mut meta = [RecvMeta::default()];
+    meta[0].addr = addr;
+    meta[0].len = payload.len();
+    meta[0].stride = stride;
+    let kept = state.filter_batch(&mut bufs, &mut meta, 1);
+    let len = meta[0].len;
+    let data = bufs[0][..len].to_vec();
+    (kept, len, data)
+}
+
+/// Сегменты GRO на `Open`/`Pass`-адресе разбираются: стуки вырезаются и попадают в кэш повторов,
+/// прочие сегменты проходят.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gro_segments_on_open_address() {
+    let k = Keys::new();
+    let (state, counters) = bare_state(&k, Arc::new(AllowAll));
+    let w = now_window();
+    let friend: std::net::SocketAddr = "127.0.0.1:40001".parse().unwrap();
+    let other: std::net::SocketAddr = "127.0.0.1:40002".parse().unwrap();
+    let rd = |c: &std::sync::atomic::AtomicU64| c.load(Ordering::Relaxed);
+    // допуск друга
+    let (kept, ..) = one_batch(&state, friend, &friend_knock(&k, w), 48);
+    assert_eq!(kept, 0);
+    assert_eq!(rd(&counters.knock_ok), 1);
+    // два склеенных стука на Open-адресе: оба потреблены, quinn ничего не получает
+    let (k2, k3) = (friend_knock(&k, w), friend_knock(&k, w));
+    let both: Vec<u8> = [k2, k3].concat();
+    let (kept, ..) = one_batch(&state, friend, &both, 48);
+    assert_eq!(kept, 0, "склеенные стуки отданы quinn");
+    assert_eq!(rd(&counters.knock_ok), 3);
+    // стук и обычный пакет: проходит только обычный, без искажений
+    let (k4, junk) = (friend_knock(&k, w), [0x5Au8; 48]);
+    let mixed: Vec<u8> = [&junk[..], &k4[..]].concat();
+    let (kept, len, data) = one_batch(&state, friend, &mixed, 48);
+    assert_eq!((kept, len), (1, 48));
+    assert_eq!(data, junk);
+    // стук раньше короткого последнего сегмента: короткий сдвигается на место стука
+    let (k5, tail) = (friend_knock(&k, w), [0xA5u8; 20]);
+    let mixed: Vec<u8> = [&k5[..], &tail[..]].concat();
+    let (kept, len, data) = one_batch(&state, friend, &mixed, 48);
+    assert_eq!((kept, len), (1, 20));
+    assert_eq!(data, tail);
+    // повтор любого из них с другого адреса: допуска нет
+    let before = rd(&counters.knock_ok);
+    for knock in [k2, k3, k4, k5] {
+        let (kept, ..) = one_batch(&state, other, &knock, 48);
+        assert_eq!(kept, 0);
+    }
+    assert_eq!(rd(&counters.knock_ok), before, "повтор дал допуск");
+    assert_eq!(rd(&counters.knock_replay), 4);
+    let (kept, ..) = one_batch(&state, other, &[7u8; 100], 100);
+    assert_eq!(kept, 0, "чужой адрес допущен");
+}
+
+/// Жизнь записи кэша повторов покрывает оба окна приёма при поправке часов больше 30 с.
+#[test]
+fn replay_lifetime_covers_offset() {
+    use crate::knock::{Replay, ReplayErr};
+    use std::time::Instant;
+    let t0 = Instant::now();
+    let s = Duration::from_secs;
+    let key = (chervo_identity::PairId::generate().unwrap(), [1u8; 16]);
+    let seen = |r: &mut Replay, at: Duration, off: i64| {
+        matches!(r.check_insert(key, t0 + at, off), Err(ReplayErr::Seen))
+    };
+
+    // без поправки 120 с хватает, дальше запись забывается
+    let mut r = Replay::new(8);
+    assert!(r.check_insert(key, t0, 0).is_ok());
+    assert!(seen(&mut r, s(119), 0));
+    assert!(!seen(&mut r, s(121), 0));
+
+    // поправка +-300 с: повтор в позднем интервале (спустя 121 с и 419 с) отвергается
+    for off in [300_000i64, -300_000] {
+        let mut r = Replay::new(8);
+        assert!(r.check_insert(key, t0, off).is_ok());
+        assert!(seen(&mut r, s(121), off), "off={off}: забыт через 121 с");
+        assert!(seen(&mut r, s(419), off), "off={off}: забыт через 419 с");
+        assert!(
+            !seen(&mut r, s(421), off),
+            "off={off}: не забыт после срока"
+        );
+    }
+
+    // поправка задана после внесения записи: срок продлевается
+    let mut r = Replay::new(8);
+    assert!(r.check_insert(key, t0, 0).is_ok());
+    r.extend_for_offset(t0 + s(10), 300_000);
+    assert!(seen(&mut r, s(300), 0), "забыт после смены поправки");
+}
+
+/// Подсказка о расхождении часов только после `PeerFilter`: заблокированная пара её не вызывает.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn blocked_pair_no_skew_hint() {
+    let k = Keys::new();
+    let filter = Arc::new(BlockSet::default());
+    filter.0.lock().unwrap().insert(k.pid);
+    let b = bind_with(kc(true), vec![k.peer_b()], filter);
+    let mut ev = b.events();
+    let at = Attacker::new();
+    at.send(addr_of(&b), &friend_knock(&k, now_window() - 2));
+    sleep_ms(300).await;
+    assert_eq!(b.stats().knock_skewed, 0);
+    assert!(ev.try_recv().is_err(), "событие для заблокированной пары");
+    // контроль: у разрешённой пары тот же стук даёт подсказку
+    let b2 = bind(kc(true), vec![k.peer_b()]);
+    let mut ev2 = b2.events();
+    at.send(addr_of(&b2), &friend_knock(&k, now_window() - 2));
+    sleep_ms(300).await;
+    assert_eq!(b2.stats().knock_skewed, 1);
+    assert!(matches!(
+        ev2.try_recv(),
+        Ok(TransportEvent::ClockSkewSuspected { .. })
+    ));
+}
+
+/// При `knock_required: true` слой KK по-прежнему работает: допущенный верным стуком сырой клиент
+/// с чужими ключами KK отвергается, друг проходит. Стук выводится из тех же ключей, что и KK, поэтому
+/// «верный стук, но неверная пара» достижим только как перехваченный стук друга у посторонних
+/// ключей KK.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn knock_gate_then_kk_rejects_stranger() {
+    let k = Keys::new();
+    let b = Arc::new(bind(kc(true), vec![k.peer_b()]));
+    let dest = addr_of(&b);
+    // посторонний с копией стука друга (допуск открыт), но ключами KK не той пары
+    let at = Attacker::new();
+    at.send(dest, &friend_knock(&k, now_window()));
+    sleep_ms(200).await;
+    let mut raw = raw_start(&at.ep, dest, &stranger_peer(k.pid, k.b.kx_public)).await;
+    let (bytes, seen) = drain(&mut raw.rx, Duration::from_secs(4)).await;
+    assert!(bytes.is_empty(), "посторонний получил ответ KK");
+    assert_eq!(seen, REFUSED);
+    assert_eq!(b.stats().knock_ok, 1);
+    assert_eq!(b.stats().auth_ok, 0);
+    assert!(b.stats().auth_failed >= 1);
+    // друг со стуком проходит
+    let a = bind(kc(true), vec![k.peer_a()]);
+    let b2 = b.clone();
+    let acc = tokio::spawn(async move { b2.accept().await });
+    a.connect(&peer_addr(k.pid, &b)).await.unwrap();
+    acc.await.unwrap().unwrap();
+    assert_eq!(b.stats().auth_ok, 1);
+}
+
 /// Модульный: фильтр уступает исполнителю под потоком мусора.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn filter_yields_under_flood() {

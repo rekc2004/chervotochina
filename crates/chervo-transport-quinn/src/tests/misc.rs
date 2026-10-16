@@ -11,10 +11,19 @@ use super::kit::*;
 use crate::conn::ekm;
 use crate::{QuinnConfig, QuinnConn, QuinnTransport, TransportEvent};
 
+/// Тесты через `connect` идут со стуком; сырые клиенты берут `raw_cfg()`.
 fn cfg() -> QuinnConfig {
     QuinnConfig {
         auth_deadline: Duration::from_secs(5),
+        knock_required: true,
         ..test_cfg()
+    }
+}
+
+fn raw_cfg() -> QuinnConfig {
+    QuinnConfig {
+        knock_required: false,
+        ..cfg()
     }
 }
 
@@ -214,7 +223,7 @@ async fn preauth_semaphore() {
 async fn duplicate_closed_with_code_for_authenticated_peer() {
     // сырой звонящий дважды проходит KK той же парой: старое закрывается кодом CLOSE_DUPLICATE
     let k = Keys::new();
-    let b = bind(cfg(), vec![k.peer_b()]);
+    let b = bind(raw_cfg(), vec![k.peer_b()]);
     let mut ev = b.events();
     let ep = raw_endpoint();
     let (conn1, _) = raw_full(&ep, addr_of(&b), &k.peer_a()).await;
