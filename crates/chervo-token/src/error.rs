@@ -107,6 +107,41 @@ impl fmt::Display for FlowError {
 
 impl std::error::Error for FlowError {}
 
+/// Ошибки обмена ADDR_INFO.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AddrFlowError {
+    Transport(TransportError),
+    /// Поток закончился раньше, чем задано длиной кадра.
+    Truncated,
+    Malformed,
+    /// После кадра в потоке есть ещё данные.
+    TrailingData,
+    /// Соединение принадлежит не той паре.
+    WrongPeer,
+}
+
+impl fmt::Display for AddrFlowError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let text = match self {
+            Self::Transport(_) => "address info transport error",
+            Self::Truncated => "address info truncated",
+            Self::Malformed => "malformed address info",
+            Self::TrailingData => "address info has trailing data",
+            Self::WrongPeer => "address info for another peer",
+        };
+        f.write_str(text)
+    }
+}
+
+impl std::error::Error for AddrFlowError {}
+
+impl From<TransportError> for AddrFlowError {
+    fn from(e: TransportError) -> Self {
+        Self::Transport(e)
+    }
+}
+
 impl From<TransportError> for FlowError {
     fn from(e: TransportError) -> Self {
         Self::Transport(e)

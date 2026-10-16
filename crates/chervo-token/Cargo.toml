@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+chervo-addr.workspace = true
 chervo-identity.workspace = true
 chervo-transport.workspace = true
 blake2.workspace = true

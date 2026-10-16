@@ -2,6 +2,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use chervo_identity::{KK_MSG2_LEN, PairId, kk_initiate};
 use chervo_transport::{PeerAddr, TransportError};
@@ -166,28 +167,29 @@ async fn caller_handshake(
     Ok((ours_public, theirs_public))
 }
 
-/// После своего `rebind`: стук по каждому живому соединению с нового гнезда (первый сразу,
+/// После смены своего адреса или `rebind`: стук по каждому живому соединению (первый сразу,
 /// остальные в моменты `resend`, `3*resend`), чтобы собеседник допустил новый адрес.
+/// Все стуки уходят из одной задачи на `inner.rt`; первый тоже через `send`, который
+/// при `WouldBlock` ждёт готовности гнезда, поэтому он не теряется на занятом гнезде.
 pub(crate) fn reknock_live(inner: &Arc<Inner>) {
     if !inner.knock.required {
         return;
     }
     let targets = inner.registry.live_remotes();
-    for (pair, addr) in &targets {
-        if let Some(k) = inner.knock.make_knock(pair, false) {
-            inner.knock.send_now(*addr, &k);
-        }
-    }
-    if targets.is_empty() || tokio::runtime::Handle::try_current().is_err() {
+    if targets.is_empty() {
         return;
     }
-    let inner = inner.clone();
-    tokio::spawn(async move {
+    let task_inner = inner.clone();
+    inner.rt.spawn(async move {
+        let inner = task_inner;
         let t0 = Instant::now();
         let resend = inner.cfg.knock_resend_after;
-        for (n, at) in [resend, resend.saturating_mul(3)].into_iter().enumerate() {
+        for (n, at) in [Duration::ZERO, resend, resend.saturating_mul(3)]
+            .into_iter()
+            .enumerate()
+        {
             sleep_until(t0 + at).await;
-            let raw = n == 1 && inner.knock.offset() != 0;
+            let raw = n == 2 && inner.knock.offset() != 0;
             for (pair, addr) in &targets {
                 if let Some(k) = inner.knock.make_knock(pair, raw) {
                     inner.knock.send(*addr, &k).await;

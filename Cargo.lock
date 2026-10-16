@@ -319,6 +319,9 @@ dependencies = [
 [[package]]
 name = "chervo-addr"
 version = "0.0.0"
+dependencies = [
+ "chervo-identity",
+]
 
 [[package]]
 name = "chervo-cli"
@@ -397,6 +400,7 @@ name = "chervo-token"
 version = "0.0.0"
 dependencies = [
  "blake2",
+ "chervo-addr",
  "chervo-identity",
  "chervo-transport",
  "getrandom 0.4.3",

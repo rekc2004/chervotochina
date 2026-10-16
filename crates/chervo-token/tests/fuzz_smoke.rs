@@ -5,8 +5,9 @@
 mod common;
 
 use chervo_token::{
-    InviteeSession, M1_LEN, RevocationReason, Token, decode, decode_decision, encode_invite_bytes,
-    encode_revocation_bytes, issue_invite, issue_revocation,
+    InviteeSession, M1_LEN, RevocationReason, Token, decode, decode_addr_update_bin,
+    decode_decision, encode_addr_update_bytes, encode_invite_bytes, encode_revocation_bytes,
+    issue_addr_update, issue_invite, issue_revocation,
 };
 use common::*;
 
@@ -27,6 +28,7 @@ fn check_canonical(input: &str, token: &Token) {
     let again = match token {
         Token::Invite(_) => encode_invite_bytes(&bytes),
         Token::Revocation(_) => encode_revocation_bytes(&bytes),
+        Token::AddrUpdate(_) => encode_addr_update_bytes(&bytes),
         _ => panic!("неизвестный вид"),
     };
     assert_eq!(again, norm, "принятый текст не канонический");
@@ -189,4 +191,132 @@ fn fuzz_smoke_revocation() {
     }
     assert!(n == 0 || ok > 0, "ни одного принятого образца");
     println!("fuzz_smoke_revocation: итераций {n}, принято {ok}");
+}
+
+// ---------- токен обновления адреса и ADDR_INFO ----------
+
+fn fuzz_set() -> chervo_addr::PublishSet {
+    let mut o = chervo_addr::OwnAddrs::new();
+    o.set_local(chervo_addr::LocalSnapshot {
+        route: chervo_addr::RouteSources {
+            v4: Some("192.168.1.2".parse().unwrap()),
+            v6: Some("2606:4700::7".parse().unwrap()),
+        },
+        listen: vec![
+            "0.0.0.0:4000".parse().unwrap(),
+            "[::]:4001".parse().unwrap(),
+        ],
+    });
+    o.observe(
+        chervo_identity::PairId::from_bytes([1; 16]),
+        "8.8.8.8:5000".parse().unwrap(),
+        "9.9.9.9:6000".parse().unwrap(),
+        1_000,
+    );
+    o.publishable(chervo_addr::PublishCtx { include_lan: true }, 1_000)
+}
+
+#[test]
+fn fuzz_smoke_addr_update() {
+    let n = fuzz_iters();
+    let mut rng = XorShift::new(0x5EED_ADD2_0123_4567);
+    let (a, b) = (key(), key());
+    let (pa, pb) = (a.public_key(), b.public_key());
+    let good = issue_addr_update(&a, &pb, 42, &fuzz_set())
+        .unwrap()
+        .bytes()
+        .to_vec();
+    let good_text = encode_addr_update_bytes(&good);
+    let mut ok_bin = 0u64;
+    let mut ok_text = 0u64;
+    let mut verified = 0u64;
+    for i in 0..n {
+        // двоичный путь
+        let m = match rng.below(4) {
+            0 => {
+                let len = rng.below(300);
+                rng.bytes(len)
+            }
+            _ => mutate(&mut rng, &good),
+        };
+        let m = if i == 0 { good.clone() } else { m };
+        if let Ok(signed) = decode_addr_update_bin(&m) {
+            ok_bin += 1;
+            assert!((83..=235).contains(&m.len()));
+            if signed.verify(&pa, &pb).is_ok() {
+                verified += 1;
+                assert_eq!(m, good, "подпись приняла изменённые байты");
+            }
+            // принятые байты перекодируются в принятый текст
+            assert!(decode(&encode_addr_update_bytes(&m)).is_ok());
+        }
+        // текстовый путь
+        let text = match rng.below(5) {
+            0 => {
+                let len = rng.below(600);
+                let body: String = (0..len).map(|_| ALPHA[rng.below(32)] as char).collect();
+                format!("CHA1{body}")
+            }
+            1 => {
+                let len = rng.below(64);
+                String::from_utf8_lossy(&rng.bytes(len)).into_owned()
+            }
+            2 => {
+                let mut t = good_text.clone().into_bytes();
+                t = mutate(&mut rng, &t);
+                String::from_utf8_lossy(&t).into_owned()
+            }
+            _ => encode_addr_update_bytes(&mutate(&mut rng, &good)),
+        };
+        let text = if i == 0 { good_text.clone() } else { text };
+        if let Ok(tok) = decode(&text) {
+            ok_text += 1;
+            assert!(matches!(tok, Token::AddrUpdate(_)));
+            check_canonical(&text, &tok);
+        }
+        if i % 7919 == 0 {
+            assert!(decode(&good_text).is_ok());
+        }
+    }
+    assert!(n == 0 || (ok_bin > 0 && ok_text > 0 && verified > 0));
+    println!(
+        "fuzz_smoke_addr_update: итераций {n}, принято двоичных {ok_bin}, текстов {ok_text}, подпись сошлась {verified}"
+    );
+}
+
+#[test]
+fn fuzz_smoke_addr_info() {
+    use chervo_token::addr_flow::{decode_addr_info, encode_addr_info};
+    let n = fuzz_iters();
+    let mut rng = XorShift::new(0xADD2_F00D_BEEF_0042);
+    let (a, b) = (key(), key());
+    let upd = issue_addr_update(&a, &b.public_key(), 7, &fuzz_set()).unwrap();
+    let frames = [
+        encode_addr_info("8.8.8.8:443".parse().unwrap(), None).unwrap(),
+        encode_addr_info("8.8.8.8:443".parse().unwrap(), Some(&upd)).unwrap(),
+        encode_addr_info("[2606:4700::1]:443".parse().unwrap(), Some(&upd)).unwrap(),
+    ];
+    let (pa, pb) = (a.public_key(), b.public_key());
+    let mut ok = 0u64;
+    for i in 0..n {
+        let src = &frames[rng.below(frames.len())];
+        let m = match rng.below(4) {
+            0 => {
+                let len = rng.below(300);
+                rng.bytes(len)
+            }
+            _ => mutate(&mut rng, src),
+        };
+        let m = if i == 0 { frames[1].clone() } else { m };
+        if let Ok((obs, update)) = decode_addr_info(&m) {
+            ok += 1;
+            assert!((11..=258).contains(&m.len()));
+            assert_ne!(obs.port(), 0);
+            if let Some(u) = update {
+                let _ = u.verify(&pa, &pb);
+            }
+        }
+    }
+    assert!(n == 0 || ok > 0);
+    println!("fuzz_smoke_addr_info: итераций {n}, принято {ok}");
 }

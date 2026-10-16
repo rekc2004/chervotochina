@@ -13,6 +13,8 @@
     clippy::todo
 )]
 
+pub mod addr_flow;
+mod addr_update;
 mod base32;
 mod error;
 pub mod flow;
@@ -20,7 +22,10 @@ mod invite;
 mod revocation;
 mod sas;
 
-pub use error::{FlowError, InviteError, TokenError};
+pub use addr_update::{
+    AddrUpdate, IssuedAddrUpdate, SignedAddrUpdate, decode_addr_update_bin, issue_addr_update,
+};
+pub use error::{AddrFlowError, FlowError, InviteError, TokenError};
 pub use invite::{
     InviteDraft, InviteToken, InviteeKeys, InviteeSession, PendingInvite, issue_invite,
 };
@@ -52,16 +57,30 @@ pub const M2_LEN: usize = 34;
 pub const MSG_DECISION: u8 = 0x13;
 pub const DECISION_LEN: usize = 3;
 pub const SAS_DIGITS: usize = 8;
+pub const ADDR_UPDATE_PREFIX: &str = "CHA1";
+pub const KIND_ADDR_UPDATE: u8 = 0x03;
+/// Один адрес IPv4: 11 + 8 + 64.
+pub const ADDR_UPDATE_MIN_LEN: usize = 83;
+/// Восемь адресов IPv6: 11 + 8 * 20 + 64.
+pub const ADDR_UPDATE_MAX_LEN: usize = 235;
+pub const FLAG_SHORT_LIVED: u8 = 0x01;
+pub const FLAG_HINT: u8 = 0x02;
+pub const STREAM_ADDR_INFO: u8 = 0x21;
+/// Кадр ADDR_INFO: 2 + (1 + 16 + 2) + 2 + 235.
+pub const ADDR_INFO_MAX_LEN: usize = 258;
 
 /// Разобранный токен. Без `Debug`: адреса и ключи не печатаются через derive.
 #[non_exhaustive]
 pub enum Token {
     Invite(InviteToken),
     Revocation(RevocationNotice),
+    /// Подпись ещё не проверена: `SignedAddrUpdate::verify` с ключами пары.
+    AddrUpdate(SignedAddrUpdate),
 }
 
-/// Разбор текста токена (`CHV1…` или `CHR1…`). Подпись проверяется внутри; сопоставление
-/// отзыва с другом делает вызывающий.
+/// Разбор текста токена (`CHV1…`, `CHR1…` или `CHA1…`). Подпись приглашения и отзыва
+/// проверяется внутри; сопоставление отзыва с другом делает вызывающий. Подпись токена
+/// обновления адреса проверяет `SignedAddrUpdate::verify` (ключи пары знает вызывающий).
 ///
 /// Порядок: длина строки (до всего), ASCII, удаление пробельных символов и подъём регистра,
 /// префикс, строгий base32, версия, вид, структура, ключи, подпись.
@@ -85,10 +104,16 @@ pub fn decode(text: &str) -> Result<Token, TokenError> {
         KIND_INVITE
     } else if prefix == REVOCATION_PREFIX.as_bytes() {
         KIND_REVOCATION
+    } else if prefix == ADDR_UPDATE_PREFIX.as_bytes() {
+        KIND_ADDR_UPDATE
     } else {
         return Err(TokenError::BadPrefix);
     };
     let bytes = Zeroizing::new(base32::decode(rest).ok_or(TokenError::BadEncoding)?);
+    if want_kind == KIND_ADDR_UPDATE {
+        // порядок ошибок задаёт разбор токена обновления: длина, версия, вид, структура
+        return addr_update::parse(&bytes).map(Token::AddrUpdate);
+    }
     let (version, kind) = match (bytes.first(), bytes.get(1)) {
         (Some(v), Some(k)) => (*v, *k),
         _ => return Err(TokenError::Malformed),
@@ -115,4 +140,10 @@ pub fn encode_invite_bytes(bytes: &[u8]) -> String {
 #[doc(hidden)]
 pub fn encode_revocation_bytes(bytes: &[u8]) -> String {
     format!("{REVOCATION_PREFIX}{}", base32::encode(bytes))
+}
+
+/// Только для тестов: каноническая запись произвольных байт как токен обновления адреса.
+#[doc(hidden)]
+pub fn encode_addr_update_bytes(bytes: &[u8]) -> String {
+    format!("{ADDR_UPDATE_PREFIX}{}", base32::encode(bytes))
 }

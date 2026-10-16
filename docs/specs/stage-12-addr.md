@@ -275,7 +275,7 @@ A5 (`crates/chervo-friends/tests/addr_net.rs`, loopback, two `QuinnTransport` wi
 - [ ] `CHERVO_FUZZ_ITERS=1000000 cargo test --release --locked -p chervo-token -p chervo-friends fuzz_smoke -- --nocapture` (iterations printed per target)
 - [ ] `git diff $BASE -- Cargo.lock | grep -E '^\+name = '; test $? -eq 1`
 - [ ] `cargo tree -p chervo-addr -p chervo-token -p chervo-friends -e normal | grep -E 'quinn|tokio|rustls'; test $? -eq 1`
-- [ ] `grep -rn "send_now" crates/; test $? -eq 1`
+- [ ] `grep -rn "send_now" crates/ | grep -v "fn send_now_absent"; test $? -eq 1` (the mandated test name is the only allowed hit)
 - [ ] `cargo test -p chervo-core --test layout`; `bash scripts/check-forbidden.sh --self-test && bash scripts/check-forbidden.sh`
 - [ ] `for i in $(seq 20); do cargo test -q --locked -p chervo-transport-quinn -- rebind_ reknock_ || exit 1; done`; `for i in $(seq 10); do cargo test -q --locked -p chervo-friends --test addr_net || exit 1; done`
 - [ ] CI: all jobs green (3 OS, supply-chain).

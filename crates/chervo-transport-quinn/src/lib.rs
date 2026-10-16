@@ -250,6 +250,9 @@ pub(crate) struct Inner {
     queue_rx: tokio::sync::Mutex<mpsc::Receiver<QuinnConn>>,
     pub(crate) client_quic: Arc<quinn::crypto::rustls::QuicClientConfig>,
     pub(crate) client_transport: Arc<quinn::TransportConfig>,
+    /// Runtime, захваченный в `from_socket`: фоновые задачи (повторные стуки) создаются
+    /// из любого потока, в том числе вне контекста tokio.
+    pub(crate) rt: tokio::runtime::Handle,
 }
 
 impl Inner {
@@ -301,9 +304,7 @@ impl QuinnTransport {
         cfg: QuinnConfig,
         filter: Arc<dyn PeerFilter>,
     ) -> Result<Self, TransportError> {
-        if tokio::runtime::Handle::try_current().is_err() {
-            return Err(TransportError::Io);
-        }
+        let rt = tokio::runtime::Handle::try_current().map_err(|_| TransportError::Io)?;
         sock.set_nonblocking(true).map_err(|_| TransportError::Io)?;
         let base = tls::base_server_config(&cfg).map_err(|_| TransportError::Io)?;
         let counters = Arc::new(Counters::default());
@@ -351,6 +352,7 @@ impl QuinnTransport {
             queue_rx: tokio::sync::Mutex::new(queue_rx),
             client_quic,
             client_transport,
+            rt,
         });
         let looped = inner.clone();
         tokio::spawn(async move {
@@ -389,6 +391,13 @@ impl QuinnTransport {
             let _ = self.inner.events.send(TransportEvent::PeerRemoved { pair });
         }
         Ok(())
+    }
+
+    /// Стук по каждому живому соединению с того же гнезда (тот же порт): вызывать после
+    /// смены собственного адреса, когда гнездо остаётся; проброс порта и порт прослушивания
+    /// не меняются. `rebind` нужен только когда само гнездо должно смениться.
+    pub fn reknock(&self) {
+        client::reknock_live(&self.inner);
     }
 
     pub fn rebind(&self, sock: std::net::UdpSocket) -> Result<(), TransportError> {

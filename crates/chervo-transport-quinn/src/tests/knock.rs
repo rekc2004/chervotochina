@@ -505,6 +505,146 @@ async fn rebind_reknock() {
     );
 }
 
+/// Один обмен «ping»/«pong» по живому соединению; каждая операция ограничена `limit`.
+async fn ping_pong(
+    conn_a: &crate::conn::QuinnConn,
+    conn_b: &crate::conn::QuinnConn,
+    limit: Duration,
+) -> Result<(), &'static str> {
+    use chervo_transport::{Connection, RecvStream, SendStream};
+    async fn read4<R: RecvStream>(rx: &mut R, limit: Duration) -> Result<[u8; 4], &'static str> {
+        let mut buf = [0u8; 4];
+        let mut n = 0;
+        while n < 4 {
+            match tokio::time::timeout(limit, rx.read(&mut buf[n..]))
+                .await
+                .map_err(|_| "тайм-аут чтения")?
+                .map_err(|_| "ошибка чтения")?
+            {
+                Some(m) => n += m,
+                None => return Err("поток закрыт раньше"),
+            }
+        }
+        Ok(buf)
+    }
+    let (mut tx, mut rx) = tokio::time::timeout(limit, conn_a.open_bi())
+        .await
+        .map_err(|_| "тайм-аут open_bi")?
+        .map_err(|_| "ошибка open_bi")?;
+    tx.write_all(b"ping").await.map_err(|_| "ошибка записи")?;
+    tx.finish().map_err(|_| "ошибка finish")?;
+    let (mut btx, mut brx) = tokio::time::timeout(limit, conn_b.accept_bi())
+        .await
+        .map_err(|_| "тайм-аут accept_bi")?
+        .map_err(|_| "ошибка accept_bi")?;
+    if &read4(&mut brx, limit).await? != b"ping" {
+        return Err("ping искажён");
+    }
+    btx.write_all(b"pong").await.map_err(|_| "ошибка записи")?;
+    btx.finish().map_err(|_| "ошибка finish")?;
+    if &read4(&mut rx, limit).await? != b"pong" {
+        return Err("pong искажён");
+    }
+    Ok(())
+}
+
+/// Повторный стук ждёт только первого стука (t = 0): `knock_resend_after = 30 с`, поэтому
+/// помочь могут лишь он. Первый стук идёт через `send`, а не молча теряется на занятом гнезде.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rebind_first_knock_not_lost() {
+    let k = Keys::new();
+    let cfg = QuinnConfig {
+        knock_resend_after: Duration::from_secs(30),
+        ..kc(true)
+    };
+    let a = bind(cfg.clone(), vec![k.peer_a()]);
+    let b = Arc::new(bind(cfg, vec![k.peer_b()]));
+    let b2 = b.clone();
+    let acc = tokio::spawn(async move { b2.accept().await });
+    let conn_a = a.connect(&peer_addr(k.pid, &b)).await.unwrap();
+    let conn_b = acc.await.unwrap().unwrap();
+    let ok_before = b.stats().knock_ok;
+    let new_sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    a.rebind(new_sock).unwrap();
+    ping_pong(&conn_a, &conn_b, Duration::from_secs(3))
+        .await
+        .expect("обмен после rebind за 3 с");
+    assert!(
+        b.stats().knock_ok > ok_before,
+        "после rebind должен прийти новый стук"
+    );
+}
+
+/// `reknock` без `rebind`: гнездо и порт те же, стук уходит по живому соединению.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reknock_without_rebind() {
+    use chervo_transport::Connection;
+    let k = Keys::new();
+    let cfg = QuinnConfig {
+        knock_resend_after: Duration::from_secs(30),
+        ..kc(true)
+    };
+    let a = bind(cfg.clone(), vec![k.peer_a()]);
+    let b = Arc::new(bind(cfg, vec![k.peer_b()]));
+    let b2 = b.clone();
+    let acc = tokio::spawn(async move { b2.accept().await });
+    let conn_a = a.connect(&peer_addr(k.pid, &b)).await.unwrap();
+    let conn_b = acc.await.unwrap().unwrap();
+    let ok_before = b.stats().knock_ok;
+    let addr_before = conn_b.remote_addr();
+    let local_before = a.local_addrs();
+    a.reknock();
+    let seen = tokio::time::timeout(Duration::from_secs(2), async {
+        while b.stats().knock_ok <= ok_before {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(seen.is_ok(), "счётчик knock_ok не вырос за 2 с");
+    // гнездо не менялось
+    assert_eq!(a.local_addrs(), local_before);
+    assert_eq!(conn_b.remote_addr(), addr_before);
+    // соединение живо
+    ping_pong(&conn_a, &conn_b, Duration::from_secs(3))
+        .await
+        .expect("обмен после reknock");
+}
+
+/// `reknock` без допуска по стуку (`knock_required: false`) ничего не отправляет и не падает.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reknock_noop_without_knock_requirement() {
+    let k = Keys::new();
+    let a = bind(kc(false), vec![k.peer_a()]);
+    let b = Arc::new(bind(kc(false), vec![k.peer_b()]));
+    let b2 = b.clone();
+    let acc = tokio::spawn(async move { b2.accept().await });
+    let conn_a = a.connect(&peer_addr(k.pid, &b)).await.unwrap();
+    let conn_b = acc.await.unwrap().unwrap();
+    a.reknock();
+    ping_pong(&conn_a, &conn_b, Duration::from_secs(3))
+        .await
+        .expect("обмен");
+    assert_eq!(b.stats().knock_ok, 0);
+}
+
+/// Синхронной отправки стука без ожидания больше нет в исходниках.
+#[test]
+fn send_now_absent() {
+    let needle = concat!("send", "_now");
+    for (name, text) in [
+        ("lib.rs", include_str!("../lib.rs")),
+        ("client.rs", include_str!("../client.rs")),
+        ("knock.rs", include_str!("../knock.rs")),
+        ("conn.rs", include_str!("../conn.rs")),
+        ("server.rs", include_str!("../server.rs")),
+        ("registry.rs", include_str!("../registry.rs")),
+        ("limits.rs", include_str!("../limits.rs")),
+        ("tls.rs", include_str!("../tls.rs")),
+    ] {
+        assert!(!text.contains(needle), "{name} содержит {needle}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn simultaneous_knock_connect() {
     use super::misc::{collect_accepts, survivors};

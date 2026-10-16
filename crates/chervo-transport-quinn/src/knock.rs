@@ -568,19 +568,6 @@ impl KnockState {
         keys.make(window_at(ms)).ok()
     }
 
-    /// Один раз без ожидания (для первого стука после `rebind`).
-    pub(crate) fn send_now(&self, dest: SocketAddr, knock: &[u8; KNOCK_LEN]) {
-        let sock = lock(&self.tx).clone();
-        let dest = family_for(&sock, dest);
-        let _ = sock.try_send(&Transmit {
-            destination: dest,
-            ecn: None,
-            contents: knock,
-            segment_size: None,
-            src_ip: None,
-        });
-    }
-
     /// Отправка стука; при `WouldBlock` ожидание готовности гнезда.
     pub(crate) async fn send(&self, dest: SocketAddr, knock: &[u8; KNOCK_LEN]) {
         let sock = lock(&self.tx).clone();
