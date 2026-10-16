@@ -223,13 +223,11 @@ async fn write_frame<T: SendStream>(tx: &mut T, frame: &[u8]) -> Result<(), Addr
 }
 
 /// Соединение принадлежит паре вызывающего, а привязанный к паре токен выпущен именно для
-/// неё (токен для другого друга не уходит по этому соединению).
+/// неё (токен для другого друга не уходит по этому соединению). Токен без привязки к паре
+/// не отправляется (решение 9: отказ по умолчанию).
 fn peer_matches<C: Connection>(conn: &C, pair: &PairId, ours: Option<&IssuedAddrUpdate>) -> bool {
     let remote = conn.remote_pair();
-    remote == *pair
-        && ours
-            .and_then(IssuedAddrUpdate::pair)
-            .is_none_or(|p| p == remote)
+    remote == *pair && ours.is_none_or(|u| u.pair() == Some(remote))
 }
 
 /// Сторона, открывшая соединение. `remote_pair != *pair` или токен выпущен для другой пары

@@ -421,8 +421,8 @@ fn addr_flow_memconn_exchange() {
     let (a_key, b_key) = (key(), key());
     let pair = PairId::generate().unwrap();
     let l = link(pair);
-    let a_upd = issued(&a_key, &b_key.public_key(), 10, "8.8.4.4");
-    let b_upd = issued(&b_key, &a_key.public_key(), 20, "1.1.1.1");
+    let a_upd = issued(&a_key, &b_key.public_key(), 10, "8.8.4.4").for_pair(pair);
+    let b_upd = issued(&b_key, &a_key.public_key(), 20, "1.1.1.1").for_pair(pair);
     let (ua, ub) = (a_upd.clone(), b_upd.clone());
     let ta = std::thread::spawn(move || block_on(dispatch_answer(&l.a, &pair, Some(&ua))));
     let tb = std::thread::spawn(move || block_on(exchange_addr_info(&l.b, &pair, Some(&ub))));
@@ -500,6 +500,32 @@ fn addr_flow_wrong_peer_sends_nothing() {
     assert_eq!(r.err(), Some(AddrFlowError::WrongPeer));
     assert_eq!(queued(&l.a_to_b), 0);
     assert!(!l.a_to_b.finished.load(Ordering::SeqCst));
+}
+
+#[test]
+fn addr_flow_unbound_update_sends_nothing() {
+    let pair = PairId::generate().unwrap();
+    let (a, b) = (key(), key());
+    let unbound = issued(&a, &b.public_key(), 5, "8.8.4.4");
+    // соединяющая сторона: токен без пары не уходит
+    let l = link(pair);
+    let r = block_on(exchange_addr_info(&l.b, &pair, Some(&unbound)));
+    assert_eq!(r.err(), Some(AddrFlowError::WrongPeer));
+    assert!(l.b.streams_untouched(), "поток не открывался");
+    assert_eq!(queued(&l.b_to_a), 0);
+    // принимающая сторона: ответ не пишется
+    let l = link(pair);
+    let f = frame_v4(None);
+    l.b_to_a
+        .buf
+        .lock()
+        .unwrap()
+        .extend(f.iter().skip(1).copied());
+    l.b_to_a.finished.store(true, Ordering::SeqCst);
+    let (tx, rx) = block_on(l.a.accept_bi()).unwrap();
+    let r = block_on(answer_addr_info(&l.a, &pair, tx, rx, Some(&unbound)));
+    assert_eq!(r.err(), Some(AddrFlowError::WrongPeer));
+    assert_eq!(queued(&l.a_to_b), 0);
 }
 
 #[test]
