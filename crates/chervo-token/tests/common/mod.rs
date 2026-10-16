@@ -89,7 +89,9 @@ pub fn b32_decode(s: &str) -> Vec<u8> {
             bits.push((v >> i) & 1 == 1);
         }
     }
-    bits.chunks_exact(8)
+    bits.as_chunks::<8>()
+        .0
+        .iter()
         .map(|c| c.iter().fold(0u8, |a, b| (a << 1) | u8::from(*b)))
         .collect()
 }
