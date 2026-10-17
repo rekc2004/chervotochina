@@ -17,7 +17,18 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$ROOT/../.." && pwd)"
-STATE="${CHV_STATE:-/tmp/chervo-stage13-state}"
+# Рабочий каталог (бинарники из него запускаются от root): непредсказуемое имя, владелец root, режим 700.
+# Своё значение CHV_STATE допускается, только если каталог принадлежит запускающему; режим ставится 700.
+STATE_OWNED=0
+if [[ -n "${CHV_STATE:-}" ]]; then
+  STATE="$CHV_STATE"
+  mkdir -p -- "$STATE"; chmod 700 -- "$STATE"
+  [[ "$(stat -c %u -- "$STATE")" == "$(id -u)" ]] || { echo "CHV_STATE не принадлежит текущему пользователю" >&2; exit 2; }
+else
+  STATE="$(mktemp -d /tmp/chervo-stage13.XXXXXX)"
+  chmod 700 -- "$STATE"
+  STATE_OWNED=1
+fi
 LOGS="${CHV_LOGS:-$ROOT/logs13}"
 BIN="$STATE/bin"
 NODE="$BIN/node13"
@@ -61,7 +72,6 @@ do_teardown() {
     ip netns del "chv13-$n" 2>/dev/null
     rm -rf "/etc/netns/chv13-$n"
   done
-  rmdir /etc/netns 2>/dev/null
   set -e
 }
 
@@ -444,6 +454,7 @@ cleanup() {
   local l
   for l in "${!NODE_REAL[@]}"; do node_kill "$l"; done
   if [[ "$TEARDOWN_ON_EXIT" == 1 ]]; then do_teardown || true; fi
+  if [[ "$STATE_OWNED" == 1 && "${CHV_KEEP:-0}" != 1 && -n "$STATE" && "$STATE" != / ]]; then rm -rf -- "$STATE"; fi
 }
 trap cleanup EXIT
 case "$CMD" in

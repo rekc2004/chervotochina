@@ -670,17 +670,31 @@ fn igd_network_change_deletes_old() {
 
 #[test]
 #[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
-fn igd_settings_cleared_deletes_current() {
+fn igd_settings_cleared_forgets_without_sending() {
     let Some(lab) = Lab::new(vec![Cfg::default()]) else {
         skip()
     };
     let m = lab.mapper(allow(UDN, false));
     assert_eq!(m.refresh(req()).status, MapStatus::Mapped);
+    let (d0, c0, a0) = (
+        lab.ssdp.count(),
+        lab.r().connections(),
+        lab.r().actions().len(),
+    );
     m.set_settings(UpnpSettings::default());
     let rep = m.refresh(req());
     assert_eq!(rep.status, MapStatus::Off);
     assert!(rep.gateway.is_none());
-    assert!(lab.r().entries().is_empty());
+    // пустой список: ни одного пакета, запись остаётся до конца аренды (ред. 2, L2)
+    assert_eq!(lab.r().entries(), vec![ours(PORT, 3600)]);
+    assert_eq!(
+        (
+            lab.ssdp.count(),
+            lab.r().connections(),
+            lab.r().actions().len()
+        ),
+        (d0, c0, a0)
+    );
     // дальше ни одного пакета
     let (d, c, a) = (
         lab.ssdp.count(),
@@ -816,6 +830,278 @@ fn igd_settings_limited_to_four() {
     });
     let m = lab.mapper(UpnpSettings { routers });
     assert_eq!(m.refresh(req()).status, MapStatus::NotHomeNetwork);
+}
+
+/// Поиск неоднозначен и для `refresh`, и для `identify`; SOAP никуда не уходит.
+fn assert_ambiguous_everywhere(lab: &Lab, m: &UpnpMapper) {
+    let rep = m.refresh(req());
+    assert_eq!(rep.status, MapStatus::Ambiguous);
+    assert!(rep.gateway.is_none());
+    assert_eq!(m.identify(OWN), Err(UpnpError::Ambiguous));
+    for r in &lab.routers {
+        assert_eq!(r.soap_count(), 0);
+    }
+}
+
+#[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
+fn igd_conflicting_location_ambiguous() {
+    let Some(lab) = Lab::new(vec![Cfg::default()]) else {
+        skip()
+    };
+    // тот же IP присылает второй, другой LOCATION: настоящий роутер не выбрасывается молча
+    let r = lab.r();
+    lab.ssdp
+        .advertise(r.ip, format!("http://{}:{}/other.xml", r.ip, r.addr.port()));
+    let m = lab.mapper(allow(UDN, false));
+    assert_ambiguous_everywhere(&lab, &m);
+    assert_eq!(lab.r().connections(), 0);
+}
+
+#[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
+fn igd_datagram_cap_hit_ambiguous() {
+    let Some(lab) = Lab::new(vec![Cfg::default()]) else {
+        skip()
+    };
+    // 61 источник x 2 цели уже в первом раунде дают 122 датаграммы > 64 (потом ещё столько
+    // же), все с одним и тем же LOCATION: конфликта нет, неоднозначность только из-за предела
+    for _ in 0..60 {
+        lab.ssdp.advertise(lab.r().ip, lab.r().location());
+    }
+    let m = lab.mapper(allow(UDN, false));
+    assert_ambiguous_everywhere(&lab, &m);
+    assert_eq!(lab.r().connections(), 0);
+}
+
+#[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
+fn igd_more_than_eight_responders_ambiguous() {
+    let Some(lab) = Lab::new((0..9).map(|_| Cfg::default()).collect()) else {
+        skip()
+    };
+    let m = lab.mapper(allow(UDN, false));
+    assert_ambiguous_everywhere(&lab, &m);
+    assert!(lab.routers.iter().all(|r| r.connections() == 0));
+
+    // ровно восемь: не неоднозначно, берётся единственный разрешённый
+    let cfgs = (0..8)
+        .map(|i| Cfg {
+            udn: format!("uuid:r-{i}"),
+            ..Cfg::default()
+        })
+        .collect();
+    let Some(lab) = Lab::new(cfgs) else { skip() };
+    let m = lab.mapper(allow("uuid:r-3", false));
+    assert_eq!(m.refresh(req()).status, MapStatus::Mapped);
+    assert_eq!(lab.routers[3].entries().len(), 1);
+    assert_eq!(m.identify(OWN), Err(UpnpError::Ambiguous));
+}
+
+#[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
+fn igd_unevaluated_responder_ambiguous() {
+    // описание первого роутера не приходит до общего срока: второй мог остаться неоценённым
+    let Some(lab) = Lab::new(vec![
+        with_hook(|r, _| (!r.is_post).then_some(Reply::Stall)),
+        Cfg::default(),
+    ]) else {
+        skip()
+    };
+    let net = Net {
+        http_deadline: secs(1),
+        max_refresh: Duration::from_millis(1200),
+        ..lab.net()
+    };
+    let m = UpnpMapper::with_net(allow(UDN, false), net);
+    assert_ambiguous_everywhere(&lab, &m);
+}
+
+#[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
+fn igd_foreign_network_same_addressing_sends_nothing() {
+    let Some(lab) = Lab::new(vec![Cfg::default()]) else {
+        skip()
+    };
+    let m = lab.mapper(allow(UDN, false));
+    assert_eq!(m.refresh(req()).status, MapStatus::Mapped);
+    let soap = lab.r().soap_count();
+    // чужая сеть с той же адресацией: по сохранённому адресу другой роутер
+    lab.r()
+        .with(|i| i.cfg.udn = "uuid:foreign-router".to_owned());
+    let rep = m.refresh(req());
+    assert_eq!(rep.status, MapStatus::NotHomeNetwork);
+    assert_eq!(lab.r().soap_count(), soap);
+    // сохранённый проброс забыт: выход тоже ничего не шлёт, даже если дома снова всё как было
+    lab.r().with(|i| i.cfg.udn = UDN.to_owned());
+    m.release();
+    assert_eq!(lab.r().soap_count(), soap);
+    assert_eq!(lab.r().entries(), vec![ours(PORT, 3600)]);
+}
+
+#[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
+fn igd_release_unconfirmed_router_sends_nothing() {
+    let Some(lab) = Lab::new(vec![Cfg::default()]) else {
+        skip()
+    };
+    let m = lab.mapper(allow(UDN, false));
+    assert_eq!(m.refresh(req()).status, MapStatus::Mapped);
+    let soap = lab.r().soap_count();
+    lab.r()
+        .with(|i| i.cfg.udn = "uuid:foreign-router".to_owned());
+    m.release();
+    assert_eq!(lab.r().soap_count(), soap);
+    assert_eq!(lab.r().count("DeletePortMapping"), 0);
+    assert_eq!(lab.r().entries().len(), 1);
+}
+
+#[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
+fn igd_current_forgotten_when_no_gateway_or_ambiguous() {
+    // NoGateway: описание больше не отдаётся
+    let Some(lab) = Lab::new(vec![Cfg::default()]) else {
+        skip()
+    };
+    let m = lab.mapper(allow(UDN, false));
+    assert_eq!(m.refresh(req()).status, MapStatus::Mapped);
+    let soap = lab.r().soap_count();
+    lab.r().with(|i| {
+        i.cfg.hook = Some(Arc::new(|r, _| (!r.is_post).then_some(Reply::Status(404))));
+    });
+    assert_eq!(m.refresh(req()).status, MapStatus::NoGateway);
+    lab.r().with(|i| i.cfg.hook = None);
+    m.release();
+    assert_eq!(lab.r().soap_count(), soap);
+
+    // Ambiguous: появился второй такой же роутер
+    let Some(lab) = Lab::new(vec![
+        Cfg::default(),
+        Cfg {
+            advertise: false,
+            ..Cfg::default()
+        },
+    ]) else {
+        skip()
+    };
+    let m = lab.mapper(allow(UDN, false));
+    assert_eq!(m.refresh(req()).status, MapStatus::Mapped);
+    let soap = lab.r().soap_count();
+    lab.ssdp
+        .advertise(lab.routers[1].ip, lab.routers[1].location());
+    assert_eq!(m.refresh(req()).status, MapStatus::Ambiguous);
+    m.release();
+    assert_eq!(lab.r().soap_count(), soap);
+    assert_eq!(lab.routers[1].soap_count(), 0);
+}
+
+#[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
+fn igd_unrequested_permanent_on_alt_port_deleted() {
+    // v1 (случайный порт) и v2 (AddAny): роутер сделал запасной порт бессрочным без просьбы
+    for services in [
+        vec![(SVC_V1.to_owned(), CTL.to_owned())],
+        vec![(SVC_V2.to_owned(), CTL.to_owned())],
+    ] {
+        let Some(lab) = Lab::new(vec![Cfg {
+            taken: vec![PORT],
+            lease_mode: LeaseMode::Permanent,
+            services,
+            ..Cfg::default()
+        }]) else {
+            skip()
+        };
+        let m = lab.mapper(allow(UDN, false));
+        let rep = m.refresh(req());
+        assert_eq!(rep.status, MapStatus::Failed);
+        assert!(rep.gateway.is_none());
+        assert!(lab.r().entries().is_empty());
+        assert_eq!(lab.r().count("DeletePortMapping"), 1);
+        // проброс не засчитан, выход ничего не шлёт
+        let n = lab.r().actions().len();
+        m.release();
+        assert_eq!(lab.r().actions().len(), n);
+    }
+}
+
+#[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
+fn igd_second_refresh_while_busy_fails_fast() {
+    let Some(lab) = Lab::new(vec![with_hook(|r, _| {
+        (r.is_post && r.action == "GetExternalIPAddress").then_some(Reply::Stall)
+    })]) else {
+        skip()
+    };
+    let m = lab.mapper(allow(UDN, false));
+    thread::scope(|sc| {
+        let first = sc.spawn(|| m.refresh(req()));
+        let t0 = Instant::now();
+        while lab.r().count("GetExternalIPAddress") == 0 {
+            assert!(t0.elapsed() < secs(5), "первый refresh не дошёл до SOAP");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let before = (
+            lab.ssdp.count(),
+            lab.r().connections(),
+            lab.r().actions().len(),
+        );
+        let start = Instant::now();
+        let rep = m.refresh(req());
+        assert!(start.elapsed() < Duration::from_millis(300));
+        assert_eq!(rep.status, MapStatus::Failed);
+        assert!(rep.gateway.is_none());
+        assert_eq!(rep.retry_after, secs(60));
+        assert_eq!(
+            (
+                lab.ssdp.count(),
+                lab.r().connections(),
+                lab.r().actions().len()
+            ),
+            before
+        );
+        assert_eq!(first.join().unwrap().status, MapStatus::Failed);
+    });
+    // занятость снята: следующий refresh работает
+    lab.r().with(|i| i.cfg.hook = None);
+    assert_eq!(m.refresh(req()).status, MapStatus::Mapped);
+}
+
+#[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
+fn igd_stale_delete_bounded_by_overall() {
+    let Some(lab) = Lab::new(vec![Cfg::default()]) else {
+        skip()
+    };
+    let net = Net {
+        http_deadline: secs(2),
+        max_refresh: secs(3),
+        ..lab.net()
+    };
+    let m = UpnpMapper::with_net(allow(UDN, false), net);
+    assert_eq!(m.refresh(req_for(PORT)).status, MapStatus::Mapped);
+    // смена сети: удаление старого проброса, роутер молчит на каждый SOAP
+    lab.r().with(|i| {
+        i.cfg.hook = Some(Arc::new(|r, _| r.is_post.then_some(Reply::Stall)));
+    });
+    let start = Instant::now();
+    let rep = m.refresh(req_for(PORT + 1));
+    let el = start.elapsed();
+    assert_eq!(rep.status, MapStatus::Failed);
+    assert!(el <= secs(3) + Duration::from_millis(500), "{el:?}");
+}
+
+#[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
+fn igd_control_url_semicolon_rejected() {
+    let Some(lab) = Lab::new(vec![Cfg {
+        services: vec![(SVC_V1.to_owned(), "/ctl;x=1".to_owned())],
+        ..Cfg::default()
+    }]) else {
+        skip()
+    };
+    let m = lab.mapper(allow(UDN, false));
+    assert_eq!(m.refresh(req()).status, MapStatus::NoGateway);
+    assert_eq!(lab.r().soap_count(), 0);
 }
 
 #[test]

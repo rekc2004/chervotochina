@@ -135,9 +135,20 @@ pub(crate) fn parse_response(
     })
 }
 
-/// Один ответчик на IP. IP, приславший два разных LOCATION, отбрасывается целиком.
-/// Порядок прихода сохраняется; не более `MAX_RESPONDERS`.
-pub(crate) fn select(responders: Vec<Responder>) -> Vec<Responder> {
+/// Итог отбора ответчиков (ред. 2 по ревью безопасности): любая неоднозначность делает весь
+/// поиск неоднозначным, ответчик не выбрасывается молча.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Selection {
+    /// Один ответчик на IP, порядок прихода сохранён, не более `MAX_RESPONDERS`.
+    pub(crate) responders: Vec<Responder>,
+    /// Какой-то IP прислал два разных LOCATION либо разных IP больше `MAX_RESPONDERS`.
+    pub(crate) ambiguous: bool,
+}
+
+/// Один ответчик на IP. IP, приславший два разных LOCATION, в список не попадает, но итог
+/// становится неоднозначным (иначе одна поддельная датаграмма убирала бы настоящий роутер из
+/// выбора). Так же больше `MAX_RESPONDERS` разных IP.
+pub(crate) fn select(responders: Vec<Responder>) -> Selection {
     let conflicting = |ip: Ipv4Addr| {
         responders.iter().any(|r| {
             r.ip == ip
@@ -147,14 +158,25 @@ pub(crate) fn select(responders: Vec<Responder>) -> Vec<Responder> {
         })
     };
     let mut out: Vec<Responder> = Vec::new();
+    let mut seen: Vec<Ipv4Addr> = Vec::new();
+    let mut ambiguous = false;
     for r in &responders {
-        if out.iter().any(|o| o.ip == r.ip) || conflicting(r.ip) {
+        if seen.contains(&r.ip) {
             continue;
         }
-        out.push(r.clone());
+        seen.push(r.ip);
+        if conflicting(r.ip) {
+            ambiguous = true;
+            continue;
+        }
         if out.len() == MAX_RESPONDERS {
+            ambiguous = true;
             break;
         }
+        out.push(r.clone());
     }
-    out
+    Selection {
+        responders: out,
+        ambiguous,
+    }
 }

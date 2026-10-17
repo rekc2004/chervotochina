@@ -28,7 +28,18 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$ROOT/../.." && pwd)"
 PFX="chv13a-"
-STATE="${CHV_STATE:-/tmp/chervo-stage13a-state}"
+# Рабочий каталог (бинарники из него запускаются от root): непредсказуемое имя, владелец root, режим 700.
+# Своё значение CHV_STATE допускается, только если каталог принадлежит запускающему; режим ставится 700.
+STATE_OWNED=0
+if [[ -n "${CHV_STATE:-}" ]]; then
+  STATE="$CHV_STATE"
+  mkdir -p -- "$STATE"; chmod 700 -- "$STATE"
+  [[ "$(stat -c %u -- "$STATE")" == "$(id -u)" ]] || { echo "CHV_STATE не принадлежит текущему пользователю" >&2; exit 2; }
+else
+  STATE="$(mktemp -d /tmp/chervo-stage13a.XXXXXX)"
+  chmod 700 -- "$STATE"
+  STATE_OWNED=1
+fi
 LOGS="${CHV_LOGS:-$ROOT/logs13a}"
 BIN="$STATE/bin"
 PROBE="${CHV_PROBE:-$BIN/upnp_probe}"
@@ -92,7 +103,6 @@ do_teardown() {
     ns_exists "$n" && ip netns del "$PFX$n" 2>/dev/null
     rm -rf "/etc/netns/${PFX}${n}"
   done
-  rmdir /etc/netns 2>/dev/null
   set -e
 }
 
@@ -744,6 +754,7 @@ cleanup() {
   [[ -n "$PB_REAL" ]] && probe_kill9
   for k in "${!MPD_REAL[@]}"; do mpd_stop "$k"; done
   if [[ "${CHV_KEEP:-0}" != 1 && "$CMD" != teardown ]]; then do_teardown || true; fi
+  if [[ "$STATE_OWNED" == 1 && "${CHV_KEEP:-0}" != 1 && -n "$STATE" && "$STATE" != / ]]; then rm -rf -- "$STATE"; fi
 }
 trap cleanup EXIT
 case "$CMD" in

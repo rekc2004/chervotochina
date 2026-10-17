@@ -71,9 +71,25 @@ fn src_guard() {
     let files = files_with(&src, "GatewayAddr(");
     assert_eq!(files, vec!["url.rs".to_owned()], "GatewayAddr( вне url.rs");
 
-    // адрес multicast записан только в limits.rs
+    // адрес multicast записан только в limits.rs, в обеих формах (строка и `Ipv4Addr::new`,
+    // пробелы не в счёт); остальной код берёт константу `SSDP_ADDR`
     let files = files_with(&src, "239.255.255.250");
     assert_eq!(files, vec!["limits.rs".to_owned()]);
+    let squeezed: Vec<(String, String)> = src
+        .iter()
+        .map(|(n, t)| (n.clone(), t.split_whitespace().collect::<String>()))
+        .collect();
+    let files = files_with(&squeezed, "239,255,255,250");
+    assert_eq!(
+        files,
+        vec!["limits.rs".to_owned()],
+        "239,255,255,250 вне limits.rs"
+    );
+    let files = files_with(&src, "SSDP_ADDR");
+    assert!(
+        files.contains(&"net.rs".to_owned()),
+        "net.rs не берёт SSDP_ADDR"
+    );
 
     // ошибки без текста
     let (_, errors) = src.iter().find(|(n, _)| n == "error.rs").unwrap();

@@ -1,5 +1,6 @@
 //! Пределы разбора и времени (этап 13а, U1). Все значения заданы спецификацией.
 
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 /// Максимальный размер датаграммы SSDP (1500 минус IP и UDP).
@@ -32,5 +33,8 @@ pub(crate) const ALT_PORT_TRIES: usize = 3;
 pub(crate) const MAX_ROUTERS: usize = 4;
 /// Нейтральное описание нашего проброса (видно любому устройству сети).
 pub(crate) const DESC: &str = "udp";
-/// Адрес multicast SSDP: единственное место в крейте, где он записан.
+/// Адрес multicast SSDP: единственное место в крейте, где он записан (обе формы: строка для
+/// M-SEARCH и `Ipv4Addr`; охрана `src_guard` ищет обе).
+pub(crate) const SSDP_ADDR: Ipv4Addr = Ipv4Addr::new(239, 255, 255, 250);
+pub(crate) const SSDP_PORT: u16 = 1900;
 pub(crate) const SSDP_HOST: &str = "239.255.255.250:1900";

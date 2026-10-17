@@ -188,7 +188,7 @@ fn path_ok(p: &str) {
     assert!(p.starts_with('/') && p.len() <= PATH_MAX, "path shape");
     assert!(
         p.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"-._~/!$'()*+,;=:@%".contains(&b)),
+            .all(|b| b.is_ascii_alphanumeric() || b"-._~/!$'()*+,:@%".contains(&b)),
         "path charset"
     );
     let lower = p.to_ascii_lowercase();
@@ -434,7 +434,7 @@ fn fuzz_smoke_ssdp() {
         let _ = parse_port(&s);
         if i % 1000 == 0 {
             let out = select(pool.clone());
-            assert!(out.len() <= MAX_RESPONDERS);
+            assert!(out.responders.len() <= MAX_RESPONDERS);
         }
     }
     println!("fuzz_smoke_ssdp: iterations={n} accepted={ok}");

@@ -13,10 +13,10 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::error::NetError;
 use crate::limits::{
-    BODY_MAX, DISCOVERY_WINDOW, HTTP_DEADLINE, HTTP_HEAD_MAX, MAX_REFRESH, SSDP_MAX_DGRAMS,
-    SSDP_RECV_BUF,
+    BODY_MAX, DISCOVERY_WINDOW, HTTP_DEADLINE, HTTP_HEAD_MAX, MAX_REFRESH, SSDP_ADDR,
+    SSDP_MAX_DGRAMS, SSDP_PORT, SSDP_RECV_BUF,
 };
-use crate::ssdp::{Responder, SEARCH_TARGETS, SsdpPolicy, msearch, parse_response, select};
+use crate::ssdp::{SEARCH_TARGETS, Selection, SsdpPolicy, msearch, parse_response, select};
 use crate::url::GatewayAddr;
 
 /// Повторная отправка запросов SSDP.
@@ -36,7 +36,7 @@ pub(crate) struct Net {
 impl Net {
     pub(crate) fn production() -> Self {
         Net {
-            ssdp_target: SocketAddrV4::new(Ipv4Addr::new(239, 255, 255, 250), 1900),
+            ssdp_target: SocketAddrV4::new(SSDP_ADDR, SSDP_PORT),
             allow_loopback: false,
             http_deadline: HTTP_DEADLINE,
             discovery_window: DISCOVERY_WINDOW,
@@ -71,7 +71,7 @@ impl Net {
         &self,
         own_ip: Ipv4Addr,
         overall: Instant,
-    ) -> Result<Vec<Responder>, NetError> {
+    ) -> Result<Selection, NetError> {
         let start = Instant::now();
         let end = overall.min(start + self.discovery_window);
         let resend_at = start + RESEND_AFTER;
@@ -104,7 +104,9 @@ impl Net {
         let mut resent = false;
         let mut received = 0usize;
         let mut errors = 0usize;
-        let mut found: Vec<Responder> = Vec::new();
+        let mut found = Vec::new();
+        // достигнут предел датаграмм или ошибок: поток мог быть заливкой, итог неоднозначный
+        let mut capped = false;
         let mut buf = [0u8; SSDP_RECV_BUF];
         loop {
             let now = Instant::now();
@@ -125,6 +127,7 @@ impl Net {
                 Ok((n, SocketAddr::V4(src))) => {
                     received += 1;
                     if received > SSDP_MAX_DGRAMS {
+                        capped = true;
                         break;
                     }
                     // датаграмма, заполнившая буфер, могла быть обрезана
@@ -141,12 +144,15 @@ impl Net {
                 Err(_) => {
                     errors += 1;
                     if errors > SSDP_MAX_DGRAMS {
+                        capped = true;
                         break;
                     }
                 }
             }
         }
-        Ok(select(found))
+        let mut sel = select(found);
+        sel.ambiguous |= capped;
+        Ok(sel)
     }
 
     /// Один запрос HTTP: соединение, запись и чтение укладываются в один срок

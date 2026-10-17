@@ -9,7 +9,7 @@ use std::collections::hash_map::RandomState;
 use std::hash::BuildHasher;
 use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chervo_addr::{AddrClass, GatewayInfo, MapReport, MapRequest, MapStatus, PortMapper, classify};
@@ -103,6 +103,8 @@ pub struct UpnpMapper {
     /// Роутер, ответивший 725 (только в памяти).
     needs_permanent: Mutex<Option<RouterId>>,
     backoff: Mutex<Backoff>,
+    /// Занято, пока идёт `refresh`: второй одновременный вызов сразу получает `Failed`.
+    busy: Mutex<()>,
     /// Растёт при каждом `release`: незавершённый `refresh` не оставит проброс после выхода.
     epoch: AtomicU64,
     net: Net,
@@ -255,6 +257,7 @@ impl UpnpMapper {
             settings: Mutex::new(clamp_settings(settings)),
             current: Mutex::new(None),
             needs_permanent: Mutex::new(None),
+            busy: Mutex::new(()),
             backoff: Mutex::new(Backoff {
                 next: BACKOFF_MIN,
                 internal: None,
@@ -291,16 +294,25 @@ impl UpnpMapper {
         }
     }
 
-    /// Поиск и описания. Ответчик с неудачным описанием пропускается.
+    /// Поиск и описания. Ответчик с неудачным описанием пропускается. Отказ по умолчанию
+    /// (ред. 2 по ревью безопасности): `Ambiguous`, если поиск неоднозначен (конфликт LOCATION,
+    /// предел датаграмм, слишком много ответчиков) или какой-то ответчик не успел пройти
+    /// проверку до срока.
     fn find_routers(&self, own_ip: Ipv4Addr, overall: Instant) -> Result<Vec<Found>, UpnpError> {
-        let responders = self.net.discover(own_ip, overall)?;
+        let sel = self.net.discover(own_ip, overall)?;
+        if sel.ambiguous {
+            return Err(UpnpError::Ambiguous);
+        }
         let mut out = Vec::new();
-        for resp in responders {
+        for resp in sel.responders {
             if Instant::now() >= overall {
-                break;
+                return Err(UpnpError::Ambiguous);
             }
             let req = get_request(&resp.target.gw, &resp.target.path);
             let Ok(bytes) = self.net.http(&resp.target.gw, own_ip, &req, overall) else {
+                if Instant::now() >= overall {
+                    return Err(UpnpError::Ambiguous);
+                }
                 continue;
             };
             let Ok(reply) = parse_response(&bytes) else {
@@ -315,6 +327,30 @@ impl UpnpMapper {
             out.push(Found { resp, desc });
         }
         Ok(out)
+    }
+
+    /// Найденные роутеры из списка разрешённых.
+    fn candidates<'f>(found: &'f [Found], settings: &UpnpSettings) -> Vec<&'f Found> {
+        found
+            .iter()
+            .filter(|f| settings.routers.iter().any(|a| a.id.0 == f.desc.udn))
+            .collect()
+    }
+
+    /// Сохранённый проброс принадлежит именно этому, только что найденному роутеру.
+    fn is_same_router(m: &Mapping, cand: &Found) -> bool {
+        m.router.0 == cand.desc.udn
+            && m.gw == cand.resp.target.gw
+            && cand
+                .desc
+                .services
+                .iter()
+                .any(|svc| svc.kind == m.kind && svc.control == m.control)
+    }
+
+    /// Забыть сохранённый проброс, ничего не отправляя (аренда не дольше часа сама истечёт).
+    fn forget_current(&self) {
+        *lock(&self.current) = None;
     }
 
     /// При смене сети (другой внутренний адрес) задержка повтора начинается заново.
@@ -352,32 +388,20 @@ impl UpnpMapper {
     }
 
     /// Удаляет проброс, если роутер всё ещё показывает его нашим. Без поиска, по сохранённому
-    /// адресу и службе, в пределах `budget`.
-    fn delete_if_ours(&self, m: &Mapping, budget: Duration) {
+    /// адресу и службе, не позже `deadline`. Вызывать только после подтверждения роутера.
+    fn delete_if_ours(&self, m: &Mapping, deadline: Instant) {
         let s = Sess {
             net: &self.net,
             own_ip: *m.internal.ip(),
             gw: m.gw,
             control: &m.control,
             kind: m.kind,
-            overall: Instant::now() + budget,
+            overall: deadline,
         };
         if let Ok(Some(e)) = s.get_specific(m.ext)
             && is_ours(&e, m.internal)
         {
             let _ = s.delete(m.ext);
-        }
-    }
-
-    /// Шаг 1: текущий проброс не для этого адреса или для роутера, которого больше нет в
-    /// списке, удаляется (по возможности) и забывается.
-    fn drop_stale_current(&self, settings: &UpnpSettings, internal: SocketAddrV4) {
-        let cur = lock(&self.current).clone();
-        let Some(m) = cur else { return };
-        let allowed = settings.routers.iter().any(|a| a.id == m.router);
-        if m.internal != internal || !allowed {
-            self.delete_if_ours(&m, self.net.http_deadline);
-            *lock(&self.current) = None;
         }
     }
 
@@ -486,6 +510,15 @@ fn random_port(attempt: usize, internal_port: u16) -> u16 {
 
 impl PortMapper for UpnpMapper {
     fn refresh(&self, req: MapRequest) -> MapReport {
+        // один refresh за раз: пока идёт первый (в том числе брошенный по таймауту), второй не
+        // начинается и не шлёт ни одного пакета
+        let _busy = match self.busy.try_lock() {
+            Ok(g) => g,
+            Err(TryLockError::Poisoned(p)) => p.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                return Self::report(MapStatus::Failed, None, BACKOFF_MIN);
+            }
+        };
         let overall = Instant::now() + self.net.max_refresh;
         let internal = req.internal;
         let own_ip = *internal.ip();
@@ -497,27 +530,37 @@ impl PortMapper for UpnpMapper {
         let epoch = self.epoch.load(Ordering::SeqCst);
         let settings = lock(&self.settings).clone();
 
-        // 1. устаревший текущий проброс; пустой список: больше ни одного пакета
-        self.drop_stale_current(&settings, internal);
+        // 1. пустой список: ни одного пакета, сохранённый проброс забывается без отправки
         if settings.routers.is_empty() {
+            self.forget_current();
             return Self::quiet(MapStatus::Off, None);
         }
 
-        // 2. поиск, описания, разрешённый роутер
-        let Ok(found) = self.find_routers(own_ip, overall) else {
-            return self.failure(MapStatus::Failed);
+        // 2. поиск, описания, разрешённый роутер. Если он не единственный кандидат, сохранённый
+        // проброс забывается без отправки: адрес мог оказаться чужой сетью с той же адресацией
+        let found = match self.find_routers(own_ip, overall) {
+            Ok(f) => f,
+            Err(UpnpError::Ambiguous) => {
+                self.forget_current();
+                return self.failure(MapStatus::Ambiguous);
+            }
+            Err(_) => return self.failure(MapStatus::Failed),
         };
         if found.is_empty() {
+            self.forget_current();
             return self.failure(MapStatus::NoGateway);
         }
-        let candidates: Vec<&Found> = found
-            .iter()
-            .filter(|f| settings.routers.iter().any(|a| a.id.0 == f.desc.udn))
-            .collect();
+        let candidates = Self::candidates(&found, &settings);
         let cand = match candidates.as_slice() {
-            [] => return Self::quiet(MapStatus::NotHomeNetwork, None),
+            [] => {
+                self.forget_current();
+                return Self::quiet(MapStatus::NotHomeNetwork, None);
+            }
             [one] => *one,
-            _ => return Self::quiet(MapStatus::Ambiguous, None),
+            _ => {
+                self.forget_current();
+                return Self::quiet(MapStatus::Ambiguous, None);
+            }
         };
         let router = RouterId(cand.desc.udn.clone());
         let gw = cand.resp.target.gw;
@@ -526,12 +569,16 @@ impl PortMapper for UpnpMapper {
             .iter()
             .any(|a| a.id == router && a.permanent_ok);
 
+        // сохранённый проброс: удаляется только если это тот же только что найденный роутер
+        // (смена внутреннего адреса); иначе забывается без отправки
         let prev = lock(&self.current).clone();
         if let Some(m) = &prev
-            && (m.router != router || m.gw != gw)
+            && (!Self::is_same_router(m, cand) || m.internal != internal)
         {
-            self.delete_if_ours(m, self.net.http_deadline);
-            *lock(&self.current) = None;
+            if Self::is_same_router(m, cand) {
+                self.delete_if_ours(m, overall);
+            }
+            self.forget_current();
         }
         let renew = lock(&self.current)
             .as_ref()
@@ -601,6 +648,14 @@ impl PortMapper for UpnpMapper {
             return self.failure(MapStatus::Failed);
         };
         let permanent = entry.lease == 0;
+        // бессрочная аренда, которую не просили, допустима только на нашем порту (найдётся
+        // проверкой при старте); на запасном порту её убираем и считаем сбоем
+        if permanent && lease_asked != 0 && ext != port {
+            if is_ours(&entry, internal) {
+                let _ = s.delete(ext);
+            }
+            return self.failure(MapStatus::Failed);
+        }
         let lease = if permanent {
             0
         } else if lease_asked > 0 {
@@ -622,7 +677,7 @@ impl PortMapper for UpnpMapper {
             let mut cur = lock(&self.current);
             if self.epoch.load(Ordering::SeqCst) != epoch {
                 drop(cur);
-                self.delete_if_ours(&mapping, self.net.http_deadline);
+                self.delete_if_ours(&mapping, overall);
                 return self.failure(MapStatus::Failed);
             }
             *cur = Some(mapping);
@@ -643,8 +698,22 @@ impl PortMapper for UpnpMapper {
     fn release(&self) {
         self.epoch.fetch_add(1, Ordering::SeqCst);
         let cur = lock(&self.current).take();
-        if let Some(m) = cur {
-            self.delete_if_ours(&m, RELEASE_BUDGET);
+        let Some(m) = cur else { return };
+        // ничего не шлём, пока сохранённый роутер не подтверждён заново как единственный
+        // разрешённый кандидат в сети (иначе запрос ушёл бы постороннему устройству)
+        let settings = lock(&self.settings).clone();
+        let own_ip = *m.internal.ip();
+        if settings.routers.is_empty() || !self.own_ip_ok(own_ip) {
+            return;
+        }
+        let overall = Instant::now() + RELEASE_BUDGET;
+        let Ok(found) = self.find_routers(own_ip, overall) else {
+            return;
+        };
+        if let [one] = Self::candidates(&found, &settings).as_slice()
+            && Self::is_same_router(&m, one)
+        {
+            self.delete_if_ours(&m, overall);
         }
     }
 }

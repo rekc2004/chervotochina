@@ -20,7 +20,7 @@ fn location_rules() {
     assert_eq!(a, SocketAddrV4::new(R, 80));
     assert_eq!(p, "/x");
     // допустимые знаки пути
-    loc("http://192.168.1.1/a-b._~/!$'()*+,;=:@%41").unwrap();
+    loc("http://192.168.1.1/a-b._~/!$'()*+,:@%41").unwrap();
 
     let bad = |v: &str, e: UrlError| assert_eq!(loc(v).unwrap_err(), e, "{v}");
     bad("http://router.local/x", UrlError::Host);
@@ -55,6 +55,10 @@ fn location_rules() {
     bad("http://192.168.1.1/a%2", UrlError::Percent);
     bad("http://192.168.1.1/a%", UrlError::Percent);
     bad("http://192.168.1.1/a?b=c", UrlError::PathChar);
+    // `;` и `=` не допускаются в пути (ревью безопасности, L5)
+    bad("http://192.168.1.1/a;b", UrlError::PathChar);
+    bad("http://192.168.1.1/a=b", UrlError::PathChar);
+    bad("http://192.168.1.1/;", UrlError::PathChar);
     bad("http://192.168.1.1/a#b", UrlError::PathChar);
     bad("http://192.168.1.1/a b", UrlError::PathChar);
     bad("http://192.168.1.1/a\\b", UrlError::PathChar);
@@ -106,6 +110,13 @@ fn control_url_relative_absolute_and_full() {
     assert_eq!(c("/a/../b").unwrap_err(), UrlError::DotSegment);
     assert_eq!(c("../b").unwrap_err(), UrlError::DotSegment);
     assert_eq!(c("/a?b").unwrap_err(), UrlError::PathChar);
+    assert_eq!(c("/a;b").unwrap_err(), UrlError::PathChar);
+    assert_eq!(c("/a=b").unwrap_err(), UrlError::PathChar);
+    assert_eq!(c("a;x=1/ctl").unwrap_err(), UrlError::PathChar);
+    assert_eq!(
+        c("http://192.168.1.1:5000/c;d").unwrap_err(),
+        UrlError::PathChar
+    );
     assert_eq!(c("/a%00").unwrap_err(), UrlError::Percent);
     assert_eq!(c("http://192.168.1.1:5000").unwrap_err(), UrlError::NoPath);
 }

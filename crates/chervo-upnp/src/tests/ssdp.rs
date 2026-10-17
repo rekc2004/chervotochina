@@ -226,24 +226,38 @@ fn ssdp_loopback_only_in_test_policy() {
 }
 
 #[test]
-fn ssdp_select_drops_conflicting_location() {
+fn ssdp_select_conflicting_location_is_ambiguous() {
     let r = |ip: Ipv4Addr, path: &str| {
         let s = response("", ST_IGD_V1, &format!("http://{ip}:5000{path}"));
         parse_response(s.as_bytes(), src(ip), OWN, SsdpPolicy::STRICT).unwrap()
     };
     let a = ip(192, 168, 1, 1);
     let b = ip(192, 168, 1, 2);
-    // один IP, два разных LOCATION: отброшен целиком; второй ответчик остаётся
+    // один IP, два разных LOCATION: итог неоднозначный (ред. 2), IP в список не попадает
     let out = select(vec![r(a, "/x"), r(b, "/y"), r(a, "/z")]);
-    assert_eq!(out.len(), 1);
-    assert_eq!(out[0].ip, b);
+    assert!(out.ambiguous);
+    assert_eq!(out.responders.iter().map(|x| x.ip).collect::<Vec<_>>(), [b]);
+    // порядок не важен: поддельная датаграмма после настоящей тоже даёт неоднозначность
+    assert!(select(vec![r(a, "/z"), r(a, "/x")]).ambiguous);
+    assert!(select(vec![r(a, "/x"), r(b, "/y"), r(a, "/z")]).ambiguous);
     // повтор одного и того же сводится к одному, порядок прихода сохраняется
     let out = select(vec![r(b, "/y"), r(a, "/x"), r(b, "/y")]);
-    assert_eq!(out.iter().map(|x| x.ip).collect::<Vec<_>>(), [b, a]);
-    // не более 8
+    assert!(!out.ambiguous);
+    assert_eq!(
+        out.responders.iter().map(|x| x.ip).collect::<Vec<_>>(),
+        [b, a]
+    );
+    // ровно 8 IP: не неоднозначно
+    let eight: Vec<Responder> = (1..=8).map(|i| r(ip(192, 168, 2, i), "/d")).collect();
+    let out = select(eight);
+    assert!(!out.ambiguous);
+    assert_eq!(out.responders.len(), 8);
+    // больше 8 IP: неоднозначно, в списке не более 8
     let many: Vec<Responder> = (1..=12).map(|i| r(ip(192, 168, 2, i), "/d")).collect();
     let out = select(many);
-    assert_eq!(out.len(), 8);
-    assert_eq!(out[7].ip, ip(192, 168, 2, 8));
-    assert!(select(Vec::new()).is_empty());
+    assert!(out.ambiguous);
+    assert_eq!(out.responders.len(), 8);
+    assert_eq!(out.responders[7].ip, ip(192, 168, 2, 8));
+    let out = select(Vec::new());
+    assert!(!out.ambiguous && out.responders.is_empty());
 }

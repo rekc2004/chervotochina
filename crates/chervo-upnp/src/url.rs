@@ -101,8 +101,6 @@ fn is_path_char(b: u8) -> bool {
                 | b'*'
                 | b'+'
                 | b','
-                | b';'
-                | b'='
                 | b':'
                 | b'@'
                 | b'%'
