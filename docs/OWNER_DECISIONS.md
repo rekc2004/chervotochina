@@ -106,6 +106,10 @@
 ## Зависимости: zvariant (2026-10-17)
 - RUSTSEC-2026-0370/0371/0372 (zvariant, zbus_names, zvariant_derive 5.x «не сопровождаются», влиты в zbus 6.0): **временное исключение** в `.cargo/audit.toml` с обоснованием. Тянутся только хранилищем Secret Service на Linux (secret-service 5.2.0 на zbus 5). Снять, когда выйдет secret-service на zbus 6; не позже этапа 17. Уязвимости по-прежнему блокируют CI.
 
+## Этап 15: приём файлов (2026-10-17)
+- **Q1 Юникод = добавить `unicode-normalization` 0.1.26** ((MIT OR Apache-2.0) AND Unicode-3.0, лицензии разрешены в deny.toml): имена приводятся к NFC. Условие: builder проверяет исходник на `unsafe`; неожиданное — стоп и вопрос.
+- **Q2 Архивы = как обычные файлы** (решение владельца, против рекомендации architect): без предупреждения, автоприём разрешён. Исполняемые файлы, образы дисков и документы с макросами — по спецификации 15.
+
 ## Статус учёта
 - [x] U6 учтён в DECISION.md / OPEN_QUESTIONS.md (DECISION 2.4, 3.1, 4; OPEN_QUESTIONS U6; TASK этап 12)
 - [x] U7 учтён в DECISION.md / OPEN_QUESTIONS.md (DECISION 2.5, 3.3; OPEN_QUESTIONS U7, уточнение U25; TASK этапы 9, 13)
