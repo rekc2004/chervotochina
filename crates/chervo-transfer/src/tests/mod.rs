@@ -5,11 +5,18 @@
     clippy::indexing_slicing,
     clippy::panic
 )]
-//! Тесты части X1: кодек, хэши, файл состояния, fuzz-смоук на stable.
+//! Тесты частей X1 (кодек, хэши, состояние, fuzz-смоук) и X2/X3 (сессии, писатель, размещение).
 
 mod codec;
+mod fake;
+mod flow;
 mod fuzz;
 mod hash;
+mod integrity;
+mod kit;
+mod place;
+mod resume;
+mod src_guard;
 mod state;
 
 use chervo_transport::{RecvStream, TransportError};

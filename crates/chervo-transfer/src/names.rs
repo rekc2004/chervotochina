@@ -12,6 +12,15 @@ use crate::limits::MAX_NAME_BYTES;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TransferId(pub [u8; 16]);
 
+impl TransferId {
+    /// Случайный идентификатор из CSPRNG ОС. `None`: источник случайности недоступен.
+    pub fn generate() -> Option<Self> {
+        let mut b = [0u8; 16];
+        getrandom::fill(&mut b).ok()?;
+        Some(Self(b))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TransferKey {
     pub pair: PairId,

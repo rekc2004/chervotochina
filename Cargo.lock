@@ -417,10 +417,15 @@ dependencies = [
 name = "chervo-transfer"
 version = "0.0.0"
 dependencies = [
+ "chervo-addr",
+ "chervo-connect",
+ "chervo-friends",
  "chervo-identity",
  "chervo-transport",
+ "getrandom 0.4.3",
  "ring",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]

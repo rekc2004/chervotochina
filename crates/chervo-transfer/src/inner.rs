@@ -1,0 +1,95 @@
+//! Общее состояние `Transfers`: реестры сессий и связь с движком соединений.
+
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use chervo_identity::PairId;
+use tokio::sync::watch;
+use tokio::time::Instant;
+
+use crate::links::Links;
+use crate::names::TransferKey;
+use crate::policy::AcceptPolicy;
+use crate::receiver::RecvSession;
+use crate::sender::SendSession;
+use crate::shared::{Shared, lock};
+
+#[derive(Default)]
+pub(crate) struct Registry {
+    pub(crate) out: HashMap<TransferKey, Arc<SendSession>>,
+    pub(crate) inb: HashMap<TransferKey, Arc<RecvSession>>,
+    /// Недавние потоки управления от каждого друга (для предела в минуту).
+    pub(crate) ctl_recent: HashMap<PairId, VecDeque<Instant>>,
+}
+
+pub(crate) struct Inner<L: Links> {
+    pub(crate) sh: Arc<Shared>,
+    pub(crate) links: Arc<L>,
+    pub(crate) policy: Arc<dyn AcceptPolicy>,
+    pub(crate) reg: Mutex<Registry>,
+    /// Растёт при каждом событии движка: получатели ждут появления соединения.
+    pub(crate) conn_gen: watch::Sender<u64>,
+    /// Период опроса соединения и прав друзей (5 с).
+    pub(crate) poll: Duration,
+}
+
+impl<L: Links> Inner<L> {
+    pub(crate) fn find_out(&self, key: &TransferKey) -> Option<Arc<SendSession>> {
+        lock(&self.reg).out.get(key).cloned()
+    }
+
+    pub(crate) fn find_inb(&self, key: &TransferKey) -> Option<Arc<RecvSession>> {
+        lock(&self.reg).inb.get(key).cloned()
+    }
+
+    pub(crate) fn remove_out(&self, key: &TransferKey) {
+        lock(&self.reg).out.remove(key);
+    }
+
+    pub(crate) fn remove_inb(&self, key: &TransferKey) {
+        lock(&self.reg).inb.remove(key);
+    }
+
+    pub(crate) fn bump(&self) {
+        self.conn_gen.send_modify(|v| *v = v.wrapping_add(1));
+    }
+
+    /// Не больше `ctl_in_per_min` потоков управления в минуту от одного друга.
+    pub(crate) fn ctl_rate_ok(&self, pair: &PairId) -> bool {
+        let cap = usize::try_from(self.sh.cfg.ctl_in_per_min).unwrap_or(usize::MAX);
+        let now = Instant::now();
+        let mut reg = lock(&self.reg);
+        let q = reg.ctl_recent.entry(*pair).or_default();
+        while q
+            .front()
+            .is_some_and(|t| now.saturating_duration_since(*t) >= Duration::from_secs(60))
+        {
+            q.pop_front();
+        }
+        if q.len() >= cap {
+            return false;
+        }
+        q.push_back(now);
+        // записи ушедших друзей не копятся
+        if reg.ctl_recent.len() > 4096 {
+            reg.ctl_recent.retain(|_, q| !q.is_empty());
+        }
+        true
+    }
+}
+
+impl<L: Links> Inner<L> {
+    /// Остановка всех передач: задачи завершаются, блокирующие проверки прерываются. Состояние
+    /// получателя на диске остаётся для возобновления.
+    pub(crate) fn stop_all(&self) {
+        self.sh.shutdown.stop();
+        let reg = lock(&self.reg);
+        for s in reg.out.values() {
+            s.shutdown();
+        }
+        for s in reg.inb.values() {
+            s.halt.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}

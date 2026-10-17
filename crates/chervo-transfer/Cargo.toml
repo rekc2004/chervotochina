@@ -8,11 +8,16 @@ publish.workspace = true
 [dependencies]
 chervo-identity.workspace = true
 chervo-transport.workspace = true
+chervo-connect.workspace = true
+chervo-friends.workspace = true
+getrandom.workspace = true
 ring.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+chervo-addr.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+zeroize.workspace = true
 
 [lints]
 workspace = true
