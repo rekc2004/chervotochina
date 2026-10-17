@@ -276,6 +276,7 @@ table inet chv13a_h {
   counter router { }
   counter nd { }
   counter mcast_kernel { }
+  counter icmp_unreach { }
   counter other { }
   counter inbound { }
   chain output {
@@ -289,6 +290,8 @@ table inet chv13a_h {
     ip protocol igmp counter name "mcast_kernel" accept
     $ND6
     $M6
+    # ядро отвечает «порт недоступен» на запоздавший ответ SSDP после закрытия сокета поиска (не наша программа)
+    icmp type destination-unreachable counter name "icmp_unreach" accept
     counter name "other" accept
   }
   chain input {
@@ -432,7 +435,7 @@ probe_status() { # файл
 
 # Запись проброса в таблице роутера r (правило dnat на PORT)
 entry_present() {
-  nsx r nft list table inet nat13a 2>/dev/null | grep -Eq "udp dport $PORT .*dnat"
+  nsx r nft list table inet nat13a 2>/dev/null | grep -Eq "(udp|th) dport $PORT .*dnat"
 }
 
 # Остаток аренды, секунды: сначала GetSpecificPortMappingEntry через curl с хоста x, иначе lease_file роутера.
@@ -603,12 +606,12 @@ row_restart() {
   if ! start_router_mpd; then
     verdict RESTART INCONCLUSIVE "miniupnpd не запустился"; row_end; return
   fi
-  probe_bg "$PROBE" map map1 "$PORT" "$UDN"
+  probe_bg "$PROBE" map1 map "$PORT" "$UDN"
   wait_grep "$RD/map1.log" '^Mapped: ' 40 || f+="run1_no_Mapped "
   probe_kill9
   entry_present || f+="entry_gone_after_kill9 "
   off="$(wc -l < "$RD/miniupnpd.log")"
-  probe_bg "$PROBE" map map2 "$PORT" "$UDN"
+  probe_bg "$PROBE" map2 map "$PORT" "$UDN"
   wait_grep "$RD/map2.log" '^Mapped: ' 40 || f+="run2_no_Mapped "
   entry_present || f+="entry_absent_after_restart "
   # порядок обращений ко второму запуску по журналу miniupnpd [D]: DeletePortMapping раньше AddPortMapping
