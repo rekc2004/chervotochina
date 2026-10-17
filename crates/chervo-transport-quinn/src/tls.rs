@@ -57,6 +57,8 @@ pub(crate) fn pre_auth_transport(
     t.max_concurrent_uni_streams(VarInt::from_u32(0));
     t.datagram_receive_buffer_size(None);
     t.receive_window(VarInt::from_u32(cfg.preauth_receive_window));
+    t.stream_receive_window(VarInt::from_u32(cfg.stream_receive_window));
+    t.send_window(cfg.send_window);
     let idle = IdleTimeout::try_from(cfg.idle_timeout).map_err(|_| TlsError)?;
     t.max_idle_timeout(Some(idle));
     t.keep_alive_interval(Some(cfg.keep_alive));

@@ -98,6 +98,14 @@ pub struct QuinnConfig {
     pub incoming_buffer_total: u64,
     /// Окно соединения до KK.
     pub preauth_receive_window: u32,
+    /// Окно приёма одного потока (оба конца, с первого пакета). Пока идёт KK его ограничивает
+    /// малое окно соединения; после KK действует оно и окно соединения ниже.
+    pub stream_receive_window: u32,
+    /// Окно приёма соединения после KK (заменяет `preauth_receive_window`): предел того, что
+    /// недоверенный, но аутентифицированный друг может заставить нас держать в памяти.
+    pub post_auth_receive_window: u32,
+    /// Окно отправки соединения (оба конца, с первого пакета).
+    pub send_window: u64,
     /// Потоков после KK (однонаправленных всегда 0, датаграммы выключены).
     pub post_auth_bidi: u32,
     pub idle_timeout: Duration,
@@ -127,6 +135,20 @@ pub struct QuinnConfig {
     pub max_race: usize,
 }
 
+/// Нижняя граница окон: размер окна соединения до KK по умолчанию.
+const MIN_WINDOW: u32 = 64 * 1024;
+
+impl QuinnConfig {
+    /// Окна согласованы: `MIN_WINDOW <= stream_receive_window <= post_auth_receive_window`,
+    /// `send_window >= MIN_WINDOW` и все представимы в `VarInt`.
+    pub(crate) fn windows_valid(&self) -> bool {
+        self.stream_receive_window >= MIN_WINDOW
+            && self.stream_receive_window <= self.post_auth_receive_window
+            && self.send_window >= u64::from(MIN_WINDOW)
+            && quinn::VarInt::from_u64(self.send_window).is_ok()
+    }
+}
+
 impl Default for QuinnConfig {
     fn default() -> Self {
         Self {
@@ -142,6 +164,9 @@ impl Default for QuinnConfig {
             incoming_buffer: 16 * 1024,
             incoming_buffer_total: 1024 * 1024,
             preauth_receive_window: 64 * 1024,
+            stream_receive_window: 4 * 1024 * 1024,
+            post_auth_receive_window: 16 * 1024 * 1024,
+            send_window: 16 * 1024 * 1024,
             post_auth_bidi: 16,
             idle_timeout: Duration::from_secs(30),
             keep_alive: Duration::from_secs(10),
@@ -293,6 +318,9 @@ impl QuinnTransport {
         filter: Arc<dyn PeerFilter>,
     ) -> Result<Self, TransportError> {
         let rt = tokio::runtime::Handle::try_current().map_err(|_| TransportError::Io)?;
+        if !cfg.windows_valid() {
+            return Err(TransportError::Io);
+        }
         sock.set_nonblocking(true).map_err(|_| TransportError::Io)?;
         let base = tls::base_server_config(&cfg).map_err(|_| TransportError::Io)?;
         let counters = Arc::new(Counters::default());

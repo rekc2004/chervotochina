@@ -172,7 +172,7 @@ pub(crate) fn promote(
     theirs_pub: [u8; 32],
 ) -> Promoted {
     conn.set_max_concurrent_bi_streams(VarInt::from_u32(inner.cfg.post_auth_bidi));
-    conn.set_receive_window(VarInt::MAX);
+    conn.set_receive_window(VarInt::from_u32(inner.cfg.post_auth_receive_window));
     match inner.registry.admit(
         &inner.peers,
         pair,

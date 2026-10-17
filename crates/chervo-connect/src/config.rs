@@ -27,6 +27,14 @@ pub struct ConnectConfig {
     pub addr_info_timeout: Duration,
     pub addr_info_in_per_min: u32,
     pub addr_info_out_interval: Duration,
+    /// Потоков зарегистрированных видов (`Engine::stream_inbox`) в минуту на одно соединение,
+    /// все виды вместе; сверх этого поток сбрасывается.
+    pub extra_streams_in_per_min: u32,
+    /// Ёмкость приёмника потоков (`Engine::stream_inbox`); переполнен: поток сбрасывается.
+    pub stream_inbox_capacity: usize,
+    /// Одновременных чтений байта вида на соединение; сверх этого приём потоков ждёт
+    /// (обратное давление), остальные потоки друга не страдают от одного молчащего.
+    pub max_pending_kind_reads: usize,
     pub invite_session: Duration,
     /// Срок приглашающего на M1 внутри сессии (ревью 13, L2): держатель токена, молчащий
     /// после соединения, освобождает приглашение через это время, а не через `invite_session`.
@@ -58,6 +66,9 @@ impl Default for ConnectConfig {
             addr_info_timeout: Duration::from_secs(5),
             addr_info_in_per_min: 4,
             addr_info_out_interval: Duration::from_secs(10),
+            extra_streams_in_per_min: 60,
+            stream_inbox_capacity: 32,
+            max_pending_kind_reads: 4,
             invite_session: Duration::from_secs(300),
             invite_m1_deadline: Duration::from_secs(20),
             expire_interval: Duration::from_secs(60),

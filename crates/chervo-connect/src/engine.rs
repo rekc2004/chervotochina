@@ -18,7 +18,7 @@ use chervo_identity::{KxPeer, ListKeyStore, PairId, SecretStore};
 use chervo_token::{InviteError, Sas, SignedAddrUpdate, TokenError};
 use chervo_transport::{Connection, EventSource, ManagedTransport, PeerAddr};
 use chervo_transport::{TransportError, TransportEvent};
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::Instant;
 
@@ -27,6 +27,7 @@ use crate::clock::{Clock, RouteProbe};
 use crate::config::ConnectConfig;
 use crate::diag::{Diagnosis, NoDirectPath};
 use crate::gateway::Gateway;
+use crate::inbox::IncomingStream;
 use crate::invite::Invite;
 use crate::limiter::{Limiter, add_sat};
 use crate::plan::{Candidate, PathKind, friend_plan, guest_plan, path_kind, select};
@@ -45,6 +46,10 @@ pub enum ConnectError {
     InviteSessionsExhausted,
     Internal,
     Shutdown,
+    /// Вид потока для приёмника не годится (0, ADDR_INFO, повтор, пустой список).
+    InvalidKind,
+    /// Вид потока уже закреплён за живым приёмником.
+    KindTaken,
 }
 
 impl fmt::Display for ConnectError {
@@ -59,6 +64,8 @@ impl fmt::Display for ConnectError {
             Self::InviteSessionsExhausted => "invite sessions exhausted",
             Self::Internal => "internal error",
             Self::Shutdown => "engine is shut down",
+            Self::InvalidKind => "invalid stream kind",
+            Self::KindTaken => "stream kind already registered",
         };
         f.write_str(text)
     }
@@ -209,6 +216,9 @@ pub(crate) struct State<C> {
     pub(crate) fast_global_until: Option<Instant>,
     pub(crate) key_problems: HashMap<PairId, KeyStatus>,
     pub(crate) last_success_any: Option<Instant>,
+    /// Удержания соединений: пара -> (`conn_id` соединения, число живых удержаний). Удержание
+    /// относится к одному соединению; запись другого `conn_id` на живое не действует.
+    pub(crate) holds: HashMap<PairId, (u64, usize)>,
 }
 
 pub(crate) struct Inner<T: ManagedTransport, S> {
@@ -224,6 +234,9 @@ pub(crate) struct Inner<T: ManagedTransport, S> {
     pub(crate) shut: AtomicBool,
     pub(crate) tasks: Mutex<Vec<JoinHandle<()>>>,
     pub(crate) gw: Gateway,
+    /// Зарегистрированные виды потоков -> отправитель в приёмник. Замок листовой: берётся
+    /// отдельно от `state`, не вместе с ним.
+    pub(crate) kinds: Mutex<HashMap<u8, mpsc::Sender<IncomingStream<T::Conn>>>>,
 }
 
 async fn wait_shutdown(mut rx: watch::Receiver<bool>) {
@@ -261,6 +274,18 @@ where
 
     pub(crate) fn emit(&self, e: EngineEvent) {
         let _ = self.events.send(e);
+    }
+
+    pub(crate) fn subscribe_events(&self) -> EngineEvents {
+        EngineEvents {
+            rx: self.events.subscribe(),
+        }
+    }
+
+    pub(crate) fn kinds_lock(
+        &self,
+    ) -> MutexGuard<'_, HashMap<u8, mpsc::Sender<IncomingStream<T::Conn>>>> {
+        self.kinds.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     pub(crate) fn is_shut(&self) -> bool {
@@ -305,6 +330,8 @@ where
         for c in &conns {
             c.close();
         }
+        // отправители приёмников снимаются: `StreamInbox::recv` вернёт `None`
+        self.kinds_lock().clear();
     }
 
     // ---------------------------------------------------------------- публикация
@@ -455,14 +482,21 @@ where
                     since: now,
                 },
             );
+            // удержания прежнего соединения новому не принадлежат
+            if st.holds.get(&pair).is_some_and(|(hid, _)| *hid != id) {
+                st.holds.remove(&pair);
+            }
             events.push(EngineEvent::Connected { pair, path });
-            // сверх предела закрывается самое давнее соединение (других видов потоков в этом
-            // этапе нет, поэтому «занятых» соединений среди них не бывает)
+            // сверх предела закрывается самое давнее соединение без удержания (идёт передача:
+            // `hold`); если таких нет, новое остаётся и предел превышается (число удержаний
+            // ограничено числом активных передач)
             while st.live.len() > self.cfg.max_live {
                 let oldest = st
                     .live
                     .iter()
-                    .filter(|(p, _)| **p != pair)
+                    .filter(|(p, l)| {
+                        **p != pair && !st.holds.get(*p).is_some_and(|(hid, _)| *hid == l.id)
+                    })
                     .min_by_key(|(_, l)| l.since)
                     .map(|(p, _)| *p);
                 let Some(victim) = oldest else { break };
@@ -940,6 +974,7 @@ where
             fast_global_until: Some(add_sat(now, cfg.fast_window)),
             key_problems: HashMap::new(),
             last_success_any: None,
+            holds: HashMap::new(),
         };
         let inner = Arc::new(Inner {
             transport,
@@ -954,6 +989,7 @@ where
             shut: AtomicBool::new(false),
             tasks: Mutex::new(Vec::new()),
             gw: Gateway::new(),
+            kinds: Mutex::new(HashMap::new()),
         });
         let transport_events = inner.transport.subscribe();
         {

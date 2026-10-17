@@ -92,6 +92,14 @@ fn config_defaults_match_the_spec() {
     assert_eq!(c.addr_info_timeout, Duration::from_secs(5));
     assert_eq!(c.addr_info_in_per_min, 4);
     assert_eq!(c.addr_info_out_interval, Duration::from_secs(10));
+    assert_eq!(
+        (
+            c.extra_streams_in_per_min,
+            c.stream_inbox_capacity,
+            c.max_pending_kind_reads
+        ),
+        (60, 32, 4)
+    );
     assert_eq!(c.invite_session, Duration::from_secs(300));
     assert_eq!(c.expire_interval, Duration::from_secs(60));
     assert_eq!(c.unreachable_after_fails, 3);

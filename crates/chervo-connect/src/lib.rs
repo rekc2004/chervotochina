@@ -22,6 +22,7 @@ mod diag;
 mod dispatch;
 mod engine;
 mod gateway;
+mod inbox;
 mod invite;
 mod limiter;
 mod plan;
@@ -36,6 +37,7 @@ pub use clock::{Clock, ClockRangeError, RouteProbe, SystemClock, SystemProbe};
 pub use config::ConnectConfig;
 pub use diag::{Diagnosis, NoDirectPath};
 pub use engine::{ConnectError, Engine, EngineEvent, EngineEvents, InviteAddrs, InviteOutcome};
+pub use inbox::{ConnHold, IncomingStream, StreamInbox};
 pub use plan::PathKind;
 pub use texts::{
     CGNAT_TEXT, DOUBLE_NAT_TEXT, NO_IPV6_TEXT, NO_KNOWN_ADDRESS_TEXT, PEER_UNREACHABLE_INVITE_TEXT,

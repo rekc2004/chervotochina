@@ -23,6 +23,9 @@ fn config_defaults_match_spec() {
     assert_eq!(c.incoming_buffer, 16 * 1024);
     assert_eq!(c.incoming_buffer_total, 1024 * 1024);
     assert_eq!(c.preauth_receive_window, 64 * 1024);
+    assert_eq!(c.stream_receive_window, 4 * 1024 * 1024);
+    assert_eq!(c.post_auth_receive_window, 16 * 1024 * 1024);
+    assert_eq!(c.send_window, 16 * 1024 * 1024);
     assert_eq!(c.post_auth_bidi, 16);
     assert_eq!(c.idle_timeout, Duration::from_secs(30));
     assert_eq!(c.keep_alive, Duration::from_secs(10));

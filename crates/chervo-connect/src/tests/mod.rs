@@ -13,6 +13,7 @@ mod diag;
 mod engine;
 mod fake_mapper;
 mod gateway;
+mod inbox;
 mod invite;
 mod kit;
 mod limiter;
