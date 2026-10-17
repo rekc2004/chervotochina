@@ -10,8 +10,10 @@
 # CHV_PROBE, CHV_PROBE_SHORT (готовые бинарники upnp_probe: обычный и с арендой 60 с; иначе собираются),
 # CHV_KEEP=1 (не сносить стенд при выходе).
 #
-# НЕ ЗАПУСКАЛСЯ. Написан на Windows-машине, проверен только `bash -n`. Ожидания строк ниже взяты из спецификации
-# docs/specs/stage-13a-upnp.md и памяти о miniupnpd 2.3.x ([D]: имена опций и текст журнала не сверены с исходником).
+# Правка после первого прогона на Linux (Ubuntu 24.04, nftables 1.0.9, miniupnpd-nftables 2.3.4): первый прогон дал
+# INCONCLUSIVE, потому что miniupnpd отверг несуществующую в 2.3.4 опцию (убрана); конфиг теперь только из опций бинарника
+# 2.3.4 (см. mpd_conf). Эта правка написана на Windows-машине и проверена только `bash -n`: строки после неё ещё не прогнаны.
+# Ожидания строк взяты из спецификации docs/specs/stage-13a-upnp.md.
 #
 # Свои пространства имён: префикс chv13a- (стенды chv13-, chv8-, chv9- не затрагиваются). Все nft и sysctl
 # выполняются только через `ip netns exec`; на хосте не меняется ничего, кроме создания и удаления своих ns и
@@ -33,8 +35,14 @@ PFX="chv13a-"
 STATE_OWNED=0
 if [[ -n "${CHV_STATE:-}" ]]; then
   STATE="$CHV_STATE"
-  mkdir -p -- "$STATE"; chmod 700 -- "$STATE"
-  [[ "$(stat -c %u -- "$STATE")" == "$(id -u)" ]] || { echo "CHV_STATE не принадлежит текущему пользователю" >&2; exit 2; }
+  # до любых mkdir/chmod: не символьная ссылка и, если уже есть, принадлежит запускающему
+  [[ ! -L "$STATE" ]] || { echo "CHV_STATE не должен быть символьной ссылкой" >&2; exit 2; }
+  if [[ -e "$STATE" ]]; then
+    [[ -d "$STATE" && "$(stat -c %u -- "$STATE")" == "$(id -u)" ]] || { echo "CHV_STATE не каталог или не принадлежит текущему пользователю" >&2; exit 2; }
+  fi
+  mkdir -p -- "$STATE"
+  [[ ! -L "$STATE" && "$(stat -c %u -- "$STATE")" == "$(id -u)" ]] || { echo "CHV_STATE не принадлежит текущему пользователю" >&2; exit 2; }
+  chmod 700 -- "$STATE"
 else
   STATE="$(mktemp -d /tmp/chervo-stage13a.XXXXXX)"
   chmod 700 -- "$STATE"
@@ -323,23 +331,41 @@ bg_stop() { # real wrap [сигнал]
   if [[ -n "${2:-}" ]]; then { wait "$2"; } 2>/dev/null || true; fi
 }
 
-# miniupnpd (nft-бэкенд) в ns; конфиг вне /etc
-mpd_conf() { # файл ext_if lan-ip/маска lan-подсеть lease_file разрешить_частный(yes|no)
+# miniupnpd 2.3.4 (nft-бэкенд) в ns; конфиг вне /etc. Только опции, существующие в бинарнике 2.3.4 (измерено на Ubuntu 24.04:
+# allow, deny, clean_ruleset_*, enable_natpmp, enable_pcp_pmp, enable_upnp, ext_ifname, ext_ifname6, ext_ip, ext_perform_stun,
+# ext_stun_*, force_igd_desc_v1, http_port, ipv6_disable, lease_file, lease_file6, max_lifetime, min_lifetime, notify_interval,
+# secure_mode, system_uptime, upnp_forward_chain, upnp_nat_chain, upnp_nat_postrouting_chain, upnp_nat_table_name,
+# upnp_table_name, uuid, listening_ip). Опции «разрешить частный внешний адрес» в 2.3.4 НЕТ: miniupnpd сам отказывает проброс
+# при частном или зарезервированном WAN («Reserved / private IP address ... Port forwarding is impossible»).
+# Таблица и цепочки совпадают с создаваемыми в nat_load_r / nat_load_x (по умолчанию miniupnpd ждёт таблицу filter и цепочки
+# miniupnpd, prerouting_miniupnpd, postrouting_miniupnpd; здесь имена заданы явно). min_lifetime=60: проба с арендой 60 с
+# (по умолчанию 120 с). ext_ip не задаётся (частный адрес в ext_ip отвергается).
+mpd_conf() { # файл ext_if lan-ip/маска lan-подсеть lease_file
   cat > "$1" <<CONF
 ext_ifname=$2
 listening_ip=$3
 http_port=5000
 uuid=$UUID
 enable_upnp=yes
+enable_natpmp=no
+enable_pcp_pmp=no
 secure_mode=yes
 system_uptime=yes
+min_lifetime=60
 upnp_table_name=nat13a
 upnp_nat_table_name=nat13a
+upnp_forward_chain=miniupnpd
+upnp_nat_chain=prerouting_miniupnpd
+upnp_nat_postrouting_chain=postrouting_miniupnpd
 lease_file=$5
-ext_allow_private_ipv4=$6
 allow 1024-65535 $4 1024-65535
 deny 0-65535 0.0.0.0/0 0-65535
 CONF
+}
+
+# miniupnpd отказал из-за частного или зарезервированного внешнего адреса (тексты журнала 2.3.4, измерены на реальной машине)
+mpd_reserved_logged() { # журнал
+  grep -qE 'Reserved / private IP address|not suitable for external IP|contains reserved / private address' "$1" 2>/dev/null
 }
 
 mpd_start() { # ключ ns конфиг журнал
@@ -460,8 +486,8 @@ verdict() { # СТРОКА PASS|FAIL|INCONCLUSIVE|NOTRUN причина
 }
 
 # Запуск miniupnpd на роутере r; 0 — живой.
-start_router_mpd() { # режим_частный(yes|no)
-  mpd_conf "$RD/miniupnpd.conf" wan 192.168.10.1/24 192.168.10.0/24 "$RD/leases" "$1"
+start_router_mpd() {
+  mpd_conf "$RD/miniupnpd.conf" wan 192.168.10.1/24 192.168.10.0/24 "$RD/leases"
   mpd_start r r "$RD/miniupnpd.conf" "$RD/miniupnpd.log"
   mpd_alive r
 }
@@ -472,7 +498,7 @@ start_router_mpd() { # режим_частный(yes|no)
 row_map() {
   row_begin map plain
   local f="" t="" lease="" idl=""
-  if ! start_router_mpd no; then
+  if ! start_router_mpd; then
     verdict MAP INCONCLUSIVE "miniupnpd не запустился: $(tr '\n' ' ' < "$RD/miniupnpd.log" | cut -c1-200)"
     verdict TRAFFIC INCONCLUSIVE "miniupnpd не запустился"; row_end; return
   fi
@@ -506,7 +532,7 @@ row_map() {
 row_renew() {
   row_begin renew plain
   local f="" n="" t0 t
-  if ! start_router_mpd no; then
+  if ! start_router_mpd; then
     verdict RENEW INCONCLUSIVE "miniupnpd не запустился"; row_end; return
   fi
   t0="$(date +%s)"
@@ -528,7 +554,7 @@ row_renew() {
 row_release() {
   row_begin release plain
   local f=""
-  if ! start_router_mpd no; then
+  if ! start_router_mpd; then
     verdict RELEASE INCONCLUSIVE "miniupnpd не запустился"; row_end; return
   fi
   nft_guard_h
@@ -549,7 +575,7 @@ row_release() {
 row_kill() {
   row_begin kill plain
   local f="" t0 t gone=""
-  if ! start_router_mpd no; then
+  if ! start_router_mpd; then
     verdict KILL INCONCLUSIVE "miniupnpd не запустился"; row_end; return
   fi
   probe_bg "$PROBE_SHORT" map map "$PORT" "$UDN"
@@ -574,7 +600,7 @@ row_kill() {
 row_restart() {
   row_begin restart plain
   local f="" off=0 seq_
-  if ! start_router_mpd no; then
+  if ! start_router_mpd; then
     verdict RESTART INCONCLUSIVE "miniupnpd не запустился"; row_end; return
   fi
   probe_bg "$PROBE" map map1 "$PORT" "$UDN"
@@ -598,55 +624,57 @@ row_restart() {
   fi
 }
 
-# CGNAT: WAN роутера 100.64.0.2/10. Ожидание спецификации: BehindCgnat, AddPortMapping у miniupnpd нет.
-# Но miniupnpd 2.3.4 при WAN в 100.64/10 отдаёт ПУСТОЙ внешний адрес (SPIKE_TRANSPORT 9.3), а клиент по решению 8
-# спецификации сообщает на пустой адрес WanUnknown; BehindCgnat возможен только если ext_allow_private_ipv4=yes
-# заставляет miniupnpd назвать настоящий адрес [D]. Поэтому WanUnknown здесь не PASS, а INCONCLUSIVE с пояснением.
-row_cgnat() {
-  row_begin cgnat cgnat
-  local f="" st=""
-  if ! start_router_mpd yes; then
-    verdict CGNAT INCONCLUSIVE "miniupnpd не запустился: $(tr '\n' ' ' < "$RD/miniupnpd.log" | cut -c1-200)"; row_end; return
+# CGNAT (WAN роутера 100.64.0.2/10) и DOUBLENAT (WAN 192.168.100.2 за внешним NAT o).
+# miniupnpd 2.3.4 при частном или зарезервированном WAN пишет «Reserved / private IP address ...: Port forwarding is
+# impossible» и «private/reserved address ... is not suitable for external IP» и не называет внешний адрес (пустой или
+# ошибка; SPIKE_TRANSPORT 9.3), поэтому клиент по решению 8 спецификации обычно отвечает WanUnknown, а не BehindCgnat /
+# DoubleNat. Точный критерий (row_private_wan):
+#   FAIL: в журнале miniupnpd есть AddPortMapping, или запись проброса есть в nft, или статус Mapped / MappedPermanent;
+#   PASS: статус равен ожидаемому диагнозу (BehindCgnat / DoubleNat); либо fail-closed результат клиента
+#         (WanUnknown, Failed, Refused(N)) И журнал miniupnpd содержит текст об отказе из-за частного/зарезервированного адреса
+#         (роутер сам отказал, клиент ничего не открыл; диагноз «CGNAT»/«двойной NAT» в этом случае НЕ достигнут, это в вердикте);
+#   INCONCLUSIVE: miniupnpd не запустился или умер; нет строки статуса клиента (нет ответа); статус fail-closed, но в журнале
+#         нет текста об отказе (причину не определить); NoGateway / Ambiguous / NotHomeNetwork / Off (стенд не дошёл до проверки);
+#   FAIL: любой другой статус.
+row_private_wan() { # СТРОКА режим_стенда диагноз
+  local row="$1" mode="$2" diag="$3" f="" st="" why=""
+  row_begin "${row,,}" "$mode"
+  if ! start_router_mpd; then
+    verdict "$row" INCONCLUSIVE "miniupnpd не запустился или умер: $(tr '\n' ' ' < "$RD/miniupnpd.log" | cut -c1-200)"; row_end; return
   fi
   probe_once "$PROBE" release release "$PORT" "$UDN"
   st="$(probe_status "$RD/release.log")"
+  mpd_alive r || why="miniupnpd умер во время строки; "
   grep -q 'AddPortMapping' "$RD/miniupnpd.log" && f+="AddPortMapping_in_log "
   entry_present && f+="entry_present "
   row_end
-  if [[ -n "${f// /}" ]]; then verdict CGNAT FAIL "status=$st; $f"
-  elif [[ "$st" == BehindCgnat ]]; then verdict CGNAT PASS "status=BehindCgnat, AddPortMapping у miniupnpd не было"
-  elif [[ "$st" == WanUnknown ]]; then verdict CGNAT INCONCLUSIVE "status=WanUnknown: miniupnpd не назвал адрес 100.64.0.2 (см. комментарий строки); Add не было"
-  else verdict CGNAT FAIL "status=${st:-нет}"
+  if [[ -n "${f// /}" ]]; then verdict "$row" FAIL "status=${st:-нет}; $f"
+  elif [[ -n "$why" ]]; then verdict "$row" INCONCLUSIVE "${why}status=${st:-нет}"
+  elif [[ "$st" == Mapped || "$st" == MappedPermanent ]]; then verdict "$row" FAIL "status=$st: проброс открыт при частном WAN"
+  elif [[ "$st" == "$diag" ]]; then verdict "$row" PASS "status=$diag, AddPortMapping у miniupnpd не было"
+  elif [[ -z "$st" ]]; then verdict "$row" INCONCLUSIVE "нет строки статуса клиента (см. release.log/.err)"
+  elif [[ "$st" == WanUnknown || "$st" == Failed || "$st" == Refused* ]]; then
+    if mpd_reserved_logged "$RD/miniupnpd.log"; then
+      verdict "$row" PASS "fail-closed: status=$st; miniupnpd отказал из-за частного/зарезервированного WAN, AddPortMapping не было (диагноз $diag не достигнут: роутер не назвал адрес)"
+    else
+      verdict "$row" INCONCLUSIVE "status=$st, но в журнале miniupnpd нет текста об отказе по частному адресу: причину не определить"
+    fi
+  elif [[ "$st" == NoGateway || "$st" == Ambiguous || "$st" == NotHomeNetwork || "$st" == Off ]]; then
+    verdict "$row" INCONCLUSIVE "status=$st: стенд не дошёл до проверки WAN"
+  else verdict "$row" FAIL "status=$st"
   fi
 }
-
-# DOUBLENAT: miniupnpd за другим NAT (WAN 192.168.100.2): DoubleNat, Add нет (оговорка как у CGNAT про пустой адрес)
-row_doublenat() {
-  row_begin doublenat double
-  local f="" st=""
-  if ! start_router_mpd yes; then
-    verdict DOUBLENAT INCONCLUSIVE "miniupnpd не запустился: $(tr '\n' ' ' < "$RD/miniupnpd.log" | cut -c1-200)"; row_end; return
-  fi
-  probe_once "$PROBE" release release "$PORT" "$UDN"
-  st="$(probe_status "$RD/release.log")"
-  grep -q 'AddPortMapping' "$RD/miniupnpd.log" && f+="AddPortMapping_in_log "
-  entry_present && f+="entry_present "
-  row_end
-  if [[ -n "${f// /}" ]]; then verdict DOUBLENAT FAIL "status=$st; $f"
-  elif [[ "$st" == DoubleNat ]]; then verdict DOUBLENAT PASS "status=DoubleNat, AddPortMapping у miniupnpd не было"
-  elif [[ "$st" == WanUnknown ]]; then verdict DOUBLENAT INCONCLUSIVE "status=WanUnknown: miniupnpd не назвал частный внешний адрес (см. комментарий строки CGNAT); Add не было"
-  else verdict DOUBLENAT FAIL "status=${st:-нет}"
-  fi
-}
+row_cgnat() { row_private_wan CGNAT cgnat BehindCgnat; }
+row_doublenat() { row_private_wan DOUBLENAT double DoubleNat; }
 
 # AMBIGUOUS: второй хост LAN (x) отвечает как IGD с тем же UDN: два кандидата, порт не открывается
 row_ambiguous() {
   row_begin ambiguous plain
   local f="" st=""
-  if ! start_router_mpd no; then
+  if ! start_router_mpd; then
     verdict AMBIGUOUS INCONCLUSIVE "miniupnpd на r не запустился"; row_end; return
   fi
-  mpd_conf "$RD/miniupnpd-x.conf" eth0 192.168.10.3/24 192.168.10.0/24 "$RD/leases-x" yes
+  mpd_conf "$RD/miniupnpd-x.conf" eth0 192.168.10.3/24 192.168.10.0/24 "$RD/leases-x"
   mpd_start x x "$RD/miniupnpd-x.conf" "$RD/miniupnpd-x.log"
   if ! mpd_alive x; then
     verdict AMBIGUOUS INCONCLUSIVE "miniupnpd на x не запустился: $(tr '\n' ' ' < "$RD/miniupnpd-x.log" | cut -c1-200)"; row_end; return
@@ -673,34 +701,62 @@ row_spoof() {
     verdict SPOOF NOTRUN "нет python3 (подделыватель SSDP и сервер на w)"; row_end; return
   fi
   cat > "$STATE/spoof13a.py" <<'PY'
-import socket, struct, sys, time
+import signal, socket, struct, sys, time
+# Подделыватель SSDP. stdout -> spoof.log (READY / RECV / SENT / DONE), stderr -> spoof.err (причины и трассировки).
 FAR, TARGET, MY, GROUP = "192.168.77.5", "192.168.10.2", "192.168.10.3", "239.255.255.250"
-rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-rx.bind(("", 1900))
-rx.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, socket.inet_aton(GROUP) + socket.inet_aton(MY))
-rx.settimeout(1.0)
-tx = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW)
-sent = 0
+def err(msg):
+    print(msg, file=sys.stderr, flush=True)
+try:
+    rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    rx.bind(("", 1900))
+    rx.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, socket.inet_aton(GROUP) + socket.inet_aton(MY))
+    rx.settimeout(1.0)
+    # IPPROTO_RAW включает IP_HDRINCL: заголовок IP наш, ядро заполняет длину, контрольную сумму и id
+    tx = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW)
+except OSError as e:
+    err("SETUP_FAILED: %r (нужен root/CAP_NET_RAW; порт 1900 занят?)" % (e,))
+    sys.exit(2)
+sent = recv = other = 0
+seen = {}
+def stop(*_a):
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, stop)
 print("READY", flush=True)
 end = time.time() + float(sys.argv[1])
-while time.time() < end:
-    try:
-        data, (ip, port) = rx.recvfrom(2048)
-    except socket.timeout:
-        continue
-    if ip != TARGET or not data.startswith(b"M-SEARCH"):
-        continue
-    st = ""
-    for line in data.decode("ascii", "replace").split("\r\n"):
-        if line.upper().startswith("ST:"):
-            st = line[3:].strip()
-    body = ("HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=120\r\nLOCATION: http://%s:5000/rootDesc.xml\r\nST: %s\r\nUSN: uuid:spoof::%s\r\n\r\n" % (FAR, st, st)).encode()
-    udp = struct.pack("!HHHH", 1900, port, 8 + len(body), 0) + body
-    iph = struct.pack("!BBHHHBBH4s4s", 0x45, 0, 0, 0, 0, 64, 17, 0, socket.inet_aton(FAR), socket.inet_aton(TARGET))
-    tx.sendto(iph + udp, (TARGET, 0))
-    sent += 1
-    print("SENT %d" % sent, flush=True)
+try:
+    while time.time() < end:
+        try:
+            data, (ip, port) = rx.recvfrom(2048)
+        except socket.timeout:
+            continue
+        recv += 1
+        seen[ip] = seen.get(ip, 0) + 1
+        print("RECV %s:%d %d bytes %r" % (ip, port, len(data), data[:12]), flush=True)
+        if ip != TARGET or not data.startswith(b"M-SEARCH"):
+            other += 1
+            continue
+        st = ""
+        for line in data.decode("ascii", "replace").split("\r\n"):
+            if line.upper().startswith("ST:"):
+                st = line[3:].strip()
+        body = ("HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=120\r\nLOCATION: http://%s:5000/rootDesc.xml\r\nST: %s\r\nUSN: uuid:spoof::%s\r\n\r\n" % (FAR, st, st)).encode()
+        udp = struct.pack("!HHHH", 1900, port, 8 + len(body), 0) + body
+        iph = struct.pack("!BBHHHBBH4s4s", 0x45, 0, 0, 0, 0, 64, 17, 0, socket.inet_aton(FAR), socket.inet_aton(TARGET))
+        try:
+            tx.sendto(iph + udp, (TARGET, 0))
+        except OSError as e:
+            err("SENDTO_FAILED: %r" % (e,))
+            continue
+        sent += 1
+        print("SENT %d" % sent, flush=True)
+finally:
+    print("DONE sent=%d recv=%d ignored=%d from=%r" % (sent, recv, other, seen), flush=True)
+    if sent == 0:
+        if recv == 0:
+            err("SENT_0_REASON: ни одной датаграммы на порту 1900 (multicast M-SEARCH не дошёл до x: мост, членство в группе, клиент не искал)")
+        else:
+            err("SENT_0_REASON: датаграммы были (%r), но ни одного M-SEARCH от %s" % (seen, TARGET))
 PY
   nsx w nft flush ruleset 2>/dev/null || true
   nsx w nft -f - <<NFT
@@ -712,11 +768,13 @@ table inet chv13a_w {
   }
 }
 NFT
-  bg_start "$RD/far.pid" w python3 -m http.server 5000 --bind 192.168.77.5 --directory "$RD"
+  bg_start "$RD/far.pid" w sh -c 'exec python3 -u -m http.server 5000 --bind 192.168.77.5 --directory "$1" >"$2" 2>&1' sh "$RD" "$RD/far.log"
   local far_real="$BG_REAL" far_wrap="$BG_WRAP"
-  bg_start "$RD/spoof.pid" x python3 "$STATE/spoof13a.py" 30
+  # stdout подделывателя в spoof.log, stderr в spoof.err (раньше вывод уходил в консоль стенда, и строка не видела SENT)
+  bg_start "$RD/spoof.pid" x sh -c 'exec python3 -u "$1" "$2" >"$3" 2>"$4"' sh "$STATE/spoof13a.py" 30 "$RD/spoof.log" "$RD/spoof.err"
   local sp_real="$BG_REAL" sp_wrap="$BG_WRAP"
-  sleep 1.5
+  wait_grep "$RD/spoof.log" '^READY' 5 || f+="spoofer_not_ready($(head -c 200 "$RD/spoof.err" 2>/dev/null | tr '\n' ' ')) "
+  sleep 0.5
   # контроль: обычный TCP (TTL по умолчанию) с h на «дальний IGD»
   nsx h timeout 3 bash -c 'exec 3<>/dev/tcp/192.168.77.5/5000' 2>/dev/null || f+="control_tcp_failed "
   sleep 0.5
@@ -725,10 +783,14 @@ NFT
   probe_once "$PROBE" release release "$PORT" "$UDN"
   st="$(probe_status "$RD/release.log")"
   nsx w nft list counters > "$RD/nft-w1.txt"; c1="$(cnt "$RD/nft-w1.txt" syn_far)"
-  sent="$(grep -c '^SENT ' "$RD/spoof.log" 2>/dev/null || true)"
   bg_stop "$sp_real" "$sp_wrap"; bg_stop "$far_real" "$far_wrap"
+  # после остановки подделыватель дописал итог (DONE) и причину, если ничего не отправил
+  sent="$(grep -c '^SENT ' "$RD/spoof.log" 2>/dev/null || true)"
+  sent="${sent:-0}"
   c2="$(( c1 - c0 ))"
-  [[ "$sent" -gt 0 ]] || f+="spoofer_sent_0 "
+  if (( sent == 0 )); then
+    f+="spoofer_sent_0($(grep -h 'SENT_0_REASON\|SETUP_FAILED\|SENDTO_FAILED\|Traceback\|Error' "$RD/spoof.err" 2>/dev/null | head -n 2 | tr '\n' ' ' | cut -c1-300); $(grep -h '^DONE' "$RD/spoof.log" 2>/dev/null | head -n 1)) "
+  fi
   [[ "$st" == NoGateway ]] || f+="status_${st:-нет}(ожидалось_NoGateway) "
   [[ "$c2" == 0 ]] || f+="client_syn_reached_far_host($c2) "
   row_end

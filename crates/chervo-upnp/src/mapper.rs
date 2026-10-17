@@ -90,6 +90,8 @@ struct Mapping {
     gw: GatewayAddr,
     internal: SocketAddrV4,
     ext: u16,
+    /// Аренда 0 (после согласия на ошибку 725 или молчаливо от роутера): сама не истечёт.
+    permanent: bool,
 }
 
 struct Backoff {
@@ -267,9 +269,52 @@ impl UpnpMapper {
         }
     }
 
+    /// Новый список разрешённых роутеров. Бессрочный проброс (аренда 0) роутера, которого в новом
+    /// списке нет (в том числе список очищен), сам не истечёт: перед применением списка делается
+    /// ОДНО подтверждённое удаление по СТАРОМУ списку по тем же правилам, что у `release()`
+    /// (единственный кандидат, тот же UDN, адрес и служба, `RELEASE_BUDGET`). Роутер не подтверждён:
+    /// ничего не шлётся (остаточный риск T16). Проброс с арендой забывается без отправки и истекает
+    /// сам не позже чем через час.
     pub fn set_settings(&self, s: UpnpSettings) {
-        *lock(&self.settings) = clamp_settings(s);
+        let new = clamp_settings(s);
+        let doomed = {
+            let mut cur = lock(&self.current);
+            if cur
+                .as_ref()
+                .is_some_and(|m| m.permanent && !new.routers.iter().any(|a| a.id == m.router))
+            {
+                cur.take()
+            } else {
+                None
+            }
+        };
+        if let Some(m) = doomed {
+            // незавершённый refresh не оставит этот проброс после смены списка
+            self.epoch.fetch_add(1, Ordering::SeqCst);
+            let old = lock(&self.settings).clone();
+            self.delete_confirmed(&m, &old);
+        }
+        *lock(&self.settings) = new;
         lock(&self.backoff).next = BACKOFF_MIN;
+    }
+
+    /// Ничего не шлём, пока сохранённый роутер не подтверждён заново как единственный
+    /// разрешённый кандидат в сети (иначе запрос ушёл бы постороннему устройству). Затем одно
+    /// удаление (если запись всё ещё наша) в пределах `RELEASE_BUDGET`.
+    fn delete_confirmed(&self, m: &Mapping, settings: &UpnpSettings) {
+        let own_ip = *m.internal.ip();
+        if settings.routers.is_empty() || !self.own_ip_ok(own_ip) {
+            return;
+        }
+        let overall = Instant::now() + RELEASE_BUDGET;
+        let Ok(found) = self.find_routers(own_ip, overall) else {
+            return;
+        };
+        if let [one] = Self::candidates(&found, settings).as_slice()
+            && Self::is_same_router(m, one)
+        {
+            self.delete_if_ours(m, overall);
+        }
     }
 
     /// Явное действие пользователя: один поиск и одно описание. Нужен ровно один ответчик IGD.
@@ -542,7 +587,8 @@ impl PortMapper for UpnpMapper {
             Ok(f) => f,
             Err(UpnpError::Ambiguous) => {
                 self.forget_current();
-                return self.failure(MapStatus::Ambiguous);
+                // политика спецификации (U0): Ambiguous это 1800 с без удвоения, как при двух кандидатах
+                return Self::quiet(MapStatus::Ambiguous, None);
             }
             Err(_) => return self.failure(MapStatus::Failed),
         };
@@ -672,6 +718,7 @@ impl PortMapper for UpnpMapper {
             gw,
             internal,
             ext,
+            permanent,
         };
         {
             let mut cur = lock(&self.current);
@@ -699,21 +746,7 @@ impl PortMapper for UpnpMapper {
         self.epoch.fetch_add(1, Ordering::SeqCst);
         let cur = lock(&self.current).take();
         let Some(m) = cur else { return };
-        // ничего не шлём, пока сохранённый роутер не подтверждён заново как единственный
-        // разрешённый кандидат в сети (иначе запрос ушёл бы постороннему устройству)
         let settings = lock(&self.settings).clone();
-        let own_ip = *m.internal.ip();
-        if settings.routers.is_empty() || !self.own_ip_ok(own_ip) {
-            return;
-        }
-        let overall = Instant::now() + RELEASE_BUDGET;
-        let Ok(found) = self.find_routers(own_ip, overall) else {
-            return;
-        };
-        if let [one] = Self::candidates(&found, &settings).as_slice()
-            && Self::is_same_router(&m, one)
-        {
-            self.delete_if_ours(&m, overall);
-        }
+        self.delete_confirmed(&m, &settings);
     }
 }

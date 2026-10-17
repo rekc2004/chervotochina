@@ -22,8 +22,14 @@ REPO="$(cd "$ROOT/../.." && pwd)"
 STATE_OWNED=0
 if [[ -n "${CHV_STATE:-}" ]]; then
   STATE="$CHV_STATE"
-  mkdir -p -- "$STATE"; chmod 700 -- "$STATE"
-  [[ "$(stat -c %u -- "$STATE")" == "$(id -u)" ]] || { echo "CHV_STATE не принадлежит текущему пользователю" >&2; exit 2; }
+  # до любых mkdir/chmod: не символьная ссылка и, если уже есть, принадлежит запускающему
+  [[ ! -L "$STATE" ]] || { echo "CHV_STATE не должен быть символьной ссылкой" >&2; exit 2; }
+  if [[ -e "$STATE" ]]; then
+    [[ -d "$STATE" && "$(stat -c %u -- "$STATE")" == "$(id -u)" ]] || { echo "CHV_STATE не каталог или не принадлежит текущему пользователю" >&2; exit 2; }
+  fi
+  mkdir -p -- "$STATE"
+  [[ ! -L "$STATE" && "$(stat -c %u -- "$STATE")" == "$(id -u)" ]] || { echo "CHV_STATE не принадлежит текущему пользователю" >&2; exit 2; }
+  chmod 700 -- "$STATE"
 else
   STATE="$(mktemp -d /tmp/chervo-stage13.XXXXXX)"
   chmod 700 -- "$STATE"

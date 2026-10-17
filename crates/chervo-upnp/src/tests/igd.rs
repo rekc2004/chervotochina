@@ -713,6 +713,86 @@ fn igd_settings_cleared_forgets_without_sending() {
     );
 }
 
+/// Роутер «только бессрочно», согласие дано: проброс с арендой 0 записан в `current`.
+fn permanent_lab() -> Option<(Lab, UpnpMapper)> {
+    let lab = Lab::new(vec![Cfg {
+        only_permanent: true,
+        ..Cfg::default()
+    }])?;
+    let m = lab.mapper(allow(UDN, true));
+    assert_eq!(m.refresh(req()).status, MapStatus::MappedPermanent);
+    assert_eq!(lab.r().entries(), vec![ours(PORT, 0)]);
+    Some((lab, m))
+}
+
+fn assert_no_traffic_after(lab: &Lab, m: &UpnpMapper) {
+    let before = (
+        lab.ssdp.count(),
+        lab.r().connections(),
+        lab.r().actions().len(),
+    );
+    assert_eq!(m.refresh(req()).status, MapStatus::Off);
+    m.release();
+    assert_eq!(
+        (
+            lab.ssdp.count(),
+            lab.r().connections(),
+            lab.r().actions().len()
+        ),
+        before
+    );
+}
+
+#[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
+fn igd_settings_cleared_permanent_deleted_once() {
+    let Some((lab, m)) = permanent_lab() else {
+        skip()
+    };
+    // список сохраняет роутер (меняется только согласие): ничего не удаляется
+    m.set_settings(allow(UDN, false));
+    assert_eq!(lab.r().count("DeletePortMapping"), 0);
+    assert_eq!(lab.r().entries(), vec![ours(PORT, 0)]);
+    // очистка списка: одно подтверждённое удаление по старому списку
+    m.set_settings(UpnpSettings::default());
+    assert_eq!(lab.r().count("DeletePortMapping"), 1);
+    assert!(lab.r().entries().is_empty());
+    // дальше ни одного пакета, второго удаления нет
+    assert_no_traffic_after(&lab, &m);
+    assert_eq!(lab.r().count("DeletePortMapping"), 1);
+}
+
+#[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
+fn igd_settings_other_router_permanent_deleted_once() {
+    let Some((lab, m)) = permanent_lab() else {
+        skip()
+    };
+    m.set_settings(allow("uuid:someone-else", false));
+    assert_eq!(lab.r().count("DeletePortMapping"), 1);
+    assert!(lab.r().entries().is_empty());
+    m.release();
+    assert_eq!(lab.r().count("DeletePortMapping"), 1);
+}
+
+#[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
+fn igd_settings_cleared_permanent_unconfirmed_sends_nothing() {
+    let Some((lab, m)) = permanent_lab() else {
+        skip()
+    };
+    let soap = lab.r().soap_count();
+    // в сети по сохранённому адресу уже другой роутер: SOAP не уходит, запись остаётся
+    // (остаточный риск T16: бессрочная запись без подтверждённого роутера)
+    lab.r()
+        .with(|i| i.cfg.udn = "uuid:foreign-router".to_owned());
+    m.set_settings(UpnpSettings::default());
+    assert_eq!(lab.r().soap_count(), soap);
+    assert_eq!(lab.r().count("DeletePortMapping"), 0);
+    assert_eq!(lab.r().entries(), vec![ours(PORT, 0)]);
+    assert_no_traffic_after(&lab, &m);
+}
+
 #[test]
 #[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_not_home_network_no_soap() {
@@ -837,6 +917,9 @@ fn assert_ambiguous_everywhere(lab: &Lab, m: &UpnpMapper) {
     let rep = m.refresh(req());
     assert_eq!(rep.status, MapStatus::Ambiguous);
     assert!(rep.gateway.is_none());
+    // политика спецификации: Ambiguous это 1800 с без удвоения, и от поиска, и от двух кандидатов
+    assert_eq!(rep.retry_after, secs(1800));
+    assert_eq!(m.refresh(req()).retry_after, secs(1800));
     assert_eq!(m.identify(OWN), Err(UpnpError::Ambiguous));
     for r in &lab.routers {
         assert_eq!(r.soap_count(), 0);
