@@ -14,6 +14,7 @@
 
 mod book;
 mod class;
+mod mapper;
 mod own;
 mod probe;
 
@@ -25,6 +26,7 @@ pub use book::{
     merge_update, note_contact, prune, usable, usable_entries,
 };
 pub use class::{AddrClass, classify, is_eui64, normalize, update_allowed};
+pub use mapper::{MapReport, MapRequest, MapStatus, PortMapper};
 pub use own::{
     GatewayInfo, LocalSnapshot, MAX_OBSERVATIONS, MAX_UPDATE_ADDRS, NatView, OBSERVED_TTL_SECS,
     ObserveOutcome, ObserveReject, OwnAddrs, PublishCtx, PublishSet, UpdateAddr,

@@ -4,16 +4,21 @@
     clippy::expect_used,
     clippy::indexing_slicing,
     clippy::panic,
-    clippy::print_stdout
+    clippy::print_stdout,
+    clippy::print_stderr
 )]
-//! Тесты части U1: разборщики без сокетов.
+//! Тесты части U1 (разборщики без сокетов) и части U2 (поддельный IGD на петле).
 
 mod desc;
+mod fake_igd;
 mod fuzz;
 mod http;
+mod igd;
 mod scan;
 mod soap;
+mod src_guard;
 mod ssdp;
+mod texts;
 mod url;
 
 use std::net::Ipv4Addr;

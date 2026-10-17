@@ -688,3 +688,23 @@ fn stable_reachable_includes_manual() {
     n.set_manual_forward(Some(8000));
     assert!(!n.stable_reachable(NOW));
 }
+
+#[test]
+fn port_mapper_types_debug_redacted() {
+    use chervo_addr::{MapReport, MapRequest, MapStatus};
+    use std::time::Duration;
+    let req = MapRequest {
+        internal: v4sa("192.168.1.23:4000"),
+    };
+    let rep = MapReport {
+        status: MapStatus::Mapped,
+        gateway: Some(GatewayInfo {
+            wan_ip: Some(v4("93.184.216.34")),
+            mapping: Some(v4sa("93.184.216.34:4000")),
+        }),
+        retry_after: Duration::from_secs(1800),
+    };
+    assert_eq!(format!("{req:?}"), "MapRequest(..)");
+    assert_eq!(format!("{rep:?}"), "MapReport(..)");
+    assert_eq!(format!("{:?}", MapStatus::Refused(606)), "Refused(606)");
+}

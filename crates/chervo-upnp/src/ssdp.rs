@@ -32,6 +32,7 @@ pub(crate) struct SsdpPolicy {
 }
 
 impl SsdpPolicy {
+    #[cfg(test)]
     pub(crate) const STRICT: SsdpPolicy = SsdpPolicy {
         allow_loopback: false,
     };

@@ -127,3 +127,34 @@ impl From<ScanError> for SoapError {
         SoapError::Scan(e)
     }
 }
+
+/// Ошибка публичного API. Без текста роутера.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum UpnpError {
+    NoGateway,
+    Ambiguous,
+    Timeout,
+    Io,
+    Protocol,
+    Rejected,
+}
+
+/// Ошибка сетевого слоя (`net.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NetError {
+    Timeout,
+    Io,
+    /// Принято больше, чем голова и тело вместе допускают.
+    TooLarge,
+}
+
+impl From<NetError> for UpnpError {
+    fn from(e: NetError) -> Self {
+        match e {
+            NetError::Timeout => UpnpError::Timeout,
+            NetError::Io => UpnpError::Io,
+            NetError::TooLarge => UpnpError::Protocol,
+        }
+    }
+}

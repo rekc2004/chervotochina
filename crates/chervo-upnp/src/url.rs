@@ -223,7 +223,7 @@ pub(crate) fn control_url(value: &str, location: &HttpTarget) -> Result<Path, Ur
         }
         return path.ok_or(UrlError::NoPath);
     }
-    // относительная ссылка не может начинаться с сегмента со схемой (`https:...`)
+    // относительная ссылка не может начинаться с сегмента со схемой (например `a:b`)
     if value.split('/').next().unwrap_or_default().contains(':') {
         return Err(UrlError::Scheme);
     }
