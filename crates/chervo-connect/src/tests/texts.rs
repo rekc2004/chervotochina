@@ -3,7 +3,7 @@
 use chervo_friends::FriendsError;
 
 use crate::{
-    Clock, NoDirectPath, PEER_UNREACHABLE_INVITE_TEXT, REVOCATION_FAILED_TEXT,
+    Clock, DOUBLE_NAT_TEXT, NoDirectPath, PEER_UNREACHABLE_INVITE_TEXT, REVOCATION_FAILED_TEXT,
     REVOCATION_NOT_SENT_TEXT, SystemClock, revocation_error_text, user_text,
 };
 
@@ -17,6 +17,7 @@ fn texts_present() {
         NoDirectPath::NoKnownAddress,
         NoDirectPath::NeedToken,
         NoDirectPath::BehindCgnat,
+        NoDirectPath::DoubleNat,
         NoDirectPath::SymmetricNat,
         NoDirectPath::UdpBlockedSuspected,
         NoDirectPath::NoIpv6,
@@ -34,14 +35,15 @@ fn texts_present() {
         assert!(!t.contains('{'), "no placeholders: {t}");
     }
     // у разных причин разные тексты
-    let mut distinct = all[..7].to_vec();
+    let mut distinct = all[..8].to_vec();
     distinct.sort_unstable();
     distinct.dedup();
-    assert_eq!(distinct.len(), 7);
+    assert_eq!(distinct.len(), 8);
     assert_eq!(
         user_text(NoDirectPath::NeedToken),
         chervo_addr::NEED_TOKEN_TEXT
     );
+    assert_eq!(user_text(NoDirectPath::DoubleNat), DOUBLE_NAT_TEXT);
 }
 
 #[test]

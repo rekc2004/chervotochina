@@ -5,6 +5,7 @@ use chervo_friends::FriendsError;
 use crate::diag::NoDirectPath;
 
 pub const CGNAT_TEXT: &str = "Вы за CGNAT: к вам не достучаться напрямую. Соединение возможно, если у друга белый IP или проброс порта (звоните вы). Сервер-посредник для поиска появится в следующей версии; без вашего согласия программа к нему не обращается.";
+pub const DOUBLE_NAT_TEXT: &str = "Ваш роутер сам стоит за другим роутером или за NAT провайдера: снаружи к вам не достучаться. Соединение возможно, если у друга белый IP или проброс порта (звоните вы).";
 pub const SYMMETRIC_TEXT: &str = "У вас симметричный NAT: друзья не могут позвонить вам по известному адресу. Соединение возможно, если у друга белый IP или проброс порта (звоните вы).";
 pub const UDP_BLOCKED_TEXT: &str = "Ни один друг с постоянным адресом не ответил. Возможно, ваша сеть или провайдер блокирует UDP: тогда прямое соединение невозможно. Или друзья сейчас выключены.";
 pub const NO_IPV6_TEXT: &str =
@@ -23,6 +24,7 @@ pub fn user_text(reason: NoDirectPath) -> &'static str {
         NoDirectPath::NoKnownAddress => NO_KNOWN_ADDRESS_TEXT,
         NoDirectPath::NeedToken => chervo_addr::NEED_TOKEN_TEXT,
         NoDirectPath::BehindCgnat => CGNAT_TEXT,
+        NoDirectPath::DoubleNat => DOUBLE_NAT_TEXT,
         NoDirectPath::SymmetricNat => SYMMETRIC_TEXT,
         NoDirectPath::UdpBlockedSuspected => UDP_BLOCKED_TEXT,
         NoDirectPath::NoIpv6 => NO_IPV6_TEXT,

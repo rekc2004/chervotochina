@@ -11,6 +11,8 @@ mod addrinfo;
 mod candidates;
 mod diag;
 mod engine;
+mod fake_mapper;
+mod gateway;
 mod invite;
 mod kit;
 mod limiter;

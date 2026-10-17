@@ -16,6 +16,9 @@ pub enum NoDirectPath {
     NoKnownAddress,
     NeedToken,
     BehindCgnat,
+    /// Роутер сам стоит за другим NAT (его внешний адрес частный) или внешний адрес не совпадает
+    /// с тем, что видят друзья.
+    DoubleNat,
     SymmetricNat,
     UdpBlockedSuspected,
     NoIpv6,
@@ -25,7 +28,7 @@ pub enum NoDirectPath {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Diagnosis {
     pub reason: NoDirectPath,
-    /// Истинно только для `BehindCgnat` и `NeedToken`.
+    /// Истинно только для `BehindCgnat`, `DoubleNat` и `NeedToken`.
     pub rendezvous_could_help: bool,
 }
 
@@ -35,7 +38,7 @@ impl Diagnosis {
             reason,
             rendezvous_could_help: matches!(
                 reason,
-                NoDirectPath::BehindCgnat | NoDirectPath::NeedToken
+                NoDirectPath::BehindCgnat | NoDirectPath::DoubleNat | NoDirectPath::NeedToken
             ),
         }
     }
@@ -135,6 +138,7 @@ where
         }
         match st.own.nat_view(unix) {
             NatView::BehindCgnat => return Some(Diagnosis::of(NoDirectPath::BehindCgnat)),
+            NatView::DoubleNat => return Some(Diagnosis::of(NoDirectPath::DoubleNat)),
             NatView::Symmetric => return Some(Diagnosis::of(NoDirectPath::SymmetricNat)),
             _ => {}
         }

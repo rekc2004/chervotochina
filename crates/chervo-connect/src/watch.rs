@@ -41,6 +41,7 @@ where
                 friends.entry(*pair).or_default().want_addr_info = true;
             }
         }
+        self.gw.wake();
         self.emit(EngineEvent::OwnAddrsChanged);
     }
 

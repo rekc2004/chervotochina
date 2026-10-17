@@ -50,9 +50,10 @@ fn with_hook(
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_map_happy_path() {
     let Some(lab) = Lab::new(vec![Cfg::default()]) else {
-        return skip();
+        skip()
     };
     let m = lab.mapper(allow(UDN, false));
     let rep = m.refresh(req());
@@ -69,9 +70,10 @@ fn igd_map_happy_path() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_request_values_only_ours() {
     let Some(lab) = Lab::new(vec![Cfg::default()]) else {
-        return skip();
+        skip()
     };
     let m = lab.mapper(allow(UDN, false));
     assert_eq!(m.refresh(req()).status, MapStatus::Mapped);
@@ -103,9 +105,10 @@ fn igd_request_values_only_ours() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_tcp_bound_to_internal_ip() {
     let Some(lab) = Lab::new(vec![Cfg::default()]) else {
-        return skip();
+        skip()
     };
     let m = lab.mapper(allow(UDN, false));
     assert_eq!(m.refresh(req()).status, MapStatus::Mapped);
@@ -115,13 +118,14 @@ fn igd_tcp_bound_to_internal_ip() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_bomb_description_no_crash() {
     let bomb = r#"<?xml version="1.0"?><!DOCTYPE root [<!ENTITY a "aaaaaaaaaa"><!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;"><!ENTITY c "&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;">]><root>&c;</root>"#;
     let Some(lab) = Lab::new(vec![Cfg {
         description: Some(bomb.to_owned()),
         ..Cfg::default()
     }]) else {
-        return skip();
+        skip()
     };
     let m = lab.mapper(allow(UDN, false));
     let rep = m.refresh(req());
@@ -131,9 +135,10 @@ fn igd_bomb_description_no_crash() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_slowloris_deadline() {
     let Some(lab) = Lab::new(vec![with_hook(|r, _| (!r.is_post).then_some(Reply::Drip))]) else {
-        return skip();
+        skip()
     };
     let t = parse_location(&lab.r().location(), lab.r().ip).unwrap();
     let get = get_request(&t.gw, &t.path);
@@ -160,11 +165,12 @@ fn igd_slowloris_deadline() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_oversized_body() {
     let Some(lab) = Lab::new(vec![with_hook(|r, _| {
         (!r.is_post).then_some(Reply::BigBody(100_000))
     })]) else {
-        return skip();
+        skip()
     };
     let t = parse_location(&lab.r().location(), lab.r().ip).unwrap();
     let get = get_request(&t.gw, &t.path);
@@ -175,11 +181,12 @@ fn igd_oversized_body() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_huge_headers() {
     let Some(lab) = Lab::new(vec![with_hook(|r, _| {
         (!r.is_post).then_some(Reply::HugeHead)
     })]) else {
-        return skip();
+        skip()
     };
     let t = parse_location(&lab.r().location(), lab.r().ip).unwrap();
     let get = get_request(&t.gw, &t.path);
@@ -194,6 +201,7 @@ fn igd_huge_headers() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_chunked_rejected() {
     let chunked =
         b"HTTP/1.0 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n".to_vec();
@@ -202,7 +210,7 @@ fn igd_chunked_rejected() {
     let Some(lab) = Lab::new(vec![with_hook(move |r, _| {
         (!r.is_post).then(|| Reply::Raw(c1.clone()))
     })]) else {
-        return skip();
+        skip()
     };
     let m = lab.mapper(allow(UDN, false));
     assert_eq!(m.refresh(req()).status, MapStatus::NoGateway);
@@ -211,7 +219,7 @@ fn igd_chunked_rejected() {
     let Some(lab) = Lab::new(vec![with_hook(move |r, _| {
         r.is_post.then(|| Reply::Raw(c2.clone()))
     })]) else {
-        return skip();
+        skip()
     };
     let m = lab.mapper(allow(UDN, false));
     let rep = m.refresh(req());
@@ -221,6 +229,7 @@ fn igd_chunked_rejected() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_redirect_not_followed() {
     let Some(lab) = Lab::new(vec![
         Cfg::default(),
@@ -229,7 +238,7 @@ fn igd_redirect_not_followed() {
             ..Cfg::default()
         },
     ]) else {
-        return skip();
+        skip()
     };
     let target = lab.routers[1].location();
     // 1. перенаправление описания
@@ -253,13 +262,14 @@ fn igd_redirect_not_followed() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_wrong_location_host_no_connect() {
     let off = || Cfg {
         advertise: false,
         ..Cfg::default()
     };
     let Some(lab) = Lab::new(vec![off(), off()]) else {
-        return skip();
+        skip()
     };
     // роутер .2 заявляет адрес описания на другом хосте (.3)
     lab.ssdp
@@ -272,6 +282,7 @@ fn igd_wrong_location_host_no_connect() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_control_url_other_port_no_connect() {
     let Some(lab) = Lab::new(vec![
         Cfg::default(),
@@ -280,7 +291,7 @@ fn igd_control_url_other_port_no_connect() {
             ..Cfg::default()
         },
     ]) else {
-        return skip();
+        skip()
     };
     let other = lab.routers[1].addr.port();
     lab.r().with(|i| {
@@ -294,11 +305,12 @@ fn igd_control_url_other_port_no_connect() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_malformed_soap() {
     let Some(lab) = Lab::new(vec![with_hook(|r, _| {
         (r.is_post && r.action == "GetExternalIPAddress").then(|| Reply::Body("<x><y>".to_owned()))
     })]) else {
-        return skip();
+        skip()
     };
     let m = lab.mapper(allow(UDN, false));
     let rep = m.refresh(req());
@@ -309,13 +321,14 @@ fn igd_malformed_soap() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_conflict_718_alt_port() {
     // IGDv1: случайный порт из 49152..=65535, AddAny не используется
     let Some(lab) = Lab::new(vec![Cfg {
         taken: vec![PORT],
         ..Cfg::default()
     }]) else {
-        return skip();
+        skip()
     };
     let m = lab.mapper(allow(UDN, false));
     let rep = m.refresh(req());
@@ -334,7 +347,7 @@ fn igd_conflict_718_alt_port() {
         services: vec![(SVC_V2.to_owned(), CTL.to_owned())],
         ..Cfg::default()
     }]) else {
-        return skip();
+        skip()
     };
     let m = lab.mapper(allow(UDN, false));
     let rep = m.refresh(req());
@@ -345,13 +358,14 @@ fn igd_conflict_718_alt_port() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_725_needs_consent_then_permanent_same_port() {
     let cfg = || Cfg {
         only_permanent: true,
         ..Cfg::default()
     };
     let Some(lab) = Lab::new(vec![cfg()]) else {
-        return skip();
+        skip()
     };
     // нет согласия: проброса нет
     let m = lab.mapper(allow(UDN, false));
@@ -368,7 +382,7 @@ fn igd_725_needs_consent_then_permanent_same_port() {
 
     // новый запуск с согласием: 725 на L = 3600, повтор L = 0 в том же refresh
     let Some(lab) = Lab::new(vec![cfg()]) else {
-        return skip();
+        skip()
     };
     let m = lab.mapper(allow(UDN, true));
     let rep = m.refresh(req());
@@ -387,11 +401,12 @@ fn igd_725_needs_consent_then_permanent_same_port() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_606_refused_backoff() {
     let Some(lab) = Lab::new(vec![with_hook(|r, _| {
         (r.is_post && r.action == "AddPortMapping").then_some(Reply::Fault(606))
     })]) else {
-        return skip();
+        skip()
     };
     let m = lab.mapper(allow(UDN, false));
     let mut waits = Vec::new();
@@ -412,8 +427,7 @@ fn wan_case(wan_text: &str) -> (MapStatus, Option<GatewayInfo>, usize, Duration)
         wan: wan_text.to_owned(),
         ..Cfg::default()
     }]) else {
-        skip();
-        return (MapStatus::Mapped, None, 0, Duration::ZERO);
+        skip()
     };
     let m = lab.mapper(allow(UDN, false));
     let rep = m.refresh(req());
@@ -426,6 +440,7 @@ fn wan_case(wan_text: &str) -> (MapStatus, Option<GatewayInfo>, usize, Duration)
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_wan_empty_unknown_no_add() {
     let (st, gw, adds, retry) = wan_case("");
     if st == MapStatus::Mapped {
@@ -438,6 +453,7 @@ fn igd_wan_empty_unknown_no_add() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_wan_cgnat_no_add() {
     let (st, gw, adds, retry) = wan_case("100.64.1.2");
     if st == MapStatus::Mapped {
@@ -456,6 +472,7 @@ fn igd_wan_cgnat_no_add() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_wan_private_double_nat_no_add() {
     let (st, gw, adds, _) = wan_case("192.168.0.5");
     if st == MapStatus::Mapped {
@@ -467,6 +484,7 @@ fn igd_wan_private_double_nat_no_add() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_wan_bogus_rejected() {
     for bogus in ["0.0.0.0", "127.0.0.1", "224.0.0.1", "192.0.2.1"] {
         let (st, gw, adds, _) = wan_case(bogus);
@@ -480,6 +498,7 @@ fn igd_wan_bogus_rejected() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_specific_other_client_not_confirmed() {
     let other = soap_ok(
         SVC_V1,
@@ -489,7 +508,7 @@ fn igd_specific_other_client_not_confirmed() {
     let Some(lab) = Lab::new(vec![with_hook(move |r, _| {
         (r.is_post && r.action == "GetSpecificPortMappingEntry").then(|| Reply::Body(other.clone()))
     })]) else {
-        return skip();
+        skip()
     };
     let m = lab.mapper(allow(UDN, false));
     let rep = m.refresh(req());
@@ -504,12 +523,13 @@ fn igd_specific_other_client_not_confirmed() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_router_permanent_silently() {
     let Some(lab) = Lab::new(vec![Cfg {
         lease_mode: LeaseMode::Permanent,
         ..Cfg::default()
     }]) else {
-        return skip();
+        skip()
     };
     let m = lab.mapper(allow(UDN, false));
     let rep = m.refresh(req());
@@ -522,12 +542,13 @@ fn igd_router_permanent_silently() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_router_short_lease_renew_half() {
     let Some(lab) = Lab::new(vec![Cfg {
         lease_mode: LeaseMode::Cap(300),
         ..Cfg::default()
     }]) else {
-        return skip();
+        skip()
     };
     let m = lab.mapper(allow(UDN, false));
     let rep = m.refresh(req());
@@ -565,9 +586,10 @@ fn igd_router_short_lease_renew_half() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_stale_own_deleted_at_start() {
     let Some(lab) = Lab::new(vec![Cfg::default()]) else {
-        return skip();
+        skip()
     };
     lab.r().put_entry(ours(PORT, 0));
     let m = lab.mapper(allow(UDN, false));
@@ -588,9 +610,10 @@ fn igd_stale_own_deleted_at_start() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_stale_foreign_not_deleted() {
     let Some(lab) = Lab::new(vec![Cfg::default()]) else {
-        return skip();
+        skip()
     };
     let foreign = Entry {
         ext: PORT,
@@ -609,9 +632,10 @@ fn igd_stale_foreign_not_deleted() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_release_deletes_only_ours() {
     let Some(lab) = Lab::new(vec![Cfg::default()]) else {
-        return skip();
+        skip()
     };
     let m = lab.mapper(allow(UDN, false));
     assert_eq!(m.refresh(req()).status, MapStatus::Mapped);
@@ -632,9 +656,10 @@ fn igd_release_deletes_only_ours() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_network_change_deletes_old() {
     let Some(lab) = Lab::new(vec![Cfg::default()]) else {
-        return skip();
+        skip()
     };
     let m = lab.mapper(allow(UDN, false));
     assert_eq!(m.refresh(req_for(PORT)).status, MapStatus::Mapped);
@@ -644,9 +669,10 @@ fn igd_network_change_deletes_old() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_settings_cleared_deletes_current() {
     let Some(lab) = Lab::new(vec![Cfg::default()]) else {
-        return skip();
+        skip()
     };
     let m = lab.mapper(allow(UDN, false));
     assert_eq!(m.refresh(req()).status, MapStatus::Mapped);
@@ -674,9 +700,10 @@ fn igd_settings_cleared_deletes_current() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_not_home_network_no_soap() {
     let Some(lab) = Lab::new(vec![Cfg::default()]) else {
-        return skip();
+        skip()
     };
     let m = lab.mapper(allow("uuid:someone-else", false));
     let rep = m.refresh(req());
@@ -687,9 +714,10 @@ fn igd_not_home_network_no_soap() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_off_no_traffic() {
     let Some(lab) = Lab::new(vec![Cfg::default()]) else {
-        return skip();
+        skip()
     };
     let m = lab.mapper(UpnpSettings::default());
     let rep = m.refresh(req());
@@ -702,9 +730,10 @@ fn igd_off_no_traffic() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_ambiguous_two_responders() {
     let Some(lab) = Lab::new(vec![Cfg::default(), Cfg::default()]) else {
-        return skip();
+        skip()
     };
     let m = lab.mapper(allow(UDN, false));
     let rep = m.refresh(req());
@@ -715,9 +744,10 @@ fn igd_ambiguous_two_responders() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_identify_returns_udn() {
     let Some(lab) = Lab::new(vec![Cfg::default()]) else {
-        return skip();
+        skip()
     };
     let m = lab.mapper(UpnpSettings::default());
     let id = m.identify(OWN).unwrap();
@@ -733,7 +763,7 @@ fn igd_identify_returns_udn() {
     assert_eq!(lab.ssdp.count(), n);
     // никого нет
     let Some(empty) = Lab::new(vec![]) else {
-        return skip();
+        skip()
     };
     assert_eq!(
         empty.mapper(UpnpSettings::default()).identify(OWN),
@@ -742,6 +772,7 @@ fn igd_identify_returns_udn() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_refresh_bounded_by_max_refresh() {
     let Some(lab) = Lab::new(vec![Cfg {
         services: vec![
@@ -751,7 +782,7 @@ fn igd_refresh_bounded_by_max_refresh() {
         hook: Some(Arc::new(|r, _| r.is_post.then_some(Reply::Stall))),
         ..Cfg::default()
     }]) else {
-        return skip();
+        skip()
     };
     let net = Net {
         http_deadline: secs(2),
@@ -768,9 +799,10 @@ fn igd_refresh_bounded_by_max_refresh() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_settings_limited_to_four() {
     let Some(lab) = Lab::new(vec![Cfg::default()]) else {
-        return skip();
+        skip()
     };
     let mut routers: Vec<AllowedRouter> = (1..=4)
         .map(|n| AllowedRouter {

@@ -249,3 +249,39 @@ async fn unreachable_emitted_once_per_reason() {
     tokio::time::sleep(secs(600)).await;
     assert!(count(&drain(&mut n.events).await).is_empty());
 }
+
+#[tokio::test(start_paused = true)]
+async fn diag_double_nat() {
+    use super::fake_mapper::{FakeMapper, wait_until};
+    use crate::DOUBLE_NAT_TEXT;
+    use chervo_addr::{GatewayInfo, MapReport, MapStatus};
+
+    let mut pre = Pre::new();
+    let p = pre.solo_friend(vec![inv("5.6.7.1:4000")]);
+    let mut n = Node::start(pre, ConnectConfig::default());
+    // внешний адрес роутера частный: роутер сам за другим роутером
+    let m = FakeMapper::new(|_, _| MapReport {
+        status: MapStatus::DoubleNat,
+        gateway: Some(GatewayInfo {
+            wan_ip: Some("10.9.9.1".parse().unwrap()),
+            mapping: None,
+        }),
+        retry_after: secs(1800),
+    });
+    n.engine.attach_mapper(m).unwrap();
+    wait_until(|| n.engine.mapping_status() == Some(MapStatus::DoubleNat)).await;
+    assert_eq!(n.engine.nat_view(), NatView::DoubleNat);
+    n.t.set_script(|_, _| Action::Fail(TransportError::NoResponse, secs(0)));
+    let e = wait_event(&mut n.events, secs(60), unreachable_for(p))
+        .await
+        .unwrap();
+    let EngineEvent::Unreachable { diagnosis, .. } = e else {
+        panic!("not unreachable");
+    };
+    assert_eq!(diagnosis, diag(NoDirectPath::DoubleNat, true));
+    assert_eq!(user_text(diagnosis.reason), DOUBLE_NAT_TEXT);
+    assert_eq!(
+        n.engine.diagnose(&p).unwrap().map(|d| d.reason),
+        Some(NoDirectPath::DoubleNat)
+    );
+}

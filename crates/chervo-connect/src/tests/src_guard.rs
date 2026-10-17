@@ -101,13 +101,26 @@ fn src_guard() {
     };
     // снимок собственных адресов строится ровно в одном месте
     assert_eq!(count("LocalSnapshot {", "watch.rs"), 1);
-    // маршрут берётся только из пробы, шлюз не задаётся
+    // маршрут берётся только из пробы
     assert_eq!(count("RouteSources {", "none"), 0);
-    assert_eq!(count("set_gateway(", "none"), 0);
+    // шлюз задаётся ровно в одном месте, в задаче проброса; блокирующие вызовы тоже только там
+    assert_eq!(count("set_gateway(", "gateway.rs"), 1);
+    assert!(count("spawn_blocking", "gateway.rs") >= 1);
+    assert!(count("PortMapper", "gateway.rs") >= 1);
     // наблюдения и выпуск токенов обновления только в жизненном цикле ADDR_INFO
     assert!(count(".observe(", "addrinfo.rs") >= 1);
     assert!(count("issue_addr_update(", "addrinfo.rs") >= 1);
     // положительный контроль: охрана видит нужные файлы
     assert!(engine.iter().any(|s| s.rel == "watch.rs"));
     assert!(engine.iter().any(|s| s.rel == "addrinfo.rs"));
+    assert!(engine.iter().any(|s| s.rel == "gateway.rs"));
+
+    // манифест: ни зависимости от крейта проброса, ни сокетной библиотеки
+    let manifest =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
+            .unwrap()
+            .to_lowercase();
+    for w in ["upnp", "igd", "socket2", "mio", "hyper"] {
+        assert!(!manifest.contains(w), "Cargo.toml contains {w}");
+    }
 }

@@ -21,6 +21,7 @@ mod config;
 mod diag;
 mod dispatch;
 mod engine;
+mod gateway;
 mod invite;
 mod limiter;
 mod plan;
@@ -37,7 +38,7 @@ pub use diag::{Diagnosis, NoDirectPath};
 pub use engine::{ConnectError, Engine, EngineEvent, EngineEvents, InviteAddrs, InviteOutcome};
 pub use plan::PathKind;
 pub use texts::{
-    CGNAT_TEXT, NO_IPV6_TEXT, NO_KNOWN_ADDRESS_TEXT, PEER_UNREACHABLE_INVITE_TEXT,
+    CGNAT_TEXT, DOUBLE_NAT_TEXT, NO_IPV6_TEXT, NO_KNOWN_ADDRESS_TEXT, PEER_UNREACHABLE_INVITE_TEXT,
     REVOCATION_FAILED_TEXT, REVOCATION_NOT_SENT_TEXT, SYMMETRIC_TEXT, UDP_BLOCKED_TEXT,
     UNKNOWN_TEXT, revocation_error_text, user_text,
 };

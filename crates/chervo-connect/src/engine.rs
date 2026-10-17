@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use chervo_addr::{NatView, OwnAddrs, normalize};
+use chervo_addr::{MapStatus, NatView, OwnAddrs, normalize};
 use chervo_friends::{FriendBook, FriendsError, KeyStatus};
 use chervo_identity::{KxPeer, ListKeyStore, PairId, SecretStore};
 use chervo_token::{InviteError, Sas, SignedAddrUpdate, TokenError};
@@ -26,6 +26,7 @@ use crate::allow::AllowSet;
 use crate::clock::{Clock, RouteProbe};
 use crate::config::ConnectConfig;
 use crate::diag::{Diagnosis, NoDirectPath};
+use crate::gateway::Gateway;
 use crate::invite::Invite;
 use crate::limiter::{Limiter, add_sat};
 use crate::plan::{Candidate, PathKind, friend_plan, guest_plan, path_kind, select};
@@ -113,6 +114,10 @@ pub enum EngineEvent {
         status: KeyStatus,
     },
     OwnAddrsChanged,
+    /// Итог автоматического проброса порта изменился (один раз на смену статуса).
+    MappingChanged {
+        status: MapStatus,
+    },
     ClockSkew {
         pair: PairId,
     },
@@ -218,6 +223,7 @@ pub(crate) struct Inner<T: ManagedTransport, S> {
     pub(crate) shutdown: watch::Sender<bool>,
     pub(crate) shut: AtomicBool,
     pub(crate) tasks: Mutex<Vec<JoinHandle<()>>>,
+    pub(crate) gw: Gateway,
 }
 
 async fn wait_shutdown(mut rx: watch::Receiver<bool>) {
@@ -947,6 +953,7 @@ where
             shutdown,
             shut: AtomicBool::new(false),
             tasks: Mutex::new(Vec::new()),
+            gw: Gateway::new(),
         });
         let transport_events = inner.transport.subscribe();
         {
