@@ -1,6 +1,6 @@
 //! Единственное место, где строятся пути внутри `partial_dir`. Пути состоят только из
 //! `partial_dir`, имени каталога из 32 hex-цифр и фиксированных имён (`state`, `state.tmp`,
-//! `<i>.part`, `<i>.hashes`, `<i>.hashes.tmp`). Недоверенное имя сюда не попадает.
+//! `<i>.part`, `<i>.placing`, `<i>.hashes`, `<i>.hashes.tmp`). Недоверенное имя сюда не попадает.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -20,6 +20,13 @@ pub(crate) fn session_dir(base: &Path, name: &str) -> PathBuf {
 
 pub(crate) fn part_path(sdir: &Path, index: u32) -> PathBuf {
     sdir.join(format!("{index}.part"))
+}
+
+/// Готовый файл перед размещением: `<i>.part` переименовывается сюда до `Placement`, и этот
+/// путь только читается. Размещённый жёсткой ссылкой файл так никогда не оказывается вторым
+/// именем файла, в который пишет получатель.
+pub(crate) fn placing_path(sdir: &Path, index: u32) -> PathBuf {
+    sdir.join(format!("{index}.placing"))
 }
 
 pub(crate) fn hashes_path(sdir: &Path, index: u32) -> PathBuf {
@@ -44,7 +51,7 @@ pub(crate) fn is_ours_file(name: &str) -> bool {
         return true;
     }
     let digits = |s: &str| !s.is_empty() && s.len() <= 10 && s.bytes().all(|b| b.is_ascii_digit());
-    for suffix in [".part", ".hashes.tmp", ".hashes"] {
+    for suffix in [".part", ".placing", ".hashes.tmp", ".hashes"] {
         if let Some(stem) = name.strip_suffix(suffix) {
             return digits(stem);
         }
@@ -203,12 +210,32 @@ pub(crate) fn remove_part_strict(sdir: &Path, index: u32) -> io::Result<()> {
 
 /// Путь временного файла для `Placement`.
 pub(crate) fn temp_for_placement(sdir: &Path, index: u32) -> PathBuf {
-    part_path(sdir, index)
+    placing_path(sdir, index)
+}
+
+/// `<i>.placing` есть и это настоящий файл (ссылка не считается).
+pub(crate) fn placing_present(sdir: &Path, index: u32) -> bool {
+    fs::symlink_metadata(placing_path(sdir, index)).is_ok_and(|m| m.file_type().is_file())
+}
+
+/// Атомарно `<i>.part` -> `<i>.placing` в том же каталоге. Дальше `.part` не существует, а в
+/// `.placing` никто не пишет.
+pub(crate) fn part_to_placing(sdir: &Path, index: u32) -> io::Result<()> {
+    rename_retry(&part_path(sdir, index), &placing_path(sdir, index))
+}
+
+/// Удаляет `<i>.placing` (только имя; содержимое не открывается), «нет такого файла» не ошибка.
+pub(crate) fn remove_placing_strict(sdir: &Path, index: u32) -> io::Result<()> {
+    match remove_file_retry(&placing_path(sdir, index)) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
 }
 
 pub(crate) fn remove_part_and_hashes(sdir: &Path, index: u32) {
     for p in [
         part_path(sdir, index),
+        placing_path(sdir, index),
         hashes_path(sdir, index),
         hashes_tmp_path(sdir, index),
     ] {

@@ -432,11 +432,18 @@ async fn place_failure_keeps_temp() {
     ));
     wait_ev(&mut rig.b.ev, 30, is_completed(kb)).await;
     wait_ev(&mut rig.a.ev, 30, is_completed(key)).await;
-    // итогового файла нет, временный файл остался под служебным именем
+    // итогового файла нет, временный файл остался под служебным именем (`.placing`)
     assert!(rig.b.dest.list().is_empty());
     let dirs = rig.b.partial.list();
     assert_eq!(dirs.len(), 1);
-    assert!(rig.b.partial.path().join(&dirs[0]).join("0.part").is_file());
+    assert!(
+        rig.b
+            .partial
+            .path()
+            .join(&dirs[0])
+            .join("0.placing")
+            .is_file()
+    );
 }
 
 #[test]

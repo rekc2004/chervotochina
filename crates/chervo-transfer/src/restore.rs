@@ -85,7 +85,11 @@ pub(crate) fn load_all(sh: &Arc<Shared>) -> Vec<Arc<RecvSession>> {
                     Ok(l) => prior(&sdir, index, f.size, l, *root, Bits::ones(l.block_count)),
                     Err(_) => Run::Waiting(None),
                 },
-                FileStatus::Placed(root) => Run::Placed(*root),
+                FileStatus::Placed(root) => {
+                    // остатки после краха между записью `Placed` и уборкой (только имена)
+                    remove_part_and_hashes(&sdir, index);
+                    Run::Placed(*root)
+                }
                 // ошибки файлов сбрасываются: после перезапуска файл пробуется заново
                 FileStatus::Failed => {
                     remove_part_and_hashes(&sdir, index);

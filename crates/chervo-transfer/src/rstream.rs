@@ -16,6 +16,7 @@ use crate::events::{FileFailure, PauseReason};
 use crate::hash::{BlockHash, FileRoot, file_root, leaf_hash};
 use crate::layout::check_manifest_layout;
 use crate::limits::STREAM_TRANSFER_DATA;
+use crate::liveness::{idle_limit, stall_limit};
 use crate::receiver::{Attempt, End, RecvSession};
 use crate::sched::{BadBlock, Work};
 use crate::shared::{Acquired, Permits, acquire_pair, io_deadline, kib, lock};
@@ -115,7 +116,7 @@ fn accept_hash_progress(s: &RecvSession, att: &Attempt, st: &mut HashFrames, has
     if st.at_total || hashed > s.total {
         return false;
     }
-    {
+    let before = {
         let mut c = lock(&s.core);
         let ok = match st.prev {
             None => hashed >= c.sched.hashed,
@@ -124,40 +125,82 @@ fn accept_hash_progress(s: &RecvSession, att: &Attempt, st: &mut HashFrames, has
         if !ok {
             return false;
         }
-        c.sched.hashed = hashed;
-    }
+        std::mem::replace(&mut c.sched.hashed, hashed)
+    };
     st.prev = Some(hashed);
     st.at_total = hashed == s.total;
-    att.note_hash(hashed);
+    att.note_frame();
+    // продвижением считается только настоящий рост относительно сессии, а не повтор прежнего
+    // значения в новой попытке
+    if hashed > before {
+        lock(&s.live).hash_grew(tokio::time::Instant::now());
+    }
     s.wake.notify_waiters();
     s.note_preparing(hashed);
     true
 }
 
-/// Сторож ожидания хэширования у отправителя (одна задача на попытку). Работает, пока есть
-/// незавершённый непустой файл, не покрытый отправителем. Пауза `Stalled`: нет кадров
-/// HASH_PROGRESS `stall_timeout`, либо средняя скорость ниже `min_hash_rate`.
-pub(crate) async fn hash_watchdog(s: Arc<RecvSession>, att: Arc<Attempt>) {
+/// Что сторожу нужно знать о сессии в данный момент. `core` берётся и отпускается до `live`.
+/// Возвращает (срок наступил, когда проверить снова).
+fn evaluate(
+    s: &RecvSession,
+    att: &Attempt,
+    now: tokio::time::Instant,
+    was_demand: &mut bool,
+) -> (bool, tokio::time::Instant) {
     let cfg = &s.sh.cfg;
+    let (needs_hash, wants, hashed) = {
+        let c = lock(&s.core);
+        (c.sched.needs_hash(), c.sched.wants_data(), c.sched.hashed)
+    };
+    let mut next = now
+        .checked_add(cfg.stall_timeout)
+        .unwrap_or(now + Duration::from_secs(1));
+    let mut due = false;
+    let mut lv = lock(&s.live);
+    let mut check = |d: Option<tokio::time::Instant>| {
+        if let Some(d) = d {
+            due |= now >= d;
+            next = next.min(d);
+        }
+    };
+    if needs_hash {
+        lv.begin_wait(now, hashed);
+        // молчание отправителя и предел по скорости: сроки сессии, а не попытки
+        let grace = att.grace();
+        check(lv.silence_deadline(cfg.stall_timeout, grace));
+        check(lv.rate_deadline(cfg.stall_timeout, cfg.min_hash_rate, s.total, grace));
+    }
+    if wants {
+        if !*was_demand {
+            // спрос начался только что: время своей работы до этого не считается
+            lv.skip_idle(now);
+        }
+        check(lv.idle_deadline(idle_limit(cfg)));
+    }
+    *was_demand = wants;
+    (due, next)
+}
+
+/// Сторож живости (одна задача на попытку). Пауза `Stalled`, когда у отправителя, ведущего
+/// хэширование, нет роста `hashed` `stall_timeout` или средняя скорость ниже `min_hash_rate`,
+/// либо при спросе на данные нет ни одного принятого блока слишком долго. Сроки лежат в
+/// сессии: новая попытка их не обнуляет.
+pub(crate) async fn liveness_watchdog(s: Arc<RecvSession>, att: Arc<Attempt>) {
     let mut stop = att.stop.watcher();
+    let mut was_demand = false;
     loop {
         let news = s.wake.notified();
         tokio::pin!(news);
         news.as_mut().enable();
-        if !lock(&s.core).sched.needs_hash() {
+        let now = tokio::time::Instant::now();
+        let (due, next) = evaluate(&s, &att, now, &mut was_demand);
+        if due {
+            att.finish(End::Pause(PauseReason::Stalled));
             return;
         }
-        let deadline = att.hash_deadline(cfg.stall_timeout, cfg.min_hash_rate, s.total);
         tokio::select! {
-            () = tokio::time::sleep_until(deadline) => {
-                let due = lock(&s.core).sched.needs_hash()
-                    && tokio::time::Instant::now()
-                        >= att.hash_deadline(cfg.stall_timeout, cfg.min_hash_rate, s.total);
-                if due {
-                    att.finish(End::Pause(PauseReason::Stalled));
-                    return;
-                }
-            }
+            () = tokio::time::sleep_until(next) => {}
             () = &mut news => {}
             () = stop.stopped() => return,
         }
@@ -256,7 +299,7 @@ pub(crate) async fn data_stream_loop<C: Connection>(
     conn: C,
     wtx: Sender<WCmd>,
 ) {
-    let limit = 3 * u32::from(s.sh.cfg.streams);
+    let limit = stall_limit(&s.sh.cfg);
     let mut stop = att.stop.watcher();
     loop {
         if att.stop.is_stopped() {
@@ -275,10 +318,8 @@ pub(crate) async fn data_stream_loop<C: Connection>(
                     att.finish(End::Disconnected);
                     return;
                 }
-                let n = att
-                    .stalls
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                    .saturating_add(1);
+                // счётчик сессии: новая попытка его не обнуляет
+                let n = lock(&s.live).stall();
                 if n >= limit {
                     att.finish(End::Pause(PauseReason::Stalled));
                     return;
@@ -448,7 +489,7 @@ async fn data_stream<C: Connection>(
                     lock(&s.core).sched.release_block(file, block);
                     Err(StreamEnd::Protocol)
                 } else {
-                    let r = handle_block(s, att, wtx, &mut rx, file, block, len, _permit).await;
+                    let r = handle_block(s, wtx, &mut rx, file, block, len, _permit).await;
                     if r.is_err() {
                         // блок не дочитан (обрыв, срок на блок): он снова свободен, иначе он
                         // остался бы «в полёте» до конца попытки
@@ -541,7 +582,7 @@ async fn handle_manifest<R: RecvStream>(
         Ok(r) if r == root => {}
         _ => return Err(StreamEnd::Protocol),
     }
-    att.stalls.store(0, std::sync::atomic::Ordering::Relaxed);
+    s.live_progress();
     match s.setup_file(file, l, root, leaves).await {
         Ok(()) => Ok(()),
         Err(reason) => {
@@ -554,7 +595,6 @@ async fn handle_manifest<R: RecvStream>(
 #[allow(clippy::too_many_arguments)]
 async fn handle_block<R: RecvStream>(
     s: &Arc<RecvSession>,
-    att: &Arc<Attempt>,
     wtx: &Sender<WCmd>,
     rx: &mut R,
     file: u32,
@@ -570,19 +610,21 @@ async fn handle_block<R: RecvStream>(
         (data, h)
     });
     let (data, got) = job.await.map_err(|_| StreamEnd::Failed)?;
-    att.stalls.store(0, std::sync::atomic::Ordering::Relaxed);
     let want = lock(&s.core).sched.leaf(file, block);
     match want {
         // файл уже закрыт или блок не нужен: данные отбрасываются
         None => Ok(()),
-        Some(w) if w == got => wtx
-            .send(WCmd::Write {
+        Some(w) if w == got => {
+            // принятый блок это продвижение (испорченный им не считается)
+            s.live_progress();
+            wtx.send(WCmd::Write {
                 file,
                 block,
                 data,
                 permit,
             })
-            .map_err(|_| StreamEnd::Stopped),
+            .map_err(|_| StreamEnd::Stopped)
+        }
         Some(_) => {
             let r = lock(&s.core).sched.bad_block(file, block);
             match r {

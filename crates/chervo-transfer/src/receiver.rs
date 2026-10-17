@@ -4,7 +4,7 @@
 
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -21,10 +21,12 @@ use crate::hash::{BlockHash, FileRoot, file_root};
 use crate::layout::{Layout, layout};
 use crate::limits::STREAM_TRANSFER_CTL;
 use crate::links::Links;
+use crate::liveness::{Liveness, idle_limit, stall_limit};
 use crate::names::{TransferKey, UntrustedName};
 use crate::paths::{
-    create_part_new, ensure_part, remove_hashes, remove_part_and_hashes, remove_part_strict,
-    remove_session, session_dir, write_hashes, write_state,
+    create_part_new, ensure_part, placing_present, remove_hashes, remove_part_and_hashes,
+    remove_part_strict, remove_placing_strict, remove_session, session_dir, write_hashes,
+    write_state,
 };
 use crate::policy::OfferView;
 use crate::sched::{Active, Prior, Run, Sched};
@@ -62,76 +64,45 @@ pub(crate) enum Finish {
     Failed(FailReason),
 }
 
-/// Что попытка видела от отправителя в кадрах HASH_PROGRESS (для сторожа хэширования).
-struct HashSeen {
-    start: tokio::time::Instant,
-    /// Первое значение попытки.
-    first: Option<u64>,
-    /// Когда принят последний кадр (до первого кадра: начало попытки).
-    last_at: tokio::time::Instant,
-}
-
-/// Одна попытка: одно соединение, поток управления, потоки данных и писатель.
+/// Одна попытка: одно соединение, поток управления, потоки данных и писатель. Сроки и
+/// счётчики обрывов в попытке не живут (отправитель может начать её заново когда угодно):
+/// они в `RecvSession::live`. Здесь только то, что относится к самой попытке.
 pub(crate) struct Attempt {
     pub(crate) stop: Stop,
     pub(crate) tracker: Tracker,
     end: watch::Sender<Option<End>>,
     echo: watch::Sender<bool>,
-    /// Подряд оборванных потоков без единого принятого блока.
-    pub(crate) stalls: AtomicU32,
-    hash: Mutex<HashSeen>,
+    /// Начало попытки.
+    start: tokio::time::Instant,
+    /// Принят хотя бы один кадр HASH_PROGRESS.
+    saw_frame: AtomicBool,
 }
 
 impl Attempt {
     pub(crate) fn new() -> Arc<Self> {
-        let now = tokio::time::Instant::now();
         Arc::new(Self {
             stop: Stop::new(),
             tracker: Tracker::new(),
             end: watch::channel(None).0,
             echo: watch::channel(false).0,
-            stalls: AtomicU32::new(0),
-            hash: Mutex::new(HashSeen {
-                start: now,
-                first: None,
-                last_at: now,
-            }),
+            start: tokio::time::Instant::now(),
+            saw_frame: AtomicBool::new(false),
         })
     }
 
-    /// Принят кадр HASH_PROGRESS со значением `hashed`.
-    pub(crate) fn note_hash(&self, hashed: u64) {
-        let mut h = lock(&self.hash);
-        h.first.get_or_insert(hashed);
-        h.last_at = tokio::time::Instant::now();
+    /// Принят кадр HASH_PROGRESS.
+    pub(crate) fn note_frame(&self) {
+        self.saw_frame.store(true, Ordering::Release);
     }
 
-    /// Срок, по которому ожидание хэширования у отправителя считается зависшим: нет кадров
-    /// `stall` (счёт от начала попытки или последнего кадра), либо с начала попытки прошло
-    /// больше `stall + (total - первое значение) / rate`.
-    pub(crate) fn hash_deadline(
-        &self,
-        stall: std::time::Duration,
-        rate: u64,
-        total: u64,
-    ) -> tokio::time::Instant {
-        let h = lock(&self.hash);
-        let far = h.start + std::time::Duration::from_secs(86_400 * 365);
-        let by_silence = h.last_at.checked_add(stall).unwrap_or(far);
-        let Some(first) = h.first else {
-            return by_silence;
-        };
-        let rate = u128::from(rate.max(1));
-        let left = u128::from(total.saturating_sub(first));
-        let extra = std::time::Duration::from_nanos(
-            u64::try_from(left.saturating_mul(1_000_000_000) / rate).unwrap_or(u64::MAX),
-        );
-        let by_rate = h
-            .start
-            .checked_add(stall)
-            .and_then(|t| t.checked_add(extra))
-            .unwrap_or(far);
-        by_silence.min(by_rate)
+    pub(crate) fn saw_frame(&self) -> bool {
+        self.saw_frame.load(Ordering::Acquire)
+    }
+
+    /// До первого кадра попытке положен срок от её начала (связь могла пропадать надолго);
+    /// после первого кадра сроки считаются от настоящего роста.
+    pub(crate) fn grace(&self) -> Option<tokio::time::Instant> {
+        (!self.saw_frame()).then_some(self.start)
     }
 
     /// Первая причина побеждает.
@@ -187,6 +158,12 @@ pub(crate) struct RecvSession {
     pub(crate) total: u64,
     pub(crate) sdir: PathBuf,
     pub(crate) core: Mutex<RCore>,
+    /// Сроки ожидания отправителя и счётчики обрывов на всю сессию (не по попыткам).
+    pub(crate) live: Mutex<Liveness>,
+    /// Размещённые файлы, чьи остатки (`.placing`, хэши) убираются после записи `Placed`.
+    cleanup: Mutex<Vec<u32>>,
+    /// Когда в последний раз состояние записано сразу после размещения.
+    last_sync: Mutex<Option<Instant>>,
     io_lock: Mutex<()>,
     /// Трейлер файла имён (известен после принятия или загрузки с диска).
     names_sum: Mutex<[u8; 32]>,
@@ -256,6 +233,9 @@ impl RecvSession {
                 finish: None,
                 place_failed: false,
             }),
+            live: Mutex::new(Liveness::new()),
+            cleanup: Mutex::new(Vec::new()),
+            last_sync: Mutex::new(None),
             io_lock: Mutex::new(()),
             names_sum: Mutex::new([0; 32]),
             dirty: AtomicBool::new(false),
@@ -302,6 +282,9 @@ impl RecvSession {
                 finish: None,
                 place_failed: false,
             }),
+            live: Mutex::new(Liveness::new()),
+            cleanup: Mutex::new(Vec::new()),
+            last_sync: Mutex::new(None),
             io_lock: Mutex::new(()),
             names_sum: Mutex::new(names_sum),
             dirty: AtomicBool::new(false),
@@ -338,6 +321,59 @@ impl RecvSession {
             hashed,
             total: self.total,
         });
+    }
+
+    /// Настоящее продвижение: блок или манифест принят, блок записан. Обрывы не копятся.
+    pub(crate) fn live_progress(&self) {
+        lock(&self.live).progress(tokio::time::Instant::now());
+    }
+
+    /// Пределы живости сессии, общие для конца попытки и неудавшегося рукопожатия.
+    /// Блокировка `core` берётся и отпускается до `live`.
+    fn over_limits(&self, att: Option<&Attempt>, futile: u32) -> bool {
+        let cfg = &self.sh.cfg;
+        let now = tokio::time::Instant::now();
+        let (needs_hash, hashed) = {
+            let c = lock(&self.core);
+            (c.sched.needs_hash(), c.sched.hashed)
+        };
+        let mut lv = lock(&self.live);
+        let mut over = futile >= stall_limit(cfg) || lv.idle_over(idle_limit(cfg));
+        if needs_hash {
+            lv.begin_wait(now, hashed);
+            // предел по скорости считается от начала ожидания и пережил все прежние попытки
+            over |= lv
+                .rate_deadline(cfg.stall_timeout, cfg.min_hash_rate, self.total, None)
+                .is_some_and(|d| now >= d);
+            // кадр этой попытки показывает, что картина свежая: молчание считается от роста
+            if att.is_some_and(Attempt::saw_frame) {
+                over |= lv
+                    .silence_deadline(cfg.stall_timeout, None)
+                    .is_some_and(|d| now >= d);
+            }
+        }
+        over
+    }
+
+    /// Попытка закончилась. `lost`: связь потеряна (закрыто соединение или поток управления),
+    /// а не остановка или пауза по причине диска. `true`: отправитель слишком долго
+    /// перезапускает попытки без продвижения, передачу надо ставить на паузу `Stalled`.
+    pub(crate) fn attempt_over(&self, att: &Attempt, seq0: u64, lost: bool) -> bool {
+        let now = tokio::time::Instant::now();
+        let demand = lock(&self.core).sched.wants_data();
+        let futile = {
+            let mut lv = lock(&self.live);
+            lv.end_attempt(now, demand);
+            if lost { lv.futile_attempt(seq0) } else { 0 }
+        };
+        lost && self.over_limits(Some(att), futile)
+    }
+
+    /// Рукопожатие возобновления не удалось (поток не открылся, ответа нет): тоже бесплодная
+    /// попытка. `true`: пауза `Stalled`.
+    pub(crate) fn handshake_over(&self) -> bool {
+        let futile = lock(&self.live).stall();
+        self.over_limits(None, futile)
     }
 
     pub(crate) fn take_answer(&self) -> Option<oneshot::Sender<bool>> {
@@ -443,6 +479,10 @@ impl RecvSession {
         let _io = lock(&self.io_lock);
         // флаг снимается до снимка: событие после снимка снова поднимет его
         self.dirty.store(false, Ordering::Release);
+        // файлы, размещённые до этого снимка: после записи `Placed` их остатки не нужны. Список
+        // берётся до снимка, а `set_placed` предшествует попаданию в список, поэтому снимок
+        // содержит `Placed` для каждого из них.
+        let placed: Vec<u32> = std::mem::take(&mut *lock(&self.cleanup));
         let bytes = {
             let core = lock(&self.core);
             encode_state(&self.snapshot(&core))
@@ -451,10 +491,40 @@ impl RecvSession {
             .sh
             .hook(HookPoint::StateWrite { bytes: &bytes })
             .and_then(|()| write_state(&self.sdir, &bytes));
-        if res.is_err() {
-            self.dirty.store(true, Ordering::Release);
+        match &res {
+            Ok(()) => {
+                for f in placed {
+                    remove_hashes(&self.sdir, f);
+                    let _ =
+                        crate::paths::remove_file_retry(&crate::paths::placing_path(&self.sdir, f));
+                }
+            }
+            Err(_) => {
+                self.dirty.store(true, Ordering::Release);
+                lock(&self.cleanup).extend(placed);
+            }
         }
         res
+    }
+
+    /// Файл размещён: его остатки (`.placing`, хэши) убираются после записи `Placed`. Запись
+    /// делается сразу, а не контрольной точкой, чтобы окно между размещением и записью было
+    /// минимальным; не чаще раза за `checkpoint_interval` (тысячи мелких файлов не должны
+    /// давать тысячи переписываний состояния; остальное сделает контрольная точка).
+    pub(crate) fn placed_now(&self, file: u32) {
+        lock(&self.cleanup).push(file);
+        self.mark_dirty();
+        let due = {
+            let mut last = lock(&self.last_sync);
+            let due = last.is_none_or(|t| t.elapsed() >= self.sh.cfg.checkpoint_interval);
+            if due {
+                *last = Some(Instant::now());
+            }
+            due
+        };
+        if due {
+            let _ = self.persist();
+        }
     }
 
     /// Состояние изменилось; запись выполнит контрольная точка писателя.
@@ -656,6 +726,49 @@ pub(crate) fn prepare(
         .get(usize::try_from(file).unwrap_or(usize::MAX))
         .copied()
         .unwrap_or(0);
+    let mut prior = prior;
+    // Крах после переименования `.part` -> `.placing` (возможно, и после жёсткой ссылки на
+    // размещённый файл), но до записи `Placed`. `.placing` только читается: хэши свежего
+    // манифеста (корень уже проверен) сверяются с диском. Всё совпало: файл готов, дальше
+    // только размещение (идемпотентное). Не совпало: имя убирается (содержимое не трогается),
+    // файл качается заново.
+    if size > 0 && placing_present(&s.sdir, file) {
+        s.emit(TransferEvent::Verifying { key: s.key });
+        let placing = crate::paths::placing_path(&s.sdir, file);
+        match verify_blocks(&placing, size, l, &leaves, None, &s.halt) {
+            Ok(bad) if bad.is_empty() => {
+                let gone =
+                    s.sh.hook(HookPoint::RemovePart { file })
+                        .and_then(|()| remove_part_strict(&s.sdir, file));
+                if let Err(e) = gone {
+                    return Err((e, prior));
+                }
+                s.sh.hook(HookPoint::Manifest { file })
+                    .map_err(|e| (e, None))?;
+                return Ok(Active::new(
+                    l,
+                    root,
+                    leaves,
+                    Bits::ones(l.block_count),
+                    size,
+                ));
+            }
+            Ok(_) => {
+                if let Err(e) = remove_placing_strict(&s.sdir, file) {
+                    return Err((e, prior));
+                }
+                // прежний прогресс описывал `.part`, которого больше нет
+                prior = None;
+            }
+            Err(e) => {
+                let kind = match e {
+                    crate::fsio::ReadFail::Io(k) => k,
+                    _ => io::ErrorKind::Interrupted,
+                };
+                return Err((io::Error::from(kind), prior));
+            }
+        }
+    }
     let (reuse, stale) = match prior {
         Some(p) if p.root == root && p.layout == l => (Some(p), None),
         other => (None, other),
@@ -797,7 +910,8 @@ pub(crate) async fn recv_supervisor<L: Links>(
                 let mut end = s.end.watcher();
                 let mut down = s.sh.shutdown.watcher();
                 tokio::select! {
-                    () = s.retry.notified() => {}
+                    // явное `retry`: сроки ожидания и счётчики обрывов начинаются заново
+                    () = s.retry.notified() => lock(&s.live).reset(),
                     () = end.stopped() => {}
                     () = down.stopped() => {}
                 }
@@ -963,6 +1077,11 @@ async fn run_attempt<L: Links>(
                     if let Some(prev) = claimed {
                         s.unclaim(prev);
                     }
+                    // отправитель, который не доводит рукопожатие, не ходит по кругу вечно
+                    if s.handshake_over() {
+                        s.set_paused(PauseReason::Stalled);
+                        return Outcome::Paused;
+                    }
                     s.set_paused(PauseReason::Disconnected);
                     return lost(&conn).await;
                 }
@@ -993,6 +1112,7 @@ async fn run_attempt<L: Links>(
         }
     };
     let att = Attempt::new();
+    let seq0 = lock(&s.live).begin_attempt(tokio::time::Instant::now());
     let (out_tx, out_rx) = mpsc::unbounded_channel::<Message>();
     {
         let mut c = lock(&s.core);
@@ -1058,7 +1178,7 @@ async fn run_attempt<L: Links>(
     spawn_att(
         &sh,
         &att,
-        crate::rstream::hash_watchdog(s.clone(), att.clone()),
+        crate::rstream::liveness_watchdog(s.clone(), att.clone()),
     );
     drop(wtx);
 
@@ -1106,6 +1226,13 @@ async fn run_attempt<L: Links>(
             let _ = s2.persist();
         });
     }
+    // Потеря связи: отправитель мог закрыть поток управления или соединение, чтобы начать
+    // попытку заново и обнулить сроки. Сроки и счётчики сессии это учитывают.
+    let lost_link = matches!(
+        why,
+        Why::Closed | Why::Attempt(End::Disconnected | End::Pause(PauseReason::Disconnected))
+    );
+    let stalled = s.attempt_over(&att, seq0, lost_link);
     match why {
         Why::Complete => {
             if echoed {
@@ -1121,6 +1248,10 @@ async fn run_attempt<L: Links>(
             Outcome::Over
         }
         Why::Shutdown => Outcome::Over,
+        _ if stalled => {
+            s.set_paused(PauseReason::Stalled);
+            Outcome::Paused
+        }
         Why::Closed => {
             s.set_paused(PauseReason::Disconnected);
             Outcome::Disconnected

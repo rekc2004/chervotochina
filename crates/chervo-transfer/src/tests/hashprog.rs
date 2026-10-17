@@ -610,3 +610,251 @@ fn preparing_text_has_no_placeholders() {
     assert!(!crate::PREPARING_TEXT.contains('{'));
     assert!(!crate::PREPARING_TEXT.is_empty());
 }
+
+// ------------------------------------------------ N1: отправитель перезапускает попытки
+
+/// Играет за враждебного отправителя на уже принятой передаче: каждую новую попытку получателя
+/// (RESUME на новом потоке управления) встречает RESUME_OK и одним кадром HASH_PROGRESS, держит
+/// поток управления `hold` и закрывает его. Потоки данных остаются открытыми и молчат.
+fn restarting_sender(
+    peer: FakeConn,
+    key: TransferKey,
+    files: u32,
+    total: u64,
+    hold: Duration,
+    frame: impl Fn(u32) -> u64 + Send + 'static,
+) -> Arc<AtomicUsize> {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let n = attempts.clone();
+    tokio::spawn(async move {
+        let mut held: Vec<(FakeTx, FakeRx)> = Vec::new();
+        while let Ok((mut tx, mut rx)) = peer.accept_bi().await {
+            let mut kind = [0u8; 1];
+            if !matches!(rx.read(&mut kind).await, Ok(Some(1))) {
+                continue;
+            }
+            if kind[0] == crate::STREAM_TRANSFER_DATA {
+                held.push((tx, rx));
+                continue;
+            }
+            let mut buf = Vec::new();
+            let Ok(Some(Message::Resume { .. })) =
+                read_message(&mut rx, &mut buf, Duration::from_secs(5)).await
+            else {
+                continue;
+            };
+            let k = u32::try_from(n.fetch_add(1, Ordering::SeqCst) + 1).unwrap();
+            send_frame(
+                &mut tx,
+                &Message::ResumeOk {
+                    id: key.id,
+                    file_count: files,
+                    total_size: total,
+                },
+            )
+            .await;
+            send_frame(&mut tx, &Message::HashProgress { hashed: frame(k) }).await;
+            tokio::time::sleep(hold).await;
+            let _ = tx.finish();
+            held.push((tx, rx));
+        }
+    });
+    attempts
+}
+
+impl Raw {
+    /// Принять предложение, но потоки данных и поток управления ведёт тест.
+    async fn respond_only(&mut self) {
+        self.p.tr.respond(&self.key, true).unwrap();
+        assert_eq!(
+            Fake::decision(&mut self.rx, 10).await,
+            Some(Verdict::Accept)
+        );
+    }
+
+    /// Первая попытка: кадр, пауза `hold`, поток управления закрывается.
+    async fn first_attempt(&mut self, frame: u64, hold: Duration) {
+        self.progress(frame).await;
+        tick(hold).await;
+        let _ = self.tx.finish();
+    }
+}
+
+/// Двигает часы шагами, пока не появится `Paused{Stalled}` или не пройдёт `limit`. Возвращает
+/// виртуальное время, прошедшее с `t0`.
+async fn until_stalled_within(
+    ev: &mut TransferEvents,
+    t0: tokio::time::Instant,
+    limit: Duration,
+    seen: &mut Vec<TransferEvent>,
+) -> Option<Duration> {
+    while t0.elapsed() < limit {
+        tick(Duration::from_millis(100)).await;
+        if stalled_seen(ev, seen).await {
+            return Some(t0.elapsed());
+        }
+    }
+    None
+}
+
+#[tokio::test(start_paused = true)]
+async fn restarting_attempts_with_repeated_progress_end_stalled() {
+    let _fs = failsafe(240);
+    let stall = Duration::from_secs(10);
+    let files = vec![FakeFile::new("a", vec![0u8; (64 * MIB) as usize])];
+    let total = 64 * MIB;
+    let mut r = raw(files, move |c| {
+        c.stall_timeout = stall;
+        c.min_hash_rate = MIB;
+    })
+    .await;
+    r.respond_only().await;
+    let t0 = tokio::time::Instant::now();
+    let hold = Duration::from_secs(1);
+    // отправитель каждый раз присылает одно и то же значение и закрывает поток управления
+    let attempts = restarting_sender(r.peer.clone(), r.key, 1, total, hold, |_| 1000);
+    r.first_attempt(1000, hold).await;
+    let mut seen = Vec::new();
+    let at = until_stalled_within(&mut r.p.ev, t0, Duration::from_secs(60), &mut seen).await;
+    let at = at.expect("restarting the control stream must not reset the timers");
+    // молчание считается от первого роста (сессия), а не от начала каждой попытки
+    assert!(
+        at >= stall - Duration::from_millis(500),
+        "too early: {at:?}"
+    );
+    assert!(at <= stall + Duration::from_secs(2), "too late: {at:?}");
+    assert!(
+        attempts.load(Ordering::SeqCst) >= 2,
+        "not a restarting sender"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn restarting_attempts_with_tiny_growth_end_stalled_by_rate() {
+    let _fs = failsafe(240);
+    let stall = Duration::from_secs(10);
+    let total = 8 * MIB;
+    let files = vec![FakeFile::new("a", vec![0u8; total as usize])];
+    let mut r = raw(files, move |c| {
+        c.stall_timeout = stall;
+        c.min_hash_rate = MIB;
+    })
+    .await;
+    r.respond_only().await;
+    let t0 = tokio::time::Instant::now();
+    let hold = Duration::from_secs(1);
+    // +1 байт в каждой попытке: рост настоящий, молчания нет, но предел по скорости сессии
+    // (stall + total / min_hash_rate = 18 с) не сбрасывается новой попыткой
+    let attempts = restarting_sender(r.peer.clone(), r.key, 1, total, hold, |k| u64::from(k) + 1);
+    r.first_attempt(1, hold).await;
+    let mut seen = Vec::new();
+    let at = until_stalled_within(&mut r.p.ev, t0, Duration::from_secs(90), &mut seen).await;
+    let at = at.expect("tiny growth with restarts must end Stalled");
+    let bound = stall + Duration::from_secs(8);
+    assert!(
+        at >= bound - Duration::from_millis(500),
+        "too early: {at:?}"
+    );
+    assert!(at <= bound + Duration::from_secs(2), "too late: {at:?}");
+    assert!(attempts.load(Ordering::SeqCst) >= 4);
+}
+
+#[tokio::test(start_paused = true)]
+async fn restarting_attempts_without_blocks_end_stalled() {
+    let _fs = failsafe(240);
+    let total = 2 * MIB;
+    let files = vec![FakeFile::new("a", rand_bytes(5, total as usize))];
+    let mut r = raw(files, |c| c.stall_timeout = Duration::from_secs(10)).await;
+    r.respond_only().await;
+    let t0 = tokio::time::Instant::now();
+    let hold = Duration::from_secs(1);
+    // всё захэшировано, манифест просят, но отправитель его не отдаёт и каждый раз закрывает
+    // поток управления: обрывы без продвижения копятся в сессии (3 на поток данных)
+    let attempts = restarting_sender(r.peer.clone(), r.key, 1, total, hold, move |_| total);
+    r.first_attempt(total, hold).await;
+    let mut seen = Vec::new();
+    let at = until_stalled_within(&mut r.p.ev, t0, Duration::from_secs(120), &mut seen).await;
+    assert!(at.is_some(), "attempts without progress must end Stalled");
+    let n = attempts.load(Ordering::SeqCst);
+    assert!((8..=16).contains(&n), "{n} attempts before the pause");
+}
+
+#[tokio::test(start_paused = true)]
+async fn honest_resume_after_long_outage_is_not_stalled() {
+    let _fs = failsafe(240);
+    let stall = Duration::from_secs(10);
+    let total = 8 * MIB;
+    let data = rand_bytes(6, total as usize);
+    let files = vec![FakeFile::new("a", data.clone())];
+    let mut r = raw(files, move |c| {
+        c.stall_timeout = stall;
+        c.min_hash_rate = MIB;
+    })
+    .await;
+    r.accept().await;
+    r.progress(MIB).await;
+    let mut seen = Vec::new();
+    // настоящий обрыв, связи нет намного дольше любого срока ожидания хэширования
+    r.peer.close();
+    for _ in 0..10 {
+        tick(Duration::from_secs(6)).await;
+        seen.extend(drain(&mut r.p.ev).await);
+    }
+    assert!(
+        seen.iter().any(|e| matches!(
+            e,
+            TransferEvent::Paused {
+                reason: PauseReason::Disconnected,
+                ..
+            }
+        )),
+        "{seen:?}"
+    );
+    // новое соединение; отправитель честно закончил хэширование за это время
+    let pair = r.key.pair;
+    let conn2 = FakeConn::lonely(pair);
+    r.p.node.t.push_incoming(conn2.clone());
+    let peer2 = conn2.peer();
+    let (mut tx, mut rx) = peer2.accept_bi().await.unwrap();
+    let mut kind = [0u8; 1];
+    assert_eq!(rx.read(&mut kind).await.unwrap(), Some(1));
+    let mut buf = Vec::new();
+    let got = read_message(&mut rx, &mut buf, Duration::from_secs(5)).await;
+    assert!(matches!(got, Ok(Some(Message::Resume { .. }))));
+    send_frame(
+        &mut tx,
+        &Message::ResumeOk {
+            id: r.key.id,
+            file_count: 1,
+            total_size: total,
+        },
+    )
+    .await;
+    r.fake.run(peer2, Some((tx, rx)));
+    let mut done = false;
+    for _ in 0..400 {
+        tick(Duration::from_millis(100)).await;
+        seen.extend(drain(&mut r.p.ev).await);
+        if seen
+            .iter()
+            .any(|e| matches!(e, TransferEvent::Completed { .. }))
+        {
+            done = true;
+            break;
+        }
+    }
+    assert!(done, "transfer did not complete after the outage: {seen:?}");
+    assert!(
+        !seen.iter().any(|e| matches!(
+            e,
+            TransferEvent::Paused {
+                reason: PauseReason::Stalled,
+                ..
+            }
+        )),
+        "stalled after an honest resume: {seen:?}"
+    );
+    let placed = placed_files(&r.p.dest);
+    assert_eq!(placed.len(), 1);
+    assert!(placed[0].1 == data);
+}

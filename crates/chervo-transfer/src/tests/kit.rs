@@ -697,7 +697,14 @@ pub struct PlaceSpy {
     pub calls: Mutex<Vec<(u32, bool)>>,
     /// Отказывать в размещении (проверка PlaceFailed).
     pub fail: std::sync::atomic::AtomicBool,
+    /// Имитация момента краха: `PLACE_LINK_ONLY` только жёсткая ссылка, временное имя не
+    /// удаляется; `PLACE_NOTHING` ничего не делает (крах до ссылки).
+    pub mode: std::sync::atomic::AtomicU8,
 }
+
+pub const PLACE_NORMAL: u8 = 0;
+pub const PLACE_LINK_ONLY: u8 = 1;
+pub const PLACE_NOTHING: u8 = 2;
 
 impl Placement for PlaceSpy {
     fn place(&self, f: &CompletedFile) -> Result<Placed, PlaceError> {
@@ -706,7 +713,17 @@ impl Placement for PlaceSpy {
         if self.fail.load(Ordering::SeqCst) {
             return Err(PlaceError::Refused);
         }
-        self.inner.place(f)
+        match self.mode.load(Ordering::SeqCst) {
+            PLACE_LINK_ONLY => {
+                let fin = self.inner.final_path(f);
+                std::fs::hard_link(f.temp_path(), &fin).map_err(|e| PlaceError::Io(e.kind()))?;
+                Ok(Placed { path: fin })
+            }
+            PLACE_NOTHING => Ok(Placed {
+                path: self.inner.final_path(f),
+            }),
+            _ => self.inner.place(f),
+        }
     }
 }
 
@@ -748,6 +765,7 @@ impl Peer {
             },
             calls: Mutex::new(Vec::new()),
             fail: std::sync::atomic::AtomicBool::new(false),
+            mode: std::sync::atomic::AtomicU8::new(PLACE_NORMAL),
         });
         let (tr, ev) = Transfers::start_with(
             node.engine.clone(),

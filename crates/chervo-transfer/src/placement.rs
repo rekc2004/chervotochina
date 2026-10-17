@@ -99,7 +99,7 @@ pub struct GeneratedNames {
 }
 
 impl GeneratedNames {
-    fn final_path(&self, f: &CompletedFile) -> PathBuf {
+    pub(crate) fn final_path(&self, f: &CompletedFile) -> PathBuf {
         let dir = state_dir_name(&f.key.pair, &f.key.id);
         self.dest_dir.join(format!("chervo-{dir}-{}", f.index))
     }

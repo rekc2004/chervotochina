@@ -16,8 +16,10 @@ mod hash;
 mod hashprog;
 mod integrity;
 mod kit;
+mod liveness;
 mod place;
 mod resume;
+mod round2;
 mod src_guard;
 mod state;
 

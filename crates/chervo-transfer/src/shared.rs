@@ -100,6 +100,14 @@ pub(crate) fn permits(bytes: u64) -> usize {
         .min(Semaphore::MAX_PERMITS)
 }
 
+/// То же с округлением вверх: доля передачи не должна оказаться меньше буфера, который из неё
+/// берут (`kib` тоже округляет вверх).
+pub(crate) fn permits_up(bytes: u64) -> usize {
+    usize::try_from(bytes.div_ceil(1024))
+        .unwrap_or(usize::MAX)
+        .min(Semaphore::MAX_PERMITS)
+}
+
 /// Самый крупный буфер, который понадобится передаче с такими файлами: блок или список хэшей
 /// манифеста (с запасом на заголовок).
 pub(crate) fn buffer_floor(sizes: &[u64]) -> u64 {
@@ -117,11 +125,13 @@ pub(crate) fn buffer_floor(sizes: &[u64]) -> u64 {
 
 /// Доля общего бюджета на одну передачу: `budget / max_active`, но не меньше самого крупного
 /// буфера этой передачи (иначе она не могла бы двигаться) и не больше всего бюджета. Один злой
-/// друг, тянущий свою долю, не отнимает память у остальных.
+/// друг, тянущий свою долю, не отнимает память у остальных. Разрешения округляются вверх:
+/// запрос, равный доле (список хэшей 2 МиБ + 64 Б при доле 2 МиБ), не может её превысить и
+/// ждать вечно.
 pub(crate) fn share_semaphore(budget: u64, max_active: usize, floor: u64) -> Arc<Semaphore> {
     let n = u64::try_from(max_active.max(1)).unwrap_or(u64::MAX);
     let bytes = (budget / n).max(floor).min(budget);
-    Arc::new(Semaphore::new(permits(bytes)))
+    Arc::new(Semaphore::new(permits_up(bytes)))
 }
 
 /// Разрешения на один буфер: из доли передачи и из общего бюджета. Освобождаются вместе.

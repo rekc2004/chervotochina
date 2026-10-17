@@ -13,8 +13,8 @@ use crate::codec::FileErrCode;
 use crate::events::{FileFailure, PauseReason, TransferEvent};
 use crate::fsio::{ReadFail, verify_blocks};
 use crate::paths::{
-    create_part_new, open_part_existing, part_path, remove_file_retry, remove_hashes,
-    remove_part_strict, temp_for_placement,
+    create_part_new, open_part_existing, part_path, part_to_placing, placing_path, placing_present,
+    remove_file_retry, remove_part_strict, remove_placing_strict, temp_for_placement,
 };
 use crate::placement::CompletedFile;
 use crate::receiver::{Attempt, End, RecvSession};
@@ -113,11 +113,13 @@ fn write_one(
     match marked {
         Mark::Ignored => Ok(0),
         Mark::Written { len } => {
+            s.live_progress();
             touched.insert(file);
             note_progress(s);
             Ok(u64::from(len))
         }
         Mark::Last { len } => {
+            s.live_progress();
             // итоговая проверка сама сделает `sync_all`; наш дескриптор закрывается
             touched.remove(&file);
             files.remove(&file);
@@ -234,12 +236,21 @@ pub(crate) fn finalize_file(s: &Arc<RecvSession>, file: u32) {
             _ => return,
         }
     };
+    // Файл уже переименован в `.placing` (крах между переименованием и записью `Placed`;
+    // `prepare` перепроверил его чтением): `.part` не открывается и не создаётся, длина и
+    // содержимое `.placing` не меняются. Он мог уже быть жёсткой ссылкой на размещённый файл.
+    let from_placing = size > 0 && placing_present(&s.sdir, file);
     // 1. файл на диске: точная длина и `sync_all`
     let synced = (|| -> io::Result<()> {
+        if from_placing {
+            return Ok(());
+        }
         let f = if size == 0 {
-            // пустой файл: старый `.part` (если остался) убирается строго, создаётся новый
+            // пустой файл: старые `.part` и `.placing` (если остались) убираются строго (оба
+            // могли остаться вторым именем размещённого файла), создаётся новый `.part`
             s.sh.hook(HookPoint::RemovePart { file })?;
             remove_part_strict(&s.sdir, file)?;
+            remove_placing_strict(&s.sdir, file)?;
             create_part_new(&s.sdir, file)?
         } else {
             match open_part_existing(&s.sdir, file) {
@@ -271,10 +282,22 @@ pub(crate) fn finalize_file(s: &Arc<RecvSession>, file: u32) {
         return;
     }
     let part = part_path(&s.sdir, file);
+    let checked = if from_placing {
+        placing_path(&s.sdir, file)
+    } else {
+        part.clone()
+    };
     if s.sh.cfg.verify_after_write {
         s.emit(TransferEvent::Verifying { key: s.key });
-        match verify_blocks(&part, size, l, &leaves, None, &s.halt) {
+        match verify_blocks(&checked, size, l, &leaves, None, &s.halt) {
             Ok(bad) if bad.is_empty() => {}
+            Ok(_) if from_placing => {
+                // `.placing` изменился после проверки в `prepare`: в него не пишут, имя
+                // убирается, файл закрывается как повреждённый
+                let _ = remove_placing_strict(&s.sdir, file);
+                s.fail_file(file, FileFailure::Damaged, Some(FileErrCode::Damaged));
+                return;
+            }
             Ok(bad) => {
                 let ok = lock(&s.core).sched.finalize_mismatch(file, &bad);
                 if ok {
@@ -313,6 +336,12 @@ pub(crate) fn finalize_file(s: &Arc<RecvSession>, file: u32) {
         .get(usize::try_from(file).unwrap_or(usize::MAX))
         .cloned();
     let Some(name) = name else { return };
+    // До размещения `.part` атомарно переименовывается в `.placing` (тот же каталог): жёсткая
+    // ссылка на размещённый файл никогда не получает имя `.part`, в которое пишет получатель.
+    if !from_placing && let Err(e) = part_to_placing(&s.sdir, file) {
+        abort_finalize(s, file, &e);
+        return;
+    }
     let cf = CompletedFile::new(
         s.key,
         file,
@@ -324,10 +353,10 @@ pub(crate) fn finalize_file(s: &Arc<RecvSession>, file: u32) {
     match s.sh.placement.place(&cf) {
         Ok(_) => {
             lock(&s.core).sched.set_placed(file);
-            s.mark_dirty();
-            remove_hashes(&s.sdir, file);
-            // уборка: если `.part` остался вторым именем размещённого файла, `prepare` и
-            // `finalize_file` не пишут в него (`remove_part_strict`)
+            // `Placed` записывается сразу, а не контрольной точкой; `.placing` и хэши убираются
+            // только после этой записи (до неё они нужны для перепроверки чтением после краха)
+            s.placed_now(file);
+            // на случай `.part` рядом с `.placing` (не должно быть): только имя, не запись
             let _ = remove_file_retry(&part);
             s.ctl_send(crate::codec::Message::FileDone { index: file });
             s.emit(TransferEvent::FileReceived {

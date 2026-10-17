@@ -229,6 +229,18 @@ impl Sched {
             .any(|(i, r)| !r.is_terminal() && !self.covered(i))
     }
 
+    /// От отправителя сейчас нужны данные: блоки у открытого файла или манифест покрытого
+    /// файла. Своя работа (подготовка, итоговая проверка, размещение) спросом не считается.
+    pub(crate) fn wants_data(&self) -> bool {
+        self.runs.iter().enumerate().any(|(i, r)| match r {
+            Run::Active(a) => a.remaining > 0,
+            Run::Waiting(_) | Run::Requested(_) => {
+                self.sizes.get(i).copied().unwrap_or(0) > 0 && self.covered(i)
+            }
+            _ => false,
+        })
+    }
+
     /// Следующая работа для потока. Блоки раньше манифестов, файлы по порядку; манифест файла
     /// просится, только когда отправитель сообщил, что файл (и всё перед ним) захэшированы.
     pub(crate) fn take(&mut self) -> Work {

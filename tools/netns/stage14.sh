@@ -430,6 +430,9 @@ row_addrchange() {
     f+="$(check_dest)"
   fi
   row_end
+  # вернуть исходный адрес wb: стенд общий для строк, следующие (KILLRECV, CAPTURE) ждут wb = $CORE.51
+  ipn wb addr add "$CORE.51/24" dev wan 2>/dev/null || true
+  ipn wb addr del "$CORE.52/24" dev wan 2>/dev/null || true
   if [[ -n "${f// /}" ]]; then verdict ADDRCHANGE FAIL "$f"
   else verdict ADDRCHANGE PASS "смена адреса получателя на ~30 %: передача закончена, cmp равен (пауза была: $(has_ev_txt))"
   fi
