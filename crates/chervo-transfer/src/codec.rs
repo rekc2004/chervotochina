@@ -203,6 +203,11 @@ pub enum Message {
         file_count: u32,
         total_size: u64,
     },
+    /// Отправитель -> получатель на потоке управления, только после принятия: сколько байт
+    /// предложения (в порядке предложения) уже захэшировано.
+    HashProgress {
+        hashed: u64,
+    },
     Bind {
         id: TransferId,
     },
@@ -241,6 +246,7 @@ const T_FILE_DONE: u8 = 0x06;
 const T_DONE: u8 = 0x07;
 const T_RESUME: u8 = 0x08;
 const T_RESUME_OK: u8 = 0x09;
+const T_HASH_PROGRESS: u8 = 0x0A;
 const T_BIND: u8 = 0x10;
 const T_GET_MANIFEST: u8 = 0x11;
 const T_MANIFEST: u8 = 0x12;
@@ -426,6 +432,10 @@ pub fn decode_message(body: &[u8]) -> Result<Message, ProtocolError> {
                 total_size: r.u64()?,
             }
         }
+        T_HASH_PROGRESS => {
+            fixed(8, rest)?;
+            Message::HashProgress { hashed: r.u64()? }
+        }
         T_BIND => {
             fixed(17, rest)?;
             check_version(r.u8()?)?;
@@ -599,6 +609,10 @@ pub fn encode(msg: &Message, out: &mut Vec<u8>) -> Result<(), ProtocolError> {
             put_id(&mut body, id);
             put_u32(&mut body, *file_count);
             put_u64(&mut body, *total_size);
+        }
+        Message::HashProgress { hashed } => {
+            body.push(T_HASH_PROGRESS);
+            put_u64(&mut body, *hashed);
         }
         Message::Bind { id } => {
             body.push(T_BIND);

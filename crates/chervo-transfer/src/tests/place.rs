@@ -1,7 +1,7 @@
 //! Размещение без перезаписи, служебные каталоги при запуске, лимиты друга, охрана исходников.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use chervo_identity::PairId;
@@ -69,7 +69,10 @@ fn place_no_clobber_fallback_path() {
 
 fn completed(temp: &Path, data: &[u8], index: u32) -> CompletedFile {
     let stop = AtomicBool::new(false);
-    let (_, _, root) = hash_source(temp, data.len() as u64, &stop).unwrap();
+    let (_, _, root) = hash_source(temp, data.len() as u64, &stop, &AtomicU64::new(0), &|_| {
+        Ok(())
+    })
+    .unwrap();
     CompletedFile::new(
         TransferKey {
             pair: PairId::from_bytes([3; 16]),

@@ -83,6 +83,8 @@ pub(crate) fn close_duplicate(conn: &quinn::Connection) {
 /// Аутентифицированное соединение. Пара подтверждена Noise KK внутри канала.
 #[derive(Clone)]
 pub struct QuinnConn {
+    /// Номер из счётчика реестра: уникален в процессе, не повторяется, одинаков у клонов.
+    pub(crate) id: u64,
     pub(crate) conn: quinn::Connection,
     pub(crate) pair: PairId,
     pub(crate) initiator: bool,
@@ -158,7 +160,7 @@ impl Connection for QuinnConn {
     }
 
     fn conn_id(&self) -> u64 {
-        self.conn.stable_id() as u64
+        self.id
     }
 
     fn is_initiator(&self) -> bool {

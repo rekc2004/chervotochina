@@ -410,3 +410,118 @@ async fn conn_trait_methods() {
         .await
         .expect("closed() у собеседника");
 }
+
+/// Шаг 0 разбора R2-2: повторяются ли `stable_id` после сброса всех клонов соединения.
+/// Диагностика (запускается вручную), не критерий.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "диагностика R2-2: запуск вручную"]
+#[allow(clippy::print_stdout)]
+async fn stable_id_reuse_probe() {
+    let k = Keys::new();
+    let a = Arc::new(bind(test_cfg(), vec![k.peer_a()]));
+    let b = Arc::new(bind(test_cfg(), vec![k.peer_b()]));
+    let mut seen_a = std::collections::HashSet::new();
+    let mut seen_b = std::collections::HashSet::new();
+    let (mut rep_a, mut rep_b) = (0usize, 0usize);
+    for i in 0..64 {
+        let b2 = b.clone();
+        let acc = tokio::spawn(async move { b2.accept().await });
+        let ca = match a.connect(&peer_addr(k.pid, &b)).await {
+            Ok(c) => c,
+            Err(e) => panic!("cycle {i}: {e:?}\nA {:?}\nB {:?}", a.stats(), b.stats()),
+        };
+        let cb = acc.await.unwrap().unwrap();
+        if !seen_a.insert(ca.conn.stable_id()) {
+            rep_a += 1;
+        }
+        if !seen_b.insert(cb.conn.stable_id()) {
+            rep_b += 1;
+        }
+        Connection::close(&ca);
+        Connection::close(&cb);
+        Connection::closed(&ca).await;
+        Connection::closed(&cb).await;
+        drop(ca);
+        drop(cb);
+        a.inner.endpoint.wait_idle().await;
+        b.inner.endpoint.wait_idle().await;
+        sleep_ms(50).await;
+    }
+    println!("PROBE stable_id repeats: side A {rep_a}, side B {rep_b} of 64");
+}
+
+/// R2-2: номера соединений выдаёт счётчик; после сброса всех клонов и `wait_idle` (когда адрес
+/// старого соединения в памяти свободен, `stable_id` повторяется) номер не повторяется.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn conn_id_never_reused() {
+    let k = Keys::new();
+    let a = Arc::new(bind(test_cfg(), vec![k.peer_a()]));
+    let b = Arc::new(bind(test_cfg(), vec![k.peer_b()]));
+    let mut all = std::collections::HashSet::new();
+    let (mut last_a, mut last_b) = (0u64, 0u64);
+    for i in 0..64 {
+        let b2 = b.clone();
+        let acc = tokio::spawn(async move { b2.accept().await });
+        let ca = a.connect(&peer_addr(k.pid, &b)).await.unwrap();
+        let cb = acc.await.unwrap().unwrap();
+        let (ia, ib) = (Connection::conn_id(&ca), Connection::conn_id(&cb));
+        assert!(ia > last_a, "цикл {i}: сторона A {ia} <= {last_a}");
+        assert!(ib > last_b, "цикл {i}: сторона B {ib} <= {last_b}");
+        assert!(all.insert(ia) && all.insert(ib), "цикл {i}: номер повторён");
+        assert_eq!(Connection::conn_id(&ca.clone()), ia);
+        (last_a, last_b) = (ia, ib);
+        Connection::close(&ca);
+        Connection::close(&cb);
+        Connection::closed(&ca).await;
+        Connection::closed(&cb).await;
+        drop(ca);
+        drop(cb);
+        a.inner.endpoint.wait_idle().await;
+        b.inner.endpoint.wait_idle().await;
+        sleep_ms(50).await;
+    }
+}
+
+/// R2-2: при одновременном звонке проигравший дубликат возвращает номер победителя: у всех
+/// живых `QuinnConn` стороны один и тот же номер, и он согласован с самим соединением quinn
+/// (одинаковый номер тогда и только тогда, когда это одно соединение).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lost_duplicate_returns_winner_id() {
+    for round in 0..20 {
+        let k = Keys::new();
+        let a = Arc::new(bind(cfg(), vec![k.peer_a()]));
+        let b = Arc::new(bind(cfg(), vec![k.peer_b()]));
+        let acc_a = collect_accepts(a.clone(), 1500);
+        let acc_b = collect_accepts(b.clone(), 1500);
+        let (to_b, to_a) = (peer_addr(k.pid, &b), peer_addr(k.pid, &a));
+        let (ra, rb) = tokio::join!(a.connect(&to_b), b.connect(&to_a));
+        let (ca, cb) = (ra.unwrap(), rb.unwrap());
+        sleep_ms(1100).await;
+        let mut all_a = vec![ca];
+        all_a.extend(acc_a.lock().unwrap().iter().cloned());
+        let mut all_b = vec![cb];
+        all_b.extend(acc_b.lock().unwrap().iter().cloned());
+        for (side, all) in [("A", &all_a), ("B", &all_b)] {
+            let live: Vec<_> = all.iter().filter(|c| alive(c)).collect();
+            assert!(!live.is_empty(), "раунд {round}: у {side} нет живых");
+            for c in &live {
+                assert_eq!(
+                    Connection::conn_id(*c),
+                    Connection::conn_id(live[0]),
+                    "раунд {round}: у {side} живые QuinnConn с разными номерами"
+                );
+                assert_eq!(c.conn.stable_id(), live[0].conn.stable_id());
+            }
+            // разные соединения (в том числе закрытые проигравшие) не делят номер
+            for x in all.iter() {
+                for y in all.iter() {
+                    assert_eq!(
+                        Connection::conn_id(x) == Connection::conn_id(y),
+                        x.conn.stable_id() == y.conn.stable_id(),
+                        "раунд {round}: {side}: номер не согласован с соединением"
+                    );
+                }
+            }
+        }
+    }
+}

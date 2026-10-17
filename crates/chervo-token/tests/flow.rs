@@ -67,7 +67,14 @@ impl RecvStream for MemRx {
     }
 }
 
+/// Номера соединений тестовых заглушек: по возрастанию, без повторов (контракт `conn_id`).
+fn next_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 struct MemConn {
+    id: u64,
     pair: PairId,
     streams: Mutex<Option<(MemTx, MemRx)>>,
 }
@@ -107,7 +114,7 @@ impl Connection for MemConn {
     fn close(&self) {}
 
     fn conn_id(&self) -> u64 {
-        0
+        self.id
     }
 
     fn is_initiator(&self) -> bool {
@@ -133,10 +140,12 @@ fn link() -> Link {
     let pair = PairId::generate().unwrap();
     Link {
         a: MemConn {
+            id: next_id(),
             pair,
             streams: Mutex::new(Some((MemTx(a_to_b.clone()), MemRx(b_to_a.clone())))),
         },
         b: MemConn {
+            id: next_id(),
             pair,
             streams: Mutex::new(Some((MemTx(b_to_a.clone()), MemRx(a_to_b.clone())))),
         },

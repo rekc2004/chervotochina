@@ -152,6 +152,11 @@ pub(crate) enum Mark {
 pub(crate) struct Sched {
     pub(crate) runs: Vec<Run>,
     sizes: Vec<u64>,
+    /// `prefix[i]` = размеры файлов `0..=i`: манифест файла `i` просят, когда `hashed >= prefix[i]`.
+    prefix: Vec<u64>,
+    /// Сколько байт предложения отправитель уже захэшировал (только в памяти; 0 после
+    /// перезапуска).
+    pub(crate) hashed: u64,
     cap: usize,
     pub(crate) refetch_total: u32,
     max_block: u8,
@@ -166,9 +171,19 @@ impl Sched {
         max_block: u8,
         max_total: u32,
     ) -> Self {
+        let mut acc = 0u64;
+        let prefix = sizes
+            .iter()
+            .map(|s| {
+                acc = acc.saturating_add(*s);
+                acc
+            })
+            .collect();
         Self {
             runs,
             sizes,
+            prefix,
+            hashed: 0,
             cap,
             refetch_total: 0,
             max_block,
@@ -200,7 +215,22 @@ impl Sched {
         self.runs.iter().filter(|r| r.in_progress()).count()
     }
 
-    /// Следующая работа для потока. Блоки раньше манифестов, файлы по порядку.
+    /// Хэши файла готовы у отправителя (пустой файл манифеста не просит).
+    fn covered(&self, file: usize) -> bool {
+        self.sizes.get(file).copied().unwrap_or(0) == 0
+            || self.prefix.get(file).is_none_or(|p| *p <= self.hashed)
+    }
+
+    /// Есть незавершённый непустой файл, чьи хэши ещё не покрыты сообщением отправителя.
+    pub(crate) fn needs_hash(&self) -> bool {
+        self.runs
+            .iter()
+            .enumerate()
+            .any(|(i, r)| !r.is_terminal() && !self.covered(i))
+    }
+
+    /// Следующая работа для потока. Блоки раньше манифестов, файлы по порядку; манифест файла
+    /// просится, только когда отправитель сообщил, что файл (и всё перед ним) захэшированы.
     pub(crate) fn take(&mut self) -> Work {
         for (i, r) in self.runs.iter_mut().enumerate() {
             let Ok(file) = u32::try_from(i) else { break };
@@ -213,9 +243,13 @@ impl Sched {
             }
         }
         // восстановленные файлы: их манифест нужен, чтобы подтвердить корень
+        let ready: Vec<bool> = (0..self.runs.len()).map(|i| self.covered(i)).collect();
         for (i, r) in self.runs.iter_mut().enumerate() {
             let Ok(file) = u32::try_from(i) else { break };
             if let Run::Waiting(prior @ Some(_)) = r {
+                if !ready.get(i).copied().unwrap_or(false) {
+                    continue;
+                }
                 let p = prior.take();
                 *r = Run::Requested(p);
                 return Work::Manifest { file };
@@ -228,6 +262,9 @@ impl Sched {
                 if self.sizes.get(i).copied().unwrap_or(0) == 0 {
                     *r = Run::Setup;
                     return Work::Zero { file };
+                }
+                if !ready.get(i).copied().unwrap_or(false) {
+                    continue;
                 }
                 if busy < self.cap {
                     *r = Run::Requested(None);

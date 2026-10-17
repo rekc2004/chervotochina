@@ -63,6 +63,12 @@ pub enum TransferEvent {
     Verifying {
         key: TransferKey,
     },
+    /// Отправитель хэширует файлы перед отдачей: `hashed` из `total` байт предложения.
+    Preparing {
+        key: TransferKey,
+        hashed: u64,
+        total: u64,
+    },
     FileReceived {
         key: TransferKey,
         index: u32,

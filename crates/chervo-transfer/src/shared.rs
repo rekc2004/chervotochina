@@ -38,6 +38,8 @@ pub(crate) enum HookPoint<'a> {
     FinalVerify { file: u32 },
     /// Корень на диске совпал, до вызова `Placement`.
     BeforePlace { file: u32 },
+    /// Отправитель: перед хэшированием очередного блока своего файла.
+    HashBlock { file: u32, block: u32 },
 }
 
 pub(crate) trait Hook: Send + Sync {

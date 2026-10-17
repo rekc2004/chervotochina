@@ -393,6 +393,34 @@ async fn hold_of_replaced_conn_ignored() {
     drop(c0);
 }
 
+/// R2-2: удержание закрытого и снятого соединения не переходит к новому соединению пары и не
+/// уменьшает его счётчик при сбросе (номера соединений не повторяются).
+#[tokio::test(start_paused = true)]
+async fn hold_not_inherited_by_new_conn() {
+    let (n, ps) = node(1, ConnectConfig::default());
+    let c1 = arrive(&n, ps[0], 0).await;
+    let id1 = n.engine.connection(&ps[0]).unwrap().conn_id();
+    let old = n.engine.hold(&ps[0]).unwrap();
+    // соединение 1 закрыто и снято с учёта, запись удержания осталась за ним
+    c1.close();
+    tokio::time::sleep(secs(1)).await;
+    assert!(n.engine.connection(&ps[0]).is_none());
+    assert_eq!(n.engine.inner.lock().holds.get(&ps[0]), Some(&(id1, 1)));
+    // соединение 2 живо: чужое удержание ему не принадлежит
+    let c2 = arrive(&n, ps[0], 1).await;
+    let id2 = n.engine.connection(&ps[0]).unwrap().conn_id();
+    assert_ne!(id1, id2, "номера соединений не повторяются");
+    assert!(!n.engine.inner.lock().holds.contains_key(&ps[0]));
+    let h2 = n.engine.hold(&ps[0]).unwrap();
+    assert_eq!(n.engine.inner.lock().holds.get(&ps[0]), Some(&(id2, 1)));
+    // сброс старого удержания счётчик нового соединения не меняет
+    drop(old);
+    assert_eq!(n.engine.inner.lock().holds.get(&ps[0]), Some(&(id2, 1)));
+    drop(h2);
+    assert!(n.engine.inner.lock().holds.is_empty());
+    drop(c2);
+}
+
 #[tokio::test(start_paused = true)]
 async fn subscribe_second_receiver_gets_events() {
     let (mut n, ps) = node(1, ConnectConfig::default());

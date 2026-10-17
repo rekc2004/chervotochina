@@ -2,6 +2,7 @@
 //! ответы. Нужен, чтобы проверить получателя против враждебного или сломанного узла.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -87,6 +88,8 @@ pub struct Fake {
     pub key: TransferKey,
     pub files: Arc<Vec<FakeFile>>,
     pub log: Arc<Mutex<Log>>,
+    /// Не отвечать на DONE получателя (эхо потеряно), соединение оставить живым.
+    pub drop_done_echo: Arc<AtomicBool>,
     responder: Arc<Mutex<Responder>>,
     served: Arc<Mutex<HashMap<(u32, u32), u32>>>,
 }
@@ -100,6 +103,7 @@ impl Fake {
             },
             files: Arc::new(files),
             log: Arc::new(Mutex::new(Log::default())),
+            drop_done_echo: Arc::new(AtomicBool::new(false)),
             responder: Arc::new(Mutex::new(Box::new(|_| Resp::Normal))),
             served: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -149,13 +153,18 @@ impl Fake {
     }
 
     /// Принимает потоки данных от получателя и обслуживает их, пока соединение живо.
-    /// Поток управления (`ctl`) читается отдельной задачей: события пишутся в журнал, на DONE
-    /// отвечает DONE.
+    /// Поток управления (`ctl`) читается отдельной задачей: сначала уходит HASH_PROGRESS на весь
+    /// размер предложения, события пишутся в журнал, на DONE отвечает DONE. Без `ctl` поток
+    /// управления ведёт тест.
     pub fn run(&self, peer: FakeConn, ctl: Option<(FakeTx, FakeRx)>) {
         if let Some((mut tx, mut rx)) = ctl {
             let log = self.log.clone();
             let id = self.key.id;
+            let drop_echo = self.drop_done_echo.clone();
+            let total = self.total();
             tokio::spawn(async move {
+                // как настоящий отправитель: после принятия сообщает, что всё захэшировано
+                send_frame(&mut tx, &Message::HashProgress { hashed: total }).await;
                 let mut buf = Vec::new();
                 loop {
                     match read_message(&mut rx, &mut buf, Duration::from_secs(30)).await {
@@ -173,6 +182,10 @@ impl Fake {
                         }
                         Ok(Some(Message::Done { .. })) => {
                             log.lock().unwrap().ctl.push("done".to_owned());
+                            if drop_echo.load(Ordering::SeqCst) {
+                                // эхо потеряно: поток управления остаётся открытым
+                                std::future::pending::<()>().await;
+                            }
                             send_frame(&mut tx, &Message::Done { id }).await;
                             let _ = tx.finish();
                             break;

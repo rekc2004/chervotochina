@@ -75,11 +75,11 @@ pub(super) fn collect_accepts(t: Arc<QuinnTransport>, ms: u64) -> Arc<Mutex<Vec<
     out
 }
 
-/// Единственное живое соединение стороны (по `stable_id`), если оно ровно одно.
+/// Единственное живое соединение стороны (по `conn_id`), если оно ровно одно.
 pub(super) fn survivors(all: &[QuinnConn]) -> Vec<QuinnConn> {
     let mut ids = HashSet::new();
     all.iter()
-        .filter(|c| alive(c) && ids.insert(c.conn.stable_id()))
+        .filter(|c| alive(c) && ids.insert(c.id))
         .cloned()
         .collect()
 }

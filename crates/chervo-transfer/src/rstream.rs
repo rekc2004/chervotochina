@@ -102,8 +102,70 @@ fn file_failure(code: FileErrCode) -> Option<FileFailure> {
     }
 }
 
+/// Что ctl_reader помнит о кадрах HASH_PROGRESS этой попытки.
+#[derive(Default)]
+struct HashFrames {
+    prev: Option<u64>,
+    at_total: bool,
+}
+
+/// Правила кадра HASH_PROGRESS: первый кадр попытки не меньше значения сессии, дальше строго
+/// больше предыдущего, не больше `total`, после `total` кадров нет. `false`: нарушение.
+fn accept_hash_progress(s: &RecvSession, att: &Attempt, st: &mut HashFrames, hashed: u64) -> bool {
+    if st.at_total || hashed > s.total {
+        return false;
+    }
+    {
+        let mut c = lock(&s.core);
+        let ok = match st.prev {
+            None => hashed >= c.sched.hashed,
+            Some(p) => hashed > p,
+        };
+        if !ok {
+            return false;
+        }
+        c.sched.hashed = hashed;
+    }
+    st.prev = Some(hashed);
+    st.at_total = hashed == s.total;
+    att.note_hash(hashed);
+    s.wake.notify_waiters();
+    s.note_preparing(hashed);
+    true
+}
+
+/// Сторож ожидания хэширования у отправителя (одна задача на попытку). Работает, пока есть
+/// незавершённый непустой файл, не покрытый отправителем. Пауза `Stalled`: нет кадров
+/// HASH_PROGRESS `stall_timeout`, либо средняя скорость ниже `min_hash_rate`.
+pub(crate) async fn hash_watchdog(s: Arc<RecvSession>, att: Arc<Attempt>) {
+    let cfg = &s.sh.cfg;
+    let mut stop = att.stop.watcher();
+    loop {
+        let news = s.wake.notified();
+        tokio::pin!(news);
+        news.as_mut().enable();
+        if !lock(&s.core).sched.needs_hash() {
+            return;
+        }
+        let deadline = att.hash_deadline(cfg.stall_timeout, cfg.min_hash_rate, s.total);
+        tokio::select! {
+            () = tokio::time::sleep_until(deadline) => {
+                let due = lock(&s.core).sched.needs_hash()
+                    && tokio::time::Instant::now()
+                        >= att.hash_deadline(cfg.stall_timeout, cfg.min_hash_rate, s.total);
+                if due {
+                    att.finish(End::Pause(PauseReason::Stalled));
+                    return;
+                }
+            }
+            () = &mut news => {}
+            () = stop.stopped() => return,
+        }
+    }
+}
+
 /// Читает сообщения отправителя на потоке управления. Допустимы CANCEL, FILE_ERROR с кодами
-/// отправителя и DONE; всё остальное это нарушение протокола.
+/// отправителя, HASH_PROGRESS и DONE; всё остальное это нарушение протокола.
 pub(crate) async fn ctl_reader<R: RecvStream>(
     mut rx: R,
     mut buf: Vec<u8>,
@@ -111,6 +173,7 @@ pub(crate) async fn ctl_reader<R: RecvStream>(
     s: Arc<RecvSession>,
 ) {
     let mut stop = att.stop.watcher();
+    let mut frames = HashFrames::default();
     loop {
         let r = tokio::select! {
             r = read_message(&mut rx, &mut buf, s.sh.cfg.msg_timeout) => r,
@@ -128,6 +191,12 @@ pub(crate) async fn ctl_reader<R: RecvStream>(
                         protocol_fail(&s, &att);
                         return;
                     }
+                }
+            }
+            Ok(Some(Message::HashProgress { hashed })) => {
+                if !accept_hash_progress(&s, &att, &mut frames, hashed) {
+                    protocol_fail(&s, &att);
+                    return;
                 }
             }
             Ok(Some(Message::Done { id })) if id == s.key.id => att.note_echo(),

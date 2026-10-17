@@ -494,6 +494,8 @@ enum Pending {
     Answer(bool),
     Expired,
     SenderCancelled,
+    /// Отправитель прислал HASH_PROGRESS до принятия.
+    Protocol,
     Lost,
     Shutdown,
 }
@@ -515,6 +517,7 @@ async fn pending_task<L: Links>(
         () = tokio::time::sleep(cfg.offer_ttl) => Pending::Expired,
         m = read_message(&mut rx, &mut buf, cfg.msg_timeout) => match m {
             Ok(Some(Message::Cancel { id, .. })) if id == s.key.id => Pending::SenderCancelled,
+            Ok(Some(Message::HashProgress { .. })) => Pending::Protocol,
             _ => Pending::Lost,
         },
         () = conn.closed() => Pending::Lost,
@@ -539,6 +542,23 @@ async fn pending_task<L: Links>(
             s.emit(TransferEvent::Failed {
                 key,
                 reason: FailReason::Expired,
+            });
+        }
+        Pending::Protocol => {
+            inner.remove_inb(&key);
+            s.take_answer();
+            let mut out = Vec::new();
+            let m = Message::Cancel {
+                id: key.id,
+                reason: CancelReason::Protocol,
+            };
+            if encode(&m, &mut out).is_ok() {
+                let _ = timeout(cfg.msg_timeout, tx.write_all(&out)).await;
+            }
+            let _ = tx.finish();
+            s.emit(TransferEvent::Failed {
+                key,
+                reason: FailReason::Protocol,
             });
         }
         Pending::SenderCancelled | Pending::Lost => {

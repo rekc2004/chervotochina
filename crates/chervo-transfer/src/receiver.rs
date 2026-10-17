@@ -62,6 +62,15 @@ pub(crate) enum Finish {
     Failed(FailReason),
 }
 
+/// Что попытка видела от отправителя в кадрах HASH_PROGRESS (для сторожа хэширования).
+struct HashSeen {
+    start: tokio::time::Instant,
+    /// Первое значение попытки.
+    first: Option<u64>,
+    /// Когда принят последний кадр (до первого кадра: начало попытки).
+    last_at: tokio::time::Instant,
+}
+
 /// Одна попытка: одно соединение, поток управления, потоки данных и писатель.
 pub(crate) struct Attempt {
     pub(crate) stop: Stop,
@@ -70,17 +79,59 @@ pub(crate) struct Attempt {
     echo: watch::Sender<bool>,
     /// Подряд оборванных потоков без единого принятого блока.
     pub(crate) stalls: AtomicU32,
+    hash: Mutex<HashSeen>,
 }
 
 impl Attempt {
     pub(crate) fn new() -> Arc<Self> {
+        let now = tokio::time::Instant::now();
         Arc::new(Self {
             stop: Stop::new(),
             tracker: Tracker::new(),
             end: watch::channel(None).0,
             echo: watch::channel(false).0,
             stalls: AtomicU32::new(0),
+            hash: Mutex::new(HashSeen {
+                start: now,
+                first: None,
+                last_at: now,
+            }),
         })
+    }
+
+    /// Принят кадр HASH_PROGRESS со значением `hashed`.
+    pub(crate) fn note_hash(&self, hashed: u64) {
+        let mut h = lock(&self.hash);
+        h.first.get_or_insert(hashed);
+        h.last_at = tokio::time::Instant::now();
+    }
+
+    /// Срок, по которому ожидание хэширования у отправителя считается зависшим: нет кадров
+    /// `stall` (счёт от начала попытки или последнего кадра), либо с начала попытки прошло
+    /// больше `stall + (total - первое значение) / rate`.
+    pub(crate) fn hash_deadline(
+        &self,
+        stall: std::time::Duration,
+        rate: u64,
+        total: u64,
+    ) -> tokio::time::Instant {
+        let h = lock(&self.hash);
+        let far = h.start + std::time::Duration::from_secs(86_400 * 365);
+        let by_silence = h.last_at.checked_add(stall).unwrap_or(far);
+        let Some(first) = h.first else {
+            return by_silence;
+        };
+        let rate = u128::from(rate.max(1));
+        let left = u128::from(total.saturating_sub(first));
+        let extra = std::time::Duration::from_nanos(
+            u64::try_from(left.saturating_mul(1_000_000_000) / rate).unwrap_or(u64::MAX),
+        );
+        let by_rate = h
+            .start
+            .checked_add(stall)
+            .and_then(|t| t.checked_add(extra))
+            .unwrap_or(far);
+        by_silence.min(by_rate)
     }
 
     /// Первая причина побеждает.
@@ -120,6 +171,8 @@ pub(crate) struct RCore {
     pub(crate) ctl: Option<mpsc::UnboundedSender<Message>>,
     pub(crate) att: Option<Arc<Attempt>>,
     pub(crate) last_progress: Option<Instant>,
+    /// Когда в последний раз выдано событие `Preparing`.
+    last_prep: Option<tokio::time::Instant>,
     /// Чем закончить передачу, когда сработает `end`.
     pub(crate) finish: Option<Finish>,
     /// Был файл с неудачным размещением: временные данные оставляются.
@@ -183,6 +236,7 @@ impl RecvSession {
                 ctl: None,
                 att: None,
                 last_progress: None,
+                last_prep: None,
                 finish: None,
                 place_failed: false,
             }),
@@ -223,6 +277,7 @@ impl RecvSession {
                 ctl: None,
                 att: None,
                 last_progress: None,
+                last_prep: None,
                 finish: None,
                 place_failed: false,
             }),
@@ -238,6 +293,27 @@ impl RecvSession {
 
     pub(crate) fn emit(&self, e: TransferEvent) {
         self.sh.emit(e);
+    }
+
+    /// Событие `Preparing` по принятому кадру HASH_PROGRESS; не чаще `progress_interval`,
+    /// итоговое значение всегда.
+    pub(crate) fn note_preparing(&self, hashed: u64) {
+        let force = hashed >= self.total;
+        {
+            let mut c = lock(&self.core);
+            let due = force
+                || c.last_prep
+                    .is_none_or(|t| t.elapsed() >= self.sh.cfg.progress_interval);
+            if !due {
+                return;
+            }
+            c.last_prep = Some(tokio::time::Instant::now());
+        }
+        self.emit(TransferEvent::Preparing {
+            key: self.key,
+            hashed,
+            total: self.total,
+        });
     }
 
     pub(crate) fn take_answer(&self) -> Option<oneshot::Sender<bool>> {
@@ -563,8 +639,9 @@ fn prepare(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Outcome {
-    /// Соединение потеряно; `Some(id)`: к этому соединению не возвращаться.
-    Disconnected(Option<u64>),
+    /// Соединение потеряно (закрыто). Годным считается любое живое соединение пары: номер
+    /// погибшего не запоминается.
+    Disconnected,
     /// Пауза, ждём `retry`.
     Paused,
     /// Попытка не удалась без вины соединения: повторить через время опроса.
@@ -586,12 +663,19 @@ async fn is_closed<C: Connection>(c: &C) -> bool {
     timeout(std::time::Duration::ZERO, c.closed()).await.is_ok()
 }
 
+/// Исход после потери связи в попытке: соединение закрыто, ждём другое; живое (сбой без вины
+/// соединения): повтор через время опроса, без горячего цикла.
+async fn lost<C: Connection>(c: &C) -> Outcome {
+    if is_closed(c).await {
+        Outcome::Disconnected
+    } else {
+        Outcome::Retry
+    }
+}
+
 /// Ждёт живое соединение пары (событие или опрос раз в `poll`). `None`: передача закончена.
-async fn wait_conn<L: Links>(
-    inner: &Arc<Inner<L>>,
-    s: &Arc<RecvSession>,
-    dead: Option<u64>,
-) -> Option<L::Conn> {
+/// Соединение годно, если оно есть у движка и не закрыто; сравнения с номером погибшего нет.
+async fn wait_conn<L: Links>(inner: &Arc<Inner<L>>, s: &Arc<RecvSession>) -> Option<L::Conn> {
     let mut gen_rx = inner.conn_gen.subscribe();
     let mut end = s.end.watcher();
     let mut down = s.sh.shutdown.watcher();
@@ -600,7 +684,6 @@ async fn wait_conn<L: Links>(
             return None;
         }
         if let Some(c) = inner.links.connection(&s.key.pair)
-            && Some(c.conn_id()) != dead
             && !is_closed(&c).await
         {
             return Some(c);
@@ -621,12 +704,11 @@ pub(crate) async fn recv_supervisor<L: Links>(
     first: Option<FirstCtl<L::Conn>>,
 ) {
     let mut first = first;
-    let mut dead: Option<u64> = None;
     loop {
         let (conn, ctl) = match first.take() {
             Some(f) => (f.conn, Some((f.tx, f.rx))),
             None => {
-                let Some(c) = wait_conn(&inner, &s, dead).await else {
+                let Some(c) = wait_conn(&inner, &s).await else {
                     end_if_requested(&inner, &s).await;
                     return;
                 };
@@ -634,7 +716,7 @@ pub(crate) async fn recv_supervisor<L: Links>(
             }
         };
         match run_attempt(&inner, &s, conn, ctl).await {
-            Outcome::Disconnected(id) => dead = id,
+            Outcome::Disconnected => {}
             Outcome::Paused => {
                 // ждём `retry`, отмену или остановку
                 let mut end = s.end.watcher();
@@ -644,7 +726,6 @@ pub(crate) async fn recv_supervisor<L: Links>(
                     () = end.stopped() => {}
                     () = down.stopped() => {}
                 }
-                dead = None;
             }
             Outcome::Retry => {
                 let mut end = s.end.watcher();
@@ -654,7 +735,6 @@ pub(crate) async fn recv_supervisor<L: Links>(
                     () = end.stopped() => {}
                     () = down.stopped() => {}
                 }
-                dead = None;
             }
             Outcome::Over => return,
         }
@@ -782,7 +862,6 @@ async fn run_attempt<L: Links>(
 ) -> Outcome {
     let sh = s.sh.clone();
     let cfg = &sh.cfg;
-    let conn_id = conn.conn_id();
     if conn.remote_pair() != s.key.pair {
         return Outcome::Retry;
     }
@@ -797,11 +876,7 @@ async fn run_attempt<L: Links>(
                 (Hs::Ok, Some(x)) => x,
                 (Hs::Retry, _) => {
                     s.set_paused(PauseReason::Disconnected);
-                    return if is_closed(&conn).await {
-                        Outcome::Disconnected(Some(conn_id))
-                    } else {
-                        Outcome::Retry
-                    };
+                    return lost(&conn).await;
                 }
                 (Hs::Forgot, _) => {
                     finish_session(inner, s, Finish::Failed(FailReason::PeerForgot)).await;
@@ -889,6 +964,11 @@ async fn run_attempt<L: Links>(
             crate::rstream::data_stream_loop(s.clone(), att.clone(), conn.clone(), wtx.clone()),
         );
     }
+    spawn_att(
+        &sh,
+        &att,
+        crate::rstream::hash_watchdog(s.clone(), att.clone()),
+    );
     drop(wtx);
 
     // наблюдение
@@ -934,7 +1014,7 @@ async fn run_attempt<L: Links>(
                 Outcome::Over
             } else {
                 s.set_paused(PauseReason::Disconnected);
-                Outcome::Disconnected(Some(conn_id))
+                Outcome::Disconnected
             }
         }
         Why::Local => {
@@ -944,20 +1024,16 @@ async fn run_attempt<L: Links>(
         Why::Shutdown => Outcome::Over,
         Why::Closed => {
             s.set_paused(PauseReason::Disconnected);
-            Outcome::Disconnected(Some(conn_id))
+            Outcome::Disconnected
         }
         Why::Attempt(End::Disconnected) => {
             s.set_paused(PauseReason::Disconnected);
-            if is_closed(&conn).await {
-                Outcome::Disconnected(Some(conn_id))
-            } else {
-                Outcome::Retry
-            }
+            lost(&conn).await
         }
         Why::Attempt(End::Pause(reason)) => {
             s.set_paused(reason);
             if reason == PauseReason::Disconnected {
-                Outcome::Disconnected(Some(conn_id))
+                lost(&conn).await
             } else {
                 Outcome::Paused
             }

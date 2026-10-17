@@ -1,7 +1,7 @@
 //! Правило одного соединения на пару и фоновая задача соединения (смена адреса, уборка).
 
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use chervo_identity::{KxPeer, PairId};
@@ -18,8 +18,18 @@ fn has_triple(peers: &[KxPeer], pair: &PairId, ours: &[u8; 32], theirs: &[u8; 32
     })
 }
 
+/// Номера соединений процесса: выдаются по возрастанию и не повторяются. `stable_id()` quinn
+/// это адрес в памяти, и после сброса соединения аллокатор может отдать его следующему.
+static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_conn_id() -> u64 {
+    NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed)
+}
+
 #[derive(Clone)]
 struct Entry {
+    /// Номер соединения (`Connection::conn_id`), назначен при вставке записи.
+    id: u64,
     conn: quinn::Connection,
     initiator: bool,
     /// Публичный ключ X25519 звонящего в этом соединении.
@@ -34,10 +44,14 @@ pub(crate) enum Verdict {
     /// Тройки нет в текущем наборе (набор сменился во время KK): соединение не принимается.
     NotAllowed,
     /// Новое соединение выиграло; старое (если было живо) надо закрыть.
-    Keep { replaced: Option<quinn::Connection> },
+    Keep {
+        id: u64,
+        replaced: Option<quinn::Connection>,
+    },
     /// Новое проиграло; победитель жив.
     Lose {
         winner: quinn::Connection,
+        winner_id: u64,
         winner_initiator: bool,
     },
 }
@@ -64,6 +78,7 @@ impl Registry {
     ) -> Verdict {
         let caller_pub = if initiator { ours_pub } else { theirs_pub };
         let new = Entry {
+            id: next_conn_id(),
             conn,
             initiator,
             caller_pub,
@@ -82,19 +97,23 @@ impl Registry {
         list.retain(|e| e.conn.close_reason().is_none());
         match list.pop() {
             None => {
+                let id = new.id;
                 list.push(new);
-                Verdict::Keep { replaced: None }
+                Verdict::Keep { id, replaced: None }
             }
             Some(old) => {
                 let new_wins = old.initiator == new.initiator || new.caller_pub < old.caller_pub;
                 if new_wins {
+                    let id = new.id;
                     list.push(new);
                     Verdict::Keep {
+                        id,
                         replaced: Some(old.conn),
                     }
                 } else {
                     let verdict = Verdict::Lose {
                         winner: old.conn.clone(),
+                        winner_id: old.id,
                         winner_initiator: old.initiator,
                     };
                     list.push(old);
@@ -143,10 +162,10 @@ impl Registry {
         removed
     }
 
-    pub(crate) fn remove(&self, pair: &PairId, stable_id: usize) {
+    pub(crate) fn remove(&self, pair: &PairId, id: u64) {
         let mut map = self.map.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(list) = map.get_mut(pair) {
-            list.retain(|e| e.conn.stable_id() != stable_id);
+            list.retain(|e| e.id != id);
             if list.is_empty() {
                 map.remove(pair);
             }
@@ -185,15 +204,16 @@ pub(crate) fn promote(
             refuse(&conn);
             Promoted::NotAllowed
         }
-        Verdict::Keep { replaced } => {
+        Verdict::Keep { id, replaced } => {
             if let Some(old) = replaced {
                 close_duplicate(&old);
                 let _ = inner
                     .events
                     .send(TransportEvent::ConnectionReplaced { pair });
             }
-            spawn_monitor(inner, conn.clone(), pair);
+            spawn_monitor(inner, conn.clone(), pair, id);
             Promoted::Winner(QuinnConn {
+                id,
                 conn,
                 pair,
                 initiator,
@@ -201,6 +221,7 @@ pub(crate) fn promote(
         }
         Verdict::Lose {
             winner,
+            winner_id,
             winner_initiator,
         } => {
             close_duplicate(&conn);
@@ -209,6 +230,7 @@ pub(crate) fn promote(
                 .duplicates_closed
                 .fetch_add(1, Ordering::Relaxed);
             Promoted::Lost(QuinnConn {
+                id: winner_id,
                 conn: winner,
                 pair,
                 initiator: winner_initiator,
@@ -218,7 +240,7 @@ pub(crate) fn promote(
 }
 
 /// Опрос `remote_address()` раз в `addr_poll` до закрытия; событие смены адреса; уборка записи.
-fn spawn_monitor(inner: &Arc<Inner>, conn: quinn::Connection, pair: PairId) {
+fn spawn_monitor(inner: &Arc<Inner>, conn: quinn::Connection, pair: PairId, id: u64) {
     let inner = inner.clone();
     let mut last = conn.remote_address();
     // закрепление адреса собеседника до закрытия (берётся синхронно, до конца `serve`);
@@ -250,6 +272,6 @@ fn spawn_monitor(inner: &Arc<Inner>, conn: quinn::Connection, pair: PairId) {
                 .send(TransportEvent::ConnectionReplaced { pair });
         }
         drop(pin);
-        inner.registry.remove(&pair, conn.stable_id());
+        inner.registry.remove(&pair, id);
     });
 }

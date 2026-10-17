@@ -12,6 +12,7 @@ mod fake;
 mod flow;
 mod fuzz;
 mod hash;
+mod hashprog;
 mod integrity;
 mod kit;
 mod place;

@@ -735,3 +735,95 @@ async fn two_way_simultaneous() {
     assert!(placed_files(&rig.b.dest)[0].1 == da);
     assert!(placed_files(&rig.a.dest)[0].1 == db);
 }
+
+/// R2-2: новое соединение получает тот же номер, что имело погибшее (так вёл себя адрес в
+/// памяти у прежнего адаптера quinn). Получатель не сравнивает номер с погибшим и
+/// возобновляет передачу по живому соединению.
+#[tokio::test]
+async fn resume_over_new_conn_with_reused_id() {
+    const REUSED: u64 = 7_000_007;
+    let mut rig = Rig::with(|_| {}, narrow).await;
+    // первое соединение получателя уже имеет номер REUSED
+    rig.relink_ids((7_100_001, REUSED)).await;
+    let src = TestDir::new();
+    let data = rand_bytes(71, 40 << 20);
+    let files = vec![write_src(src.path(), "a.bin", &data)];
+    let (key, kb) = start_transfer(&mut rig, files).await;
+    let conn = rig.cur.0.clone();
+    let mut n = 0;
+    rig.b.hook.set(move |ev| {
+        if matches!(ev, Ev::Written(..)) {
+            n += 1;
+            if n == 20 {
+                conn.close();
+            }
+        }
+        Ok(())
+    });
+    rig.b.tr.respond(&kb, true).unwrap();
+    wait_ev(&mut rig.b.ev, 30, |e| {
+        matches!(
+            e,
+            TransferEvent::Paused {
+                reason: PauseReason::Disconnected,
+                ..
+            }
+        )
+    })
+    .await;
+    wait_ev(&mut rig.a.ev, 30, |e| {
+        matches!(e, TransferEvent::Paused { .. })
+    })
+    .await;
+    // новое соединение B: тот же номер
+    rig.relink_ids((7_100_002, REUSED)).await;
+    assert_eq!(
+        rig.b.node.engine.connection(&rig.pb).unwrap().conn_id(),
+        REUSED
+    );
+    // `poll` (200 мс в тестах) + `msg_timeout` (10 с)
+    wait_ev(&mut rig.b.ev, 15, |e| {
+        matches!(e, TransferEvent::Resumed { .. })
+    })
+    .await;
+    wait_ev(&mut rig.b.ev, 60, is_completed(kb)).await;
+    wait_ev(&mut rig.a.ev, 60, is_completed(key)).await;
+    let placed = placed_files(&rig.b.dest);
+    assert_eq!(placed.len(), 1);
+    assert!(placed[0].1 == data);
+}
+
+/// R2-2: эхо DONE потеряно, соединение живо. Получатель не зависает: по истечении `msg_timeout`
+/// передача завершена как `Completed` (все файлы уже проверены и размещены), соединение цело.
+/// Продолжение после закрытия соединения (`RESUME`, ответ `DONE`) проверяется в
+/// `resume_over_new_conn_with_reused_id`.
+#[tokio::test]
+async fn resume_after_lost_done_echo_same_conn() {
+    let mut pre = Pre::new();
+    let pair = pre.solo_friend();
+    let node = Node::start(pre);
+    let (partial, dest) = (TestDir::new(), TestDir::new());
+    let mut cfg = small_cfg(partial.path());
+    cfg.msg_timeout = Duration::from_millis(500);
+    let mut p = Peer::start(node, partial, dest, cfg);
+    let conn = FakeConn::lonely(pair);
+    p.node.t.push_incoming(conn.clone());
+    for _ in 0..500 {
+        if p.node.engine.connection(&pair).is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let peer = conn.peer();
+    let fake = Fake::new(pair, vec![FakeFile::new("a.bin", rand_bytes(72, 3 << 20))]);
+    fake.drop_done_echo.store(true, Ordering::SeqCst);
+    let mut ctl = fake.offer(&peer).await;
+    let key = key_of(&wait_ev(&mut p.ev, 10, is_offer()).await);
+    p.tr.respond(&key, true).unwrap();
+    assert_eq!(Fake::decision(&mut ctl.1, 10).await, Some(Verdict::Accept));
+    fake.run(peer.clone(), Some(ctl));
+    wait_ev(&mut p.ev, 30, is_completed(key)).await;
+    assert!(fake.log.lock().unwrap().ctl.contains(&"done".to_owned()));
+    assert!(!conn.is_closed(), "the connection stayed live");
+    assert_eq!(placed_files(&p.dest).len(), 1);
+}

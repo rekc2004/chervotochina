@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -21,12 +21,12 @@ use crate::events::{
 use crate::fsio::{ReadFail, hash_source, read_source_block};
 use crate::hash::{BlockHash, FileRoot, leaf_hash};
 use crate::layout::{Layout, block_len, layout};
-use crate::limits::{MAX_MESSAGE_LEN, STREAM_TRANSFER_CTL};
+use crate::limits::{HASH_PROGRESS_INTERVAL, MAX_MESSAGE_LEN, STREAM_TRANSFER_CTL};
 use crate::links::Links;
 use crate::names::{OfferedFile, TransferKey, UntrustedName};
 use crate::receiver::Finish;
 use crate::rstream::{write_loop, write_msg};
-use crate::shared::{Shared, kib, lock};
+use crate::shared::{HookPoint, Shared, kib, lock};
 use crate::util::{Stop, StopWatch, Tracker};
 use crate::wire_io::read_message;
 
@@ -100,6 +100,8 @@ pub(crate) struct SCore {
     last_progress: Option<Instant>,
     paused_gen: u64,
     completed: bool,
+    /// Когда в последний раз выдано событие `Preparing`.
+    last_prep: Option<tokio::time::Instant>,
 }
 
 pub(crate) struct SendSession {
@@ -108,6 +110,13 @@ pub(crate) struct SendSession {
     files: Vec<SrcFile>,
     pub(crate) total: u64,
     hashes: Vec<watch::Sender<FileHash>>,
+    /// Сколько байт предложения захэшировано (в порядке предложения). Принадлежит сессии, а не
+    /// попытке: обрыв соединения хэширование не останавливает.
+    hashed: AtomicU64,
+    /// `prefix[i]` = размеры файлов `0..=i`.
+    prefix: Vec<u64>,
+    /// Все файлы обработаны (счётчик `hashed` равен `total`).
+    hash_done: watch::Sender<bool>,
     pub(crate) phase: watch::Sender<SPhase>,
     core: Mutex<SCore>,
     halt: Arc<AtomicBool>,
@@ -125,12 +134,23 @@ impl SendSession {
             .iter()
             .map(|_| watch::channel(FileHash::Pending).0)
             .collect();
+        let mut acc = 0u64;
+        let prefix = files
+            .iter()
+            .map(|f| {
+                acc = acc.saturating_add(f.size);
+                acc
+            })
+            .collect();
         Arc::new(Self {
             sh,
             key,
             files,
             total,
             hashes,
+            hashed: AtomicU64::new(0),
+            prefix,
+            hash_done: watch::channel(false).0,
             phase: watch::channel(SPhase::Offering).0,
             core: Mutex::new(SCore {
                 att: None,
@@ -141,6 +161,7 @@ impl SendSession {
                 last_progress: None,
                 paused_gen: 0,
                 completed: false,
+                last_prep: None,
             }),
             halt: Arc::new(AtomicBool::new(false)),
             stop: Stop::new(),
@@ -236,6 +257,26 @@ impl SendSession {
         self.emit(TransferEvent::Progress {
             key: self.key,
             done,
+            total: self.total,
+        });
+    }
+
+    /// Событие `Preparing` по своему счётчику; не чаще `progress_interval`, `force` всегда.
+    fn note_preparing(&self, force: bool) {
+        let hashed = self.hashed.load(Ordering::Acquire).min(self.total);
+        {
+            let mut c = lock(&self.core);
+            let due = force
+                || c.last_prep
+                    .is_none_or(|t| t.elapsed() >= self.sh.cfg.progress_interval);
+            if !due {
+                return;
+            }
+            c.last_prep = Some(tokio::time::Instant::now());
+        }
+        self.emit(TransferEvent::Preparing {
+            key: self.key,
+            hashed,
             total: self.total,
         });
     }
@@ -380,7 +421,16 @@ async fn hash_all(s: Arc<SendSession>) {
         }
         let Ok(index) = u32::try_from(i) else { return };
         let (path, size, halt) = (f.path.clone(), f.size, s.halt.clone());
-        let job = tokio::task::spawn_blocking(move || hash_source(&path, size, &halt)).await;
+        let s2 = s.clone();
+        let job = tokio::task::spawn_blocking(move || {
+            let before = |block: u32| -> std::io::Result<()> {
+                s2.sh.hook(HookPoint::HashBlock { file: index, block })?;
+                s2.note_preparing(false);
+                Ok(())
+            };
+            hash_source(&path, size, &halt, &s2.hashed, &before)
+        })
+        .await;
         let state = match job {
             Ok(Ok((layout, leaves, root))) => FileHash::Ready(Arc::new(Hashes {
                 layout,
@@ -396,6 +446,38 @@ async fn hash_all(s: Arc<SendSession>) {
         }
         if let Some(tx) = s.hashes.get(i) {
             tx.send_replace(state);
+        }
+        // файл с ошибкой тоже засчитан целиком; FILE_ERROR уже стоит в очереди раньше кадра,
+        // который его покроет
+        if let Some(p) = s.prefix.get(i) {
+            s.hashed.fetch_max(*p, Ordering::Release);
+        }
+    }
+    s.note_preparing(true);
+    s.hash_done.send_replace(true);
+}
+
+/// Кадры HASH_PROGRESS одной попытки: сразу, затем раз в `HASH_PROGRESS_INTERVAL`, только если
+/// значение выросло; значение `total` уходит сразу и завершает задачу.
+async fn hash_ticker(s: Arc<SendSession>, att: Arc<SAttempt>) {
+    let mut stop = att.stop.watcher();
+    let mut done = s.hash_done.subscribe();
+    let mut last: Option<u64> = None;
+    loop {
+        let cur = s.hashed.load(Ordering::Acquire).min(s.total);
+        if last.is_none_or(|l| cur > l) {
+            if att.ctl.send(Message::HashProgress { hashed: cur }).is_err() {
+                return;
+            }
+            last = Some(cur);
+        }
+        if cur >= s.total {
+            return;
+        }
+        tokio::select! {
+            () = tokio::time::sleep(HASH_PROGRESS_INTERVAL) => {}
+            _ = done.changed() => {}
+            () = stop.stopped() => return,
         }
     }
 }
@@ -580,6 +662,7 @@ async fn ctl_reader<L: Links, R: RecvStream>(
                             accepted: true,
                         });
                         s.emit(TransferEvent::Started { key: s.key });
+                        spawn_att(&s.sh, &att, hash_ticker(s.clone(), att.clone()));
                     }
                     other => {
                         s.emit(TransferEvent::OfferAnswered {
@@ -720,6 +803,7 @@ pub(crate) async fn handle_resume<L: Links>(
         s.emit(TransferEvent::Resumed { key: s.key });
     }
     start_attempt_tasks(&inner, &s, &att, conn, tx, rx, buf, out_rx);
+    spawn_att(&s.sh, &att, hash_ticker(s.clone(), att.clone()));
 }
 
 // ----------------------------------------------------------------------- данные

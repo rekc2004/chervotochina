@@ -41,6 +41,9 @@ pub struct TransferConfig {
     pub checkpoint_interval: Duration,
     pub verify_after_write: bool,
     pub progress_interval: Duration,
+    /// Получатель: наименьшая средняя скорость хэширования у отправителя (байт/с), которую он
+    /// терпит, ожидая HASH_PROGRESS. Ниже: пауза `Stalled`.
+    pub min_hash_rate: u64,
 }
 
 impl TransferConfig {
@@ -69,6 +72,7 @@ impl TransferConfig {
             checkpoint_interval: Duration::from_secs(2),
             verify_after_write: true,
             progress_interval: Duration::from_millis(250),
+            min_hash_rate: 8 << 20,
         }
     }
 
@@ -89,6 +93,7 @@ impl TransferConfig {
             && self.max_serve_per_block >= 1
             && (1..=8).contains(&self.max_data_streams)
             && self.checkpoint_bytes >= 1
+            && self.min_hash_rate >= 1 << 20
             && !self.offer_read_timeout.is_zero()
             && !self.msg_timeout.is_zero()
             && !self.offer_ttl.is_zero()

@@ -249,14 +249,26 @@ impl FakeConn {
         pair_b: PairId,
         remote_b: SocketAddr,
     ) -> (FakeConn, FakeConn) {
+        Self::pair_ids(pair_a, remote_a, pair_b, remote_b, None)
+    }
+
+    /// То же с заданными номерами концов (`None`: из счётчика). Нужно, чтобы сыграть
+    /// повторное использование номера (так вёл себя адрес в памяти у прежнего адаптера quinn).
+    pub fn pair_ids(
+        pair_a: PairId,
+        remote_a: SocketAddr,
+        pair_b: PairId,
+        remote_b: SocketAddr,
+        ids: Option<(u64, u64)>,
+    ) -> (FakeConn, FakeConn) {
         let (a_tx, a_rx) = mpsc::unbounded_channel();
         let (b_tx, b_rx) = mpsc::unbounded_channel();
         let closed = Arc::new(watch::channel(false).0);
-        let mk = |pair, remote, outbox, inbox| {
+        let mk = |pair, remote, outbox, inbox, id: Option<u64>| {
             FakeConn(Arc::new(ConnInner {
                 pair,
                 remote,
-                id: CONN_ID.fetch_add(1, Ordering::SeqCst),
+                id: id.unwrap_or_else(|| CONN_ID.fetch_add(1, Ordering::SeqCst)),
                 initiator: false,
                 closed: closed.clone(),
                 outbox,
@@ -264,8 +276,8 @@ impl FakeConn {
                 peer: Mutex::new(None),
             }))
         };
-        let a = mk(pair_a, remote_a, b_tx, a_rx);
-        let b = mk(pair_b, remote_b, a_tx, b_rx);
+        let a = mk(pair_a, remote_a, b_tx, a_rx, ids.map(|i| i.0));
+        let b = mk(pair_b, remote_b, a_tx, b_rx, ids.map(|i| i.1));
         (a, b)
     }
 
@@ -533,6 +545,7 @@ pub enum Ev {
     Manifest(u32),
     FinalVerify(u32),
     BeforePlace(u32),
+    HashBlock(u32, u32),
 }
 
 type Handler = Box<dyn FnMut(&Ev) -> io::Result<()> + Send>;
@@ -575,6 +588,7 @@ impl Hook for TestHook {
             HookPoint::Manifest { file } => Ev::Manifest(file),
             HookPoint::FinalVerify { file } => Ev::FinalVerify(file),
             HookPoint::BeforePlace { file } => Ev::BeforePlace(file),
+            HookPoint::HashBlock { file, block } => Ev::HashBlock(file, block),
         };
         self.log.lock().unwrap().push(ev.clone());
         match self.handler.lock().unwrap().as_mut() {
@@ -791,11 +805,17 @@ impl Rig {
 
     /// Новое соединение между узлами; ждёт, пока оба движка его приняли.
     pub async fn link(&self) -> (FakeConn, FakeConn) {
-        let (ca, cb) = FakeConn::pair(
+        self.link_ids(None).await
+    }
+
+    /// `link` с заданными номерами концов (A, B).
+    pub async fn link_ids(&self, ids: Option<(u64, u64)>) -> (FakeConn, FakeConn) {
+        let (ca, cb) = FakeConn::pair_ids(
             self.pa,
             addr("198.51.100.20:4000"),
             self.pb,
             addr("198.51.100.10:4000"),
+            ids,
         );
         self.a.node.t.push_incoming(ca.clone());
         self.b.node.t.push_incoming(cb.clone());
@@ -818,6 +838,21 @@ impl Rig {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("connection was not accepted");
+    }
+
+    /// Закрывает текущее соединение, ждёт, пока оба движка его сняли, и ставит новое с заданными
+    /// номерами концов.
+    pub async fn relink_ids(&mut self, ids: (u64, u64)) {
+        self.cur.0.close();
+        for _ in 0..500 {
+            if self.a.node.engine.connection(&self.pa).is_none()
+                && self.b.node.engine.connection(&self.pb).is_none()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        self.cur = self.link_ids(Some(ids)).await;
     }
 }
 
@@ -906,6 +941,7 @@ pub fn key_of(e: &TransferEvent) -> TransferKey {
         | TransferEvent::Started { key }
         | TransferEvent::Progress { key, .. }
         | TransferEvent::Verifying { key }
+        | TransferEvent::Preparing { key, .. }
         | TransferEvent::FileReceived { key, .. }
         | TransferEvent::FileDelivered { key, .. }
         | TransferEvent::FileFailed { key, .. }

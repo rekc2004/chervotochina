@@ -145,6 +145,9 @@ fn corpus(rng: &mut XorShift) -> Vec<Vec<u8>> {
             file_count: 3,
             total_size: 99,
         },
+        Message::HashProgress {
+            hashed: rng.next() >> 20,
+        },
         Message::Bind { id: id(rng) },
         Message::GetManifest { index: 7 },
         Message::Manifest {

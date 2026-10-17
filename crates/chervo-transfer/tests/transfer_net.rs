@@ -378,6 +378,7 @@ fn key_of(e: &TransferEvent) -> TransferKey {
         | TransferEvent::Started { key }
         | TransferEvent::Progress { key, .. }
         | TransferEvent::Verifying { key }
+        | TransferEvent::Preparing { key, .. }
         | TransferEvent::FileReceived { key, .. }
         | TransferEvent::FileDelivered { key, .. }
         | TransferEvent::FileFailed { key, .. }

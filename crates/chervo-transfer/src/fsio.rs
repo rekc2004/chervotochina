@@ -3,7 +3,7 @@
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::hash::{BlockHash, FileRoot, file_root, leaf_hash};
 use crate::layout::{Layout, block_len, layout};
@@ -35,10 +35,14 @@ fn read_full(f: &mut File, buf: &mut [u8]) -> Result<(), ReadFail> {
 }
 
 /// Хэши всех блоков своего файла. Размер на диске обязан совпасть с предложенным до и после.
+/// `before(block)` вызывается перед каждым блоком (точка подмены в тестах; ошибка прерывает
+/// чтение); длина каждого захэшированного блока добавляется к `progress`.
 pub(crate) fn hash_source(
     path: &Path,
     size: u64,
     stop: &AtomicBool,
+    progress: &AtomicU64,
+    before: &dyn Fn(u32) -> io::Result<()>,
 ) -> Result<(Layout, Vec<BlockHash>, FileRoot), ReadFail> {
     let l = layout(size).map_err(|_| ReadFail::Changed)?;
     let mut f = File::open(path).map_err(|e| io_fail(&e))?;
@@ -52,10 +56,12 @@ pub(crate) fn hash_source(
         if stop.load(Ordering::Relaxed) {
             return Err(ReadFail::Stopped);
         }
+        before(i).map_err(|e| io_fail(&e))?;
         let len = len_usize(block_len(size, l, i).ok_or(ReadFail::Changed)?);
         let chunk = buf.get_mut(..len).ok_or(ReadFail::Changed)?;
         read_full(&mut f, chunk)?;
         leaves.push(leaf_hash(i, chunk));
+        progress.fetch_add(u64::try_from(len).unwrap_or(0), Ordering::Release);
     }
     let mut extra = [0u8; 1];
     if f.read(&mut extra).map_err(|e| io_fail(&e))? != 0 {
@@ -141,5 +147,5 @@ pub(crate) fn verify_blocks(
 /// Корень файла на диске: для проверки уже размещённого файла.
 pub(crate) fn disk_root(path: &Path, size: u64) -> Result<FileRoot, ReadFail> {
     let stop = AtomicBool::new(false);
-    hash_source(path, size, &stop).map(|(_, _, root)| root)
+    hash_source(path, size, &stop, &AtomicU64::new(0), &|_| Ok(())).map(|(_, _, root)| root)
 }

@@ -51,6 +51,7 @@ fn every_message() -> Vec<Message> {
             file_count: 5,
             total_size: 1 << 33,
         },
+        Message::HashProgress { hashed: 1 << 40 },
         Message::Bind { id: ID },
         Message::GetManifest { index: 1 },
         Message::Manifest {
@@ -163,7 +164,7 @@ async fn frame_len_over_max_rejected_before_body() {
 
 #[test]
 fn unknown_type_rejected() {
-    for t in [0x00u8, 0x0A, 0x0F, 0x16, 0x20, 0x7F, 0xFF] {
+    for t in [0x00u8, 0x0B, 0x0F, 0x16, 0x20, 0x7F, 0xFF] {
         assert!(
             matches!(decode_message(&[t]), Err(ProtocolError::UnknownType)),
             "type {t:#x}"
