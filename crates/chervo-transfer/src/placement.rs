@@ -137,7 +137,9 @@ pub enum PlaceMethod {
 }
 
 /// Размещение без перезаписи. Жёсткая ссылка атомарна и при существующем имени даёт
-/// `AlreadyExists`. Если ссылки не поддерживаются (FAT, часть сетевых дисков), имя
+/// `AlreadyExists`; после успешной ссылки результат `Ok(HardLink)` даже если временное имя
+/// удалить не удалось (удаление повторяется и остаётся уборкой). Если ссылки не
+/// поддерживаются (FAT, часть сетевых дисков), имя
 /// резервируется `create_new`, затем `rename` заменяет резерв; на время переименования (и
 /// после сбоя в этот миг) под итоговым именем лежит пустой файл. При ошибке временный файл
 /// остаётся на месте.
@@ -150,10 +152,23 @@ pub(crate) fn place_no_clobber_with(
     final_path: &Path,
     force_fallback: bool,
 ) -> io::Result<PlaceMethod> {
+    place_impl(temp, final_path, force_fallback, &remove_file_retry)
+}
+
+/// То же с подменяемым удалением временного файла (проверка отказа удаления в тестах).
+pub(crate) fn place_impl(
+    temp: &Path,
+    final_path: &Path,
+    force_fallback: bool,
+    remove: &dyn Fn(&Path) -> io::Result<()>,
+) -> io::Result<PlaceMethod> {
     if !force_fallback {
         match fs::hard_link(temp, final_path) {
             Ok(()) => {
-                remove_file_retry(temp)?;
+                // Файл уже размещён: итог успех. Временное имя теперь второе имя того же файла,
+                // его удаление лишь уборка (с повторами на Windows). Если убрать не удалось,
+                // получатель не пишет в такой файл (см. `paths::remove_part_strict`).
+                let _ = remove(temp);
                 sync_parent(final_path);
                 return Ok(PlaceMethod::HardLink);
             }

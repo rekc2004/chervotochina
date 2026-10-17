@@ -12,11 +12,12 @@ use crate::hash::{BlockHash, FileRoot, file_root, sha256};
 use crate::layout::{Layout, bitmap_len, layout};
 use crate::limits::{
     ENTRY_OVERHEAD, MAX_FILE_SIZE, MAX_FILES_PER_OFFER, MAX_INPROGRESS, MAX_NAME_BYTES,
-    MAX_OFFER_BYTES, MAX_OFFER_TOTAL, MAX_STATE_LEN,
+    MAX_NAMES_LEN, MAX_OFFER_BYTES, MAX_OFFER_TOTAL, MAX_STATE_LEN,
 };
 use crate::names::{TransferId, UntrustedName};
 
-const MAGIC: &[u8; 8] = b"CHVXFR1\n";
+const MAGIC: &[u8; 8] = b"CHVXFR2\n";
+const NAMES_MAGIC: &[u8; 8] = b"CHVNAM1\n";
 const TRAILER: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,9 +68,9 @@ pub(crate) enum FileStatus {
     Failed,
 }
 
+/// Компактная запись файла: размер и статус. Имя лежит в неизменяемом файле имён (`names`).
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct StateFile {
-    pub(crate) name: UntrustedName,
     pub(crate) size: u64,
     pub(crate) status: FileStatus,
 }
@@ -84,6 +85,8 @@ pub struct RecvState {
     pub(crate) created_unix: u64,
     pub(crate) last_progress_unix: u64,
     pub(crate) total_size: u64,
+    /// Трейлер файла имён: состояние привязано ровно к этому файлу.
+    pub(crate) names_sum: [u8; 32],
     pub(crate) files: Vec<StateFile>,
 }
 
@@ -131,12 +134,9 @@ pub fn encode_state(s: &RecvState) -> Vec<u8> {
     let count = u32::try_from(s.files.len()).unwrap_or(u32::MAX);
     out.extend_from_slice(&count.to_be_bytes());
     out.extend_from_slice(&s.total_size.to_be_bytes());
+    out.extend_from_slice(&s.names_sum);
     for f in &s.files {
         out.extend_from_slice(&f.size.to_be_bytes());
-        let name = f.name.untrusted_str().as_bytes();
-        let name_len = u16::try_from(name.len()).unwrap_or(u16::MAX);
-        out.extend_from_slice(&name_len.to_be_bytes());
-        out.extend_from_slice(name);
         match &f.status {
             FileStatus::Waiting => out.push(S_WAITING),
             FileStatus::InProgress(p) => {
@@ -191,35 +191,23 @@ pub fn decode_state(b: &[u8]) -> Result<RecvState, StateError> {
     let last_progress_unix = m(r.u64())?;
     let file_count = m(r.u32())?;
     let total_size = m(r.u64())?;
+    let names_sum = m(r.arr::<32>())?;
     if file_count == 0 || file_count > MAX_FILES_PER_OFFER || total_size > MAX_OFFER_TOTAL {
         return Err(StateError::Malformed);
     }
-    // Запись занимает не меньше 8 + 2 + 1 + 1 байт.
+    // Запись занимает не меньше 8 + 1 байт.
     let cap = usize::try_from(file_count)
         .unwrap_or(usize::MAX)
-        .min(r.len() / 12);
+        .min(r.len() / 9);
     let mut files = Vec::with_capacity(cap);
     let mut sum = 0u64;
-    let mut name_bytes = 0u64;
     let mut in_progress = 0usize;
     for _ in 0..file_count {
         let size = m(r.u64())?;
         if size > MAX_FILE_SIZE {
             return Err(StateError::Malformed);
         }
-        let name_len = usize::from(m(r.u16())?);
-        if name_len == 0 || name_len > MAX_NAME_BYTES {
-            return Err(StateError::Malformed);
-        }
-        let name = m(UntrustedName::from_bytes(m(r.take(name_len))?))?;
         sum = sum.checked_add(size).ok_or(StateError::Malformed)?;
-        name_bytes = name_bytes
-            .checked_add(ENTRY_OVERHEAD)
-            .and_then(|v| v.checked_add(u64::try_from(name_len).ok()?))
-            .ok_or(StateError::Malformed)?;
-        if name_bytes > u64::from(MAX_OFFER_BYTES) {
-            return Err(StateError::Malformed);
-        }
         let status = match m(r.u8())? {
             S_WAITING => FileStatus::Waiting,
             S_IN_PROGRESS => {
@@ -249,7 +237,7 @@ pub fn decode_state(b: &[u8]) -> Result<RecvState, StateError> {
             S_FAILED => FileStatus::Failed,
             _ => return Err(StateError::Malformed),
         };
-        files.push(StateFile { name, size, status });
+        files.push(StateFile { size, status });
     }
     m(r.end())?;
     if sum != total_size {
@@ -261,7 +249,106 @@ pub fn decode_state(b: &[u8]) -> Result<RecvState, StateError> {
         created_unix,
         last_progress_unix,
         total_size,
+        names_sum,
         files,
+    })
+}
+
+/// Файл имён предложения: пишется один раз при принятии и больше не меняется. Хранит только
+/// имена в порядке предложения; размеры и статусы файлов в `state`.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct NamesFile {
+    pub(crate) pair: PairId,
+    pub(crate) id: TransferId,
+    pub(crate) names: Vec<UntrustedName>,
+    /// Трейлер (SHA-256 всего, что перед ним).
+    pub(crate) sum: [u8; 32],
+}
+
+impl fmt::Debug for NamesFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("NamesFile(..)")
+    }
+}
+
+/// Сборка файла имён; возвращает байты и трейлер.
+#[doc(hidden)]
+pub fn encode_names(
+    pair: &PairId,
+    id: &TransferId,
+    names: &[UntrustedName],
+) -> (Vec<u8>, [u8; 32]) {
+    let mut out = Vec::new();
+    out.extend_from_slice(NAMES_MAGIC);
+    out.extend_from_slice(pair.as_bytes());
+    out.extend_from_slice(&id.0);
+    let count = u32::try_from(names.len()).unwrap_or(u32::MAX);
+    out.extend_from_slice(&count.to_be_bytes());
+    for n in names {
+        let b = n.untrusted_str().as_bytes();
+        let len = u16::try_from(b.len()).unwrap_or(u16::MAX);
+        out.extend_from_slice(&len.to_be_bytes());
+        out.extend_from_slice(b);
+    }
+    let sum = sha256(&[&out]);
+    out.extend_from_slice(&sum);
+    (out, sum)
+}
+
+/// Разбор файла имён: длина ограничена до разбора, есть контрольная сумма, записи не больше
+/// границ предложения, лишних байт нет.
+#[doc(hidden)]
+pub fn decode_names(b: &[u8]) -> Result<NamesFile, StateError> {
+    if u64::try_from(b.len()).map_or(true, |n| n > MAX_NAMES_LEN) {
+        return Err(StateError::TooLong);
+    }
+    let body_len = b
+        .len()
+        .checked_sub(TRAILER)
+        .filter(|n| *n >= NAMES_MAGIC.len())
+        .ok_or(StateError::Truncated)?;
+    let (body, trailer) = b.split_at_checked(body_len).ok_or(StateError::Truncated)?;
+    let sum = sha256(&[body]);
+    if sum.as_slice() != trailer {
+        return Err(StateError::BadChecksum);
+    }
+    let mut r = Rd::new(body);
+    if m(r.arr::<8>())? != *NAMES_MAGIC {
+        return Err(StateError::BadMagic);
+    }
+    let pair = PairId::from_bytes(m(r.arr::<16>())?);
+    let id = TransferId(m(r.arr::<16>())?);
+    let count = m(r.u32())?;
+    if count == 0 || count > MAX_FILES_PER_OFFER {
+        return Err(StateError::Malformed);
+    }
+    // Запись занимает не меньше 2 + 1 байта.
+    let cap = usize::try_from(count)
+        .unwrap_or(usize::MAX)
+        .min(r.len() / 3);
+    let mut names = Vec::with_capacity(cap);
+    let mut entry_bytes = 0u64;
+    for _ in 0..count {
+        let len = usize::from(m(r.u16())?);
+        if len == 0 || len > MAX_NAME_BYTES {
+            return Err(StateError::Malformed);
+        }
+        names.push(m(UntrustedName::from_bytes(m(r.take(len))?))?);
+        entry_bytes = entry_bytes
+            .checked_add(ENTRY_OVERHEAD)
+            .and_then(|v| v.checked_add(u64::try_from(len).ok()?))
+            .ok_or(StateError::Malformed)?;
+        if entry_bytes > u64::from(MAX_OFFER_BYTES) {
+            return Err(StateError::Malformed);
+        }
+    }
+    m(r.end())?;
+    Ok(NamesFile {
+        pair,
+        id,
+        names,
+        sum,
     })
 }
 

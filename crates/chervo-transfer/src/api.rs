@@ -54,12 +54,6 @@ pub struct Transfers<L: Links> {
     inner: Arc<Inner<L>>,
 }
 
-fn permits(bytes: u64) -> usize {
-    usize::try_from(bytes / 1024)
-        .unwrap_or(usize::MAX)
-        .min(Semaphore::MAX_PERMITS)
-}
-
 impl<L: Links> Transfers<L> {
     /// Внутри среды tokio. Просматривает `partial_dir` (недокачанные передачи загружаются на
     /// паузе), запускает приём потоков.
@@ -94,8 +88,12 @@ impl<L: Links> Transfers<L> {
         let rt = Handle::try_current().map_err(|_| TransferError::Io)?;
         let (etx, erx) = broadcast::channel(256);
         let sh = Arc::new(Shared {
-            recv_budget: Arc::new(Semaphore::new(permits(cfg.recv_buffer_budget))),
-            send_budget: Arc::new(Semaphore::new(permits(cfg.send_buffer_budget))),
+            recv_budget: Arc::new(Semaphore::new(crate::shared::permits(
+                cfg.recv_buffer_budget,
+            ))),
+            send_budget: Arc::new(Semaphore::new(crate::shared::permits(
+                cfg.send_buffer_budget,
+            ))),
             cfg,
             events: etx,
             placement,
@@ -204,7 +202,7 @@ impl<L: Links> Transfers<L> {
         if lock(&s.core).phase != RPhase::Pending {
             return Err(TransferError::WrongState);
         }
-        if accept && active_inbound(inner) >= inner.sh.cfg.max_inbound_active {
+        if accept && inner.active_inbound() >= inner.sh.cfg.max_inbound_active {
             return Err(TransferError::Busy);
         }
         let answer = s.take_answer().ok_or(TransferError::WrongState)?;
@@ -286,15 +284,6 @@ where
         let _g = g;
         f.await;
     }));
-}
-
-/// Сколько принятых (не ожидающих решения) входящих передач сейчас идёт.
-fn active_inbound<L: Links>(inner: &Arc<Inner<L>>) -> usize {
-    lock(&inner.reg)
-        .inb
-        .values()
-        .filter(|s| !matches!(lock(&s.core).phase, RPhase::Pending | RPhase::Ended))
-        .count()
 }
 
 fn cancel_out<L: Links>(inner: &Arc<Inner<L>>, s: &Arc<SendSession>) {
@@ -582,7 +571,8 @@ async fn accept_flow<L: Links>(
 ) {
     let cfg = &inner.sh.cfg;
     let key = s.key;
-    if active_inbound(&inner) >= cfg.max_inbound_active {
+    // занять место сразу и атомарно: два одновременных ответа не превысят предел
+    if inner.claim_slot(&s).is_none() {
         inner.remove_inb(&key);
         write_decision(&mut tx, key.id, Verdict::Busy, cfg.msg_timeout).await;
         s.emit(TransferEvent::Failed {
@@ -591,8 +581,6 @@ async fn accept_flow<L: Links>(
         });
         return;
     }
-    // занять место сразу: два одновременных ответа не превысят предел
-    lock(&s.core).phase = RPhase::Active;
     let dir = state_dir_name(&key.pair, &key.id);
     let (base, s2) = (cfg.partial_dir.clone(), s.clone());
     let g = inner.sh.tracker.guard();
@@ -602,6 +590,8 @@ async fn accept_flow<L: Links>(
         .spawn_blocking(move || {
             let _g = g;
             create_session_dir(&base, &dir)?;
+            // имена один раз в отдельный неизменяемый файл; состояние хранит только статусы
+            s2.write_names_once()?;
             s2.persist()
         })
         .await;

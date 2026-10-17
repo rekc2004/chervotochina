@@ -9,28 +9,25 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use tokio::sync::OwnedSemaphorePermit;
-
 use crate::codec::FileErrCode;
 use crate::events::{FileFailure, PauseReason, TransferEvent};
 use crate::fsio::{ReadFail, verify_blocks};
-use crate::hash::file_root;
 use crate::paths::{
-    open_part_existing, open_part_write, part_path, remove_file_retry, remove_hashes,
-    temp_for_placement,
+    create_part_new, open_part_existing, part_path, remove_file_retry, remove_hashes,
+    remove_part_strict, temp_for_placement,
 };
 use crate::placement::CompletedFile;
 use crate::receiver::{Attempt, End, RecvSession};
 use crate::sched::{Mark, Run};
-use crate::shared::{HookPoint, lock};
+use crate::shared::{HookPoint, Permits, lock};
 
 pub(crate) enum WCmd {
     Write {
         file: u32,
         block: u32,
         data: Vec<u8>,
-        /// Бюджет памяти освобождается после записи.
-        permit: OwnedSemaphorePermit,
+        /// Бюджет памяти (доля передачи и общий) освобождается после записи.
+        permit: Permits,
     },
 }
 
@@ -89,7 +86,22 @@ fn write_one(
     };
     s.sh.hook(HookPoint::Write { file, block, data })?;
     if let std::collections::hash_map::Entry::Vacant(e) = files.entry(file) {
-        e.insert(open_part_write(&s.sdir, file)?);
+        // только существующий `.part`: новый создаёт `prepare` (create_new), писатель его не
+        // воссоздаёт
+        match open_part_existing(&s.sdir, file) {
+            Ok(f) => {
+                e.insert(f);
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                // файл успели закрыть как проваленный: блок не нужен
+                let still = matches!(lock(&s.core).sched.run(file), Some(Run::Active(_)));
+                if !still {
+                    return Ok(0);
+                }
+                return Err(err);
+            }
+            Err(err) => return Err(err),
+        }
     }
     let f = files
         .get_mut(&file)
@@ -173,8 +185,15 @@ pub(crate) fn writer_main(s: &Arc<RecvSession>, att: &Arc<Attempt>, rx: &Receive
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
-        if !touched.is_empty()
-            && (since >= cfg.checkpoint_bytes || last.elapsed() >= cfg.checkpoint_interval)
+        // Запись состояния объединяется: события файлов лишь поднимают флаг «грязно», а
+        // запись делает эта контрольная точка (не чаще раза за `checkpoint_interval`, либо
+        // раньше по объёму записанных данных).
+        let pending = !touched.is_empty() || s.is_dirty();
+        if !pending {
+            // ждать нечего: срок отсчитывается от первого события
+            last = Instant::now();
+        } else if (!touched.is_empty() && since >= cfg.checkpoint_bytes)
+            || last.elapsed() >= cfg.checkpoint_interval
         {
             if let Err(e) = checkpoint(s, &files, &mut touched) {
                 att.finish(End::Pause(pause_reason(&e)));
@@ -218,16 +237,24 @@ pub(crate) fn finalize_file(s: &Arc<RecvSession>, file: u32) {
     // 1. файл на диске: точная длина и `sync_all`
     let synced = (|| -> io::Result<()> {
         let f = if size == 0 {
-            open_part_write(&s.sdir, file)?
+            // пустой файл: старый `.part` (если остался) убирается строго, создаётся новый
+            s.sh.hook(HookPoint::RemovePart { file })?;
+            remove_part_strict(&s.sdir, file)?;
+            create_part_new(&s.sdir, file)?
         } else {
             match open_part_existing(&s.sdir, file) {
                 Ok(f) => f,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => open_part_write(&s.sdir, file)?,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => create_part_new(&s.sdir, file)?,
                 Err(e) => return Err(e),
             }
         };
         f.set_len(size)?;
-        f.sync_all()?;
+        // у пустого файла нет данных, которые надо сделать долговечными: его существование
+        // закрепляет размещение (на Unix с синхронизацией каталога); 10 000 пустых файлов не
+        // должны давать 10 000 fsync
+        if size > 0 {
+            f.sync_all()?;
+        }
         s.sh.hook(HookPoint::Synced { file })?;
         Ok(())
     })();
@@ -240,7 +267,7 @@ pub(crate) fn finalize_file(s: &Arc<RecvSession>, file: u32) {
     let _ = s.sh.hook(HookPoint::FinalVerify { file });
     if s.halt.load(std::sync::atomic::Ordering::Relaxed) {
         lock(&s.core).sched.unfinalize(file);
-        let _ = s.persist();
+        s.mark_dirty();
         return;
     }
     let part = part_path(&s.sdir, file);
@@ -262,28 +289,23 @@ pub(crate) fn finalize_file(s: &Arc<RecvSession>, file: u32) {
                     FinFail::Io(e) => abort_finalize(s, file, &e),
                     FinFail::Stopped => {
                         lock(&s.core).sched.unfinalize(file);
-                        let _ = s.persist();
+                        s.mark_dirty();
                     }
                 }
                 return;
             }
         }
     }
-    // 3. корень всего файла
-    let root_ok = file_root(size, l, &leaves).is_ok_and(|r| r == root);
-    if !root_ok {
-        s.fail_file(file, FileFailure::Damaged, Some(FileErrCode::Damaged));
-        return;
-    }
-    // 4. состояние `Verified` на диск, затем размещение
-    if let Err(e) = s.persist() {
-        abort_finalize(s, file, &e);
-        return;
-    }
+    // Корень по хэшам в памяти здесь уже не проверяется: список хэшей воспроизвёл корень при
+    // получении манифеста (`handle_manifest`), а настоящая проверка это перечитывание файла
+    // с диска выше (`verify_after_write`, вне тестов крейта обязательно).
+    // Состояние `Verified` лишь помечается: запись объединяется контрольной точкой. После
+    // сбоя файл перепроверится с диска, состояние ничему не доверяется.
+    s.mark_dirty();
     let _ = s.sh.hook(HookPoint::BeforePlace { file });
     if s.halt.load(std::sync::atomic::Ordering::Relaxed) {
         lock(&s.core).sched.unfinalize(file);
-        let _ = s.persist();
+        s.mark_dirty();
         return;
     }
     let name = s
@@ -302,8 +324,10 @@ pub(crate) fn finalize_file(s: &Arc<RecvSession>, file: u32) {
     match s.sh.placement.place(&cf) {
         Ok(_) => {
             lock(&s.core).sched.set_placed(file);
-            let _ = s.persist();
+            s.mark_dirty();
             remove_hashes(&s.sdir, file);
+            // уборка: если `.part` остался вторым именем размещённого файла, `prepare` и
+            // `finalize_file` не пишут в него (`remove_part_strict`)
             let _ = remove_file_retry(&part);
             s.ctl_send(crate::codec::Message::FileDone { index: file });
             s.emit(TransferEvent::FileReceived {

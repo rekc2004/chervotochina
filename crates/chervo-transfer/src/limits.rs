@@ -20,6 +20,10 @@ pub const MIN_BLOCK: u32 = 1 << 20;
 pub const MAX_BLOCK: u32 = 1 << 24;
 pub const MAX_BLOCKS: u32 = 1 << 16;
 pub const MAX_STATE_LEN: u64 = 4 * 1024 * 1024;
+/// Файл имён предложения (`names`): имена пишутся один раз при принятии. Записи не длиннее
+/// записей предложения (`2 + name_len` против `10 + name_len`), поэтому предел чуть выше
+/// `MAX_OFFER_BYTES`.
+pub const MAX_NAMES_LEN: u64 = MAX_OFFER_BYTES as u64 + 1024;
 /// Не больше стольких файлов в состоянии `InProgress` (потоков данных не больше 8).
 pub const MAX_INPROGRESS: usize = 8;
 /// Байт на запись OFFER_FILES сверх имени: размер u64 и длина имени u16.

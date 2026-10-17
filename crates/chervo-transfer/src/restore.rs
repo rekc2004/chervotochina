@@ -1,7 +1,7 @@
 //! Загрузка недокачанных передач при запуске: просмотр `partial_dir`, проверка состояния.
-//! С диска не доверяется ничего: состояние ограничено и проверено контрольной суммой, список
-//! хэшей воспроизводит корень, пара берётся из соединения при возобновлении, а готовые блоки
-//! перехэшируются перед использованием.
+//! С диска не доверяется ничего: состояние и файл имён ограничены и проверены контрольной
+//! суммой (состояние привязано к трейлеру файла имён), список хэшей воспроизводит корень, пара
+//! берётся из соединения при возобновлении, а готовые блоки перехэшируются перед использованием.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -10,12 +10,13 @@ use crate::hash::FileRoot;
 use crate::layout::{Layout, layout};
 use crate::names::TransferKey;
 use crate::paths::{
-    list_session_dirs, read_hashes, read_state, remove_part_and_hashes, remove_session, session_dir,
+    list_session_dirs, read_hashes, read_names, read_state, remove_part_and_hashes, remove_session,
+    session_dir,
 };
 use crate::receiver::RecvSession;
 use crate::sched::{Prior, Run};
 use crate::shared::Shared;
-use crate::state::{FileStatus, decode_state, parse_hashes, state_dir_name};
+use crate::state::{FileStatus, decode_names, decode_state, parse_hashes, state_dir_name};
 use crate::util::{Bits, now_unix};
 
 /// Прежний прогресс файла, если `.hashes` воспроизводит корень; иначе файл начнётся заново.
@@ -51,7 +52,19 @@ pub(crate) fn load_all(sh: &Arc<Shared>) -> Vec<Arc<RecvSession>> {
             .and_then(|b| decode_state(&b).ok())
             .filter(|st| state_dir_name(&st.pair, &st.id) == name)
             .filter(|st| now.saturating_sub(st.last_progress_unix) <= ttl);
-        let Some(st) = state else {
+        // имена: неизменяемый файл, тот самый, к которому привязано состояние
+        let nf = state.as_ref().and_then(|st| {
+            read_names(&sdir)
+                .ok()
+                .and_then(|b| decode_names(&b).ok())
+                .filter(|nf| {
+                    nf.pair == st.pair
+                        && nf.id == st.id
+                        && nf.sum == st.names_sum
+                        && nf.names.len() == st.files.len()
+                })
+        });
+        let (Some(st), Some(nf)) = (state, nf) else {
             remove_session(&sdir);
             continue;
         };
@@ -81,10 +94,10 @@ pub(crate) fn load_all(sh: &Arc<Shared>) -> Vec<Arc<RecvSession>> {
             };
             runs.push(run);
         }
-        let files = st
-            .files
-            .iter()
-            .map(|f| (f.name.clone(), f.size))
+        let files = nf
+            .names
+            .into_iter()
+            .zip(st.files.iter().map(|f| f.size))
             .collect::<Vec<_>>();
         let key = TransferKey {
             pair: st.pair,
@@ -97,6 +110,7 @@ pub(crate) fn load_all(sh: &Arc<Shared>) -> Vec<Arc<RecvSession>> {
             runs,
             st.created_unix,
             sdir,
+            st.names_sum,
         ));
     }
     out

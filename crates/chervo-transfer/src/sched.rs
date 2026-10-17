@@ -242,36 +242,45 @@ impl Sched {
                 return Work::Block { file, block, len };
             }
         }
-        // восстановленные файлы: их манифест нужен, чтобы подтвердить корень
-        let ready: Vec<bool> = (0..self.runs.len()).map(|i| self.covered(i)).collect();
-        for (i, r) in self.runs.iter_mut().enumerate() {
+        // восстановленные файлы: их манифест нужен, чтобы подтвердить корень (покрытие
+        // считается только для тех, кто ждёт: на предложении в 10 000 файлов проход по всем
+        // был бы квадратичным)
+        for i in 0..self.runs.len() {
             let Ok(file) = u32::try_from(i) else { break };
-            if let Run::Waiting(prior @ Some(_)) = r {
-                if !ready.get(i).copied().unwrap_or(false) {
-                    continue;
-                }
+            if !matches!(self.runs.get(i), Some(Run::Waiting(Some(_)))) || !self.covered(i) {
+                continue;
+            }
+            if let Some(r) = self.runs.get_mut(i)
+                && let Run::Waiting(prior) = r
+            {
                 let p = prior.take();
                 *r = Run::Requested(p);
                 return Work::Manifest { file };
             }
         }
-        let busy = self.in_progress_count();
-        for (i, r) in self.runs.iter_mut().enumerate() {
+        let mut busy: Option<usize> = None;
+        for i in 0..self.runs.len() {
             let Ok(file) = u32::try_from(i) else { break };
-            if let Run::Waiting(None) = r {
-                if self.sizes.get(i).copied().unwrap_or(0) == 0 {
-                    *r = Run::Setup;
-                    return Work::Zero { file };
-                }
-                if !ready.get(i).copied().unwrap_or(false) {
-                    continue;
-                }
-                if busy < self.cap {
-                    *r = Run::Requested(None);
-                    return Work::Manifest { file };
-                }
-                break;
+            if !matches!(self.runs.get(i), Some(Run::Waiting(None))) {
+                continue;
             }
+            if self.sizes.get(i).copied().unwrap_or(0) == 0 {
+                if let Some(r) = self.runs.get_mut(i) {
+                    *r = Run::Setup;
+                }
+                return Work::Zero { file };
+            }
+            if !self.covered(i) {
+                continue;
+            }
+            let in_progress = *busy.get_or_insert_with(|| self.in_progress_count());
+            if in_progress < self.cap {
+                if let Some(r) = self.runs.get_mut(i) {
+                    *r = Run::Requested(None);
+                }
+                return Work::Manifest { file };
+            }
+            break;
         }
         if self.all_terminal() {
             Work::AllDone

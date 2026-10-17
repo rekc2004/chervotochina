@@ -9,7 +9,7 @@ use chervo_identity::PairId;
 
 use super::{MemRx, body};
 use crate::hash::sha256;
-use crate::state::{FileStatus, Progress, RecvState, StateFile};
+use crate::state::{FileStatus, Progress, RecvState, StateFile, decode_names, encode_names};
 use crate::{
     BlockErrCode, CancelReason, FileErrCode, FileRoot, MAX_FILE_SIZE, Message, OfferAssembler,
     OfferedFile, TransferId, UntrustedName, Verdict, decode_message, decode_state, encode,
@@ -375,11 +375,7 @@ fn random_state(rng: &mut XorShift) -> RecvState {
                 4 => FileStatus::Failed,
                 _ => FileStatus::Waiting,
             };
-            StateFile {
-                name: name(rng),
-                size,
-                status,
-            }
+            StateFile { size, status }
         })
         .collect();
     RecvState {
@@ -388,6 +384,7 @@ fn random_state(rng: &mut XorShift) -> RecvState {
         created_unix: rng.next(),
         last_progress_unix: rng.next(),
         total_size: files.iter().map(|f| f.size).sum(),
+        names_sum: rng.bytes(32).try_into().unwrap(),
         files,
     }
 }
@@ -445,4 +442,50 @@ fn fuzz_smoke_state() {
         }
     }
     println!("fuzz_smoke_state: iterations={n} accepted={accepted}");
+}
+
+#[test]
+fn fuzz_smoke_names() {
+    let n = fuzz_iters();
+    let mut rng = XorShift::new(0x00A3_E5F0_0D5E_ED01_u64);
+    let mut accepted = 0u64;
+    for i in 0..n {
+        let count = 1 + rng.below(6);
+        let list: Vec<UntrustedName> = (0..count).map(|_| name(&mut rng)).collect();
+        let pair = PairId::from_bytes(rng.bytes(16).try_into().unwrap());
+        let tid = id(&mut rng);
+        let (good, sum) = encode_names(&pair, &tid, &list);
+        let back = decode_names(&good).expect("согласованный файл имён");
+        assert!(back.names == list && back.sum == sum, "итерация {i}");
+        let b = match rng.below(5) {
+            0 => {
+                let len = rng.below(200);
+                rng.bytes(len)
+            }
+            1 => mutate(&mut rng, &good),
+            2 => reseal(mutate(&mut rng, &good)),
+            3 => {
+                let once = mutate(&mut rng, &good);
+                reseal(mutate(&mut rng, &once))
+            }
+            _ => {
+                let mut v = good[..good.len() - 32].to_vec();
+                if rng.below(2) == 0 {
+                    let cut = rng.below(v.len() + 1);
+                    v.truncate(cut);
+                } else {
+                    let extra = 1 + rng.below(8);
+                    v.extend(rng.bytes(extra));
+                }
+                v.extend_from_slice(&[0u8; 32]);
+                reseal(v)
+            }
+        };
+        if let Ok(nf) = decode_names(&b) {
+            accepted += 1;
+            let (again, _) = encode_names(&nf.pair, &nf.id, &nf.names);
+            assert_eq!(again, b, "итерация {i}: не каноническое");
+        }
+    }
+    println!("fuzz_smoke_names: iterations={n} accepted={accepted}");
 }

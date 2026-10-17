@@ -8,6 +8,7 @@
 //! Тесты частей X1 (кодек, хэши, состояние, fuzz-смоук) и X2/X3 (сессии, писатель, размещение).
 
 mod codec;
+mod dos;
 mod fake;
 mod flow;
 mod fuzz;

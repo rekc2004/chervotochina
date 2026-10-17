@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use chervo_transport::{Connection, SendStream};
-use tokio::sync::{Notify, mpsc, oneshot, watch};
+use tokio::sync::{Notify, Semaphore, mpsc, oneshot, watch};
 use tokio::time::timeout;
 
 use crate::codec::{CancelReason, FileErrCode, Message, encode};
@@ -23,12 +23,12 @@ use crate::limits::STREAM_TRANSFER_CTL;
 use crate::links::Links;
 use crate::names::{TransferKey, UntrustedName};
 use crate::paths::{
-    open_part_write, remove_hashes, remove_part_and_hashes, remove_session, session_dir,
-    write_hashes, write_state,
+    create_part_new, ensure_part, remove_hashes, remove_part_and_hashes, remove_part_strict,
+    remove_session, session_dir, write_hashes, write_state,
 };
 use crate::policy::OfferView;
 use crate::sched::{Active, Prior, Run, Sched};
-use crate::shared::{HookPoint, Shared, lock};
+use crate::shared::{HookPoint, Shared, buffer_floor, lock, share_semaphore};
 use crate::state::{
     FileStatus, Progress, RecvState, StateFile, encode_hashes, encode_state, state_dir_name,
 };
@@ -188,6 +188,13 @@ pub(crate) struct RecvSession {
     pub(crate) sdir: PathBuf,
     pub(crate) core: Mutex<RCore>,
     io_lock: Mutex<()>,
+    /// Трейлер файла имён (известен после принятия или загрузки с диска).
+    names_sum: Mutex<[u8; 32]>,
+    /// Состояние изменилось, а записи на диск ещё не было: запись объединяется по таймеру
+    /// контрольной точки писателя (не по записи на каждое событие файла).
+    dirty: AtomicBool,
+    /// Доля этой передачи в бюджете памяти получения.
+    pub(crate) share: Arc<Semaphore>,
     /// Изменилась работа планировщика (новый блок, файл закрыт и тому подобное).
     pub(crate) wake: Notify,
     pub(crate) retry: Notify,
@@ -196,6 +203,14 @@ pub(crate) struct RecvSession {
     answer: Mutex<Option<oneshot::Sender<bool>>>,
     /// Блокирующие задачи сессии (итоговая проверка, подготовка файлов).
     pub(crate) jobs: Tracker,
+}
+
+fn share_for(sh: &Shared, sizes: &[u64]) -> Arc<Semaphore> {
+    share_semaphore(
+        sh.cfg.recv_buffer_budget,
+        sh.cfg.max_inbound_active,
+        buffer_floor(sizes),
+    )
 }
 
 fn sched_for(sh: &Shared, sizes: &[u64], runs: Vec<Run>) -> Sched {
@@ -222,6 +237,7 @@ impl RecvSession {
         let runs = sizes.iter().map(|_| Run::Waiting(None)).collect();
         let sched = sched_for(&sh, &sizes, runs);
         let sdir = session_dir(&sh.cfg.partial_dir, &state_dir_name(&key.pair, &key.id));
+        let share = share_for(&sh, &sizes);
         Arc::new(Self {
             sh,
             key,
@@ -241,6 +257,9 @@ impl RecvSession {
                 place_failed: false,
             }),
             io_lock: Mutex::new(()),
+            names_sum: Mutex::new([0; 32]),
+            dirty: AtomicBool::new(false),
+            share,
             wake: Notify::new(),
             retry: Notify::new(),
             halt: Arc::new(AtomicBool::new(false)),
@@ -258,11 +277,13 @@ impl RecvSession {
         runs: Vec<Run>,
         created_unix: u64,
         sdir: PathBuf,
+        names_sum: [u8; 32],
     ) -> Arc<Self> {
         let sizes: Vec<u64> = files.iter().map(|f| f.1).collect();
         let total = sizes.iter().fold(0u64, |a, b| a.saturating_add(*b));
         let names: Vec<UntrustedName> = files.into_iter().map(|f| f.0).collect();
         let sched = sched_for(&sh, &sizes, runs);
+        let share = share_for(&sh, &sizes);
         Arc::new(Self {
             sh,
             key,
@@ -282,6 +303,9 @@ impl RecvSession {
                 place_failed: false,
             }),
             io_lock: Mutex::new(()),
+            names_sum: Mutex::new(names_sum),
+            dirty: AtomicBool::new(false),
+            share,
             wake: Notify::new(),
             retry: Notify::new(),
             halt: Arc::new(AtomicBool::new(false)),
@@ -365,8 +389,8 @@ impl RecvSession {
     /// Файл состояния в том виде, в каком он будет записан. Битовые карты берутся из
     /// `durable` (подтверждено `sync_data`), а не из `have`.
     fn snapshot(&self, core: &RCore) -> RecvState {
-        let mut files = Vec::with_capacity(self.names.len());
-        for (i, (name, size)) in self.names.iter().zip(&self.sizes).enumerate() {
+        let mut files = Vec::with_capacity(self.sizes.len());
+        for (i, size) in self.sizes.iter().enumerate() {
             let progress = |layout: Layout, root: FileRoot, bits: &Bits| -> FileStatus {
                 if bits.count_ones() == layout.block_count {
                     FileStatus::Verified(root)
@@ -388,7 +412,6 @@ impl RecvSession {
                 _ => FileStatus::Waiting,
             };
             files.push(StateFile {
-                name: name.clone(),
                 size: *size,
                 status,
             });
@@ -399,20 +422,55 @@ impl RecvSession {
             created_unix: core.created_unix,
             last_progress_unix: now_unix(),
             total_size: self.total,
+            names_sum: *lock(&self.names_sum),
             files,
         }
+    }
+
+    /// Файл имён предложения, один раз при принятии (блокирующая): имена в неизменяемый файл
+    /// с контрольной суммой, трейлер запоминается для файла состояния.
+    pub(crate) fn write_names_once(&self) -> io::Result<()> {
+        let (bytes, sum) = crate::state::encode_names(&self.key.pair, &self.key.id, &self.names);
+        self.sh.hook(HookPoint::NamesWrite { bytes: &bytes })?;
+        crate::paths::write_names(&self.sdir, &bytes)?;
+        *lock(&self.names_sum) = sum;
+        Ok(())
     }
 
     /// Запись файла состояния (блокирующая). Замок ввода-вывода держится от снимка до
     /// переименования: более старый снимок не перекроет новый.
     pub(crate) fn persist(&self) -> io::Result<()> {
         let _io = lock(&self.io_lock);
+        // флаг снимается до снимка: событие после снимка снова поднимет его
+        self.dirty.store(false, Ordering::Release);
         let bytes = {
             let core = lock(&self.core);
             encode_state(&self.snapshot(&core))
         };
-        self.sh.hook(HookPoint::StateWrite { bytes: &bytes })?;
-        write_state(&self.sdir, &bytes)
+        let res = self
+            .sh
+            .hook(HookPoint::StateWrite { bytes: &bytes })
+            .and_then(|()| write_state(&self.sdir, &bytes));
+        if res.is_err() {
+            self.dirty.store(true, Ordering::Release);
+        }
+        res
+    }
+
+    /// Состояние изменилось; запись выполнит контрольная точка писателя.
+    pub(crate) fn mark_dirty(&self) {
+        self.dirty.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn is_dirty(&self) -> bool {
+        self.dirty.load(Ordering::Acquire)
+    }
+
+    /// Нет писателя, который сохранил бы изменение (попытки нет): записать сразу.
+    pub(crate) fn flush_detached(&self) {
+        if self.is_dirty() && lock(&self.core).att.is_none() {
+            let _ = self.persist();
+        }
     }
 
     /// Файл закрыт как проваленный. `tell`: код для FILE_ERROR отправителю.
@@ -453,7 +511,8 @@ impl RecvSession {
             } else {
                 remove_part_and_hashes(&s.sdir, file);
             }
-            let _ = s.persist();
+            s.mark_dirty();
+            s.flush_detached();
         });
         self.wake.notify_waiters();
     }
@@ -479,6 +538,14 @@ impl RecvSession {
                 key: self.key,
                 reason,
             });
+        }
+    }
+
+    /// Откат места, занятого `claim_slot`, без события (возобновление не состоялось).
+    pub(crate) fn unclaim(&self, prev: PauseReason) {
+        let mut c = lock(&self.core);
+        if c.phase == RPhase::Active {
+            c.phase = RPhase::Paused(prev);
         }
     }
 
@@ -513,6 +580,7 @@ impl RecvSession {
         self.sh.spawn_blocking(move || {
             let _g = g;
             crate::writer::finalize_file(&s, file);
+            s.flush_detached();
         });
     }
 
@@ -557,12 +625,8 @@ impl RecvSession {
                 if need_final {
                     self.spawn_finalize(file);
                 }
-                let s = self.clone();
-                let g = self.jobs.guard();
-                self.sh.spawn_blocking(move || {
-                    let _g = g;
-                    let _ = s.persist();
-                });
+                // запись состояния объединяется контрольной точкой писателя
+                self.mark_dirty();
                 self.wake.notify_waiters();
                 Ok(())
             }
@@ -579,7 +643,7 @@ type PrepareErr = (io::Error, Option<Prior>);
 
 /// Блокирующая часть подготовки файла. Прежний прогресс с тем же корнем перепроверяется с
 /// диска (каждый отмеченный блок перехэшируется); другой корень: файл начинается с нуля.
-fn prepare(
+pub(crate) fn prepare(
     s: &Arc<RecvSession>,
     file: u32,
     l: Layout,
@@ -592,13 +656,20 @@ fn prepare(
         .get(usize::try_from(file).unwrap_or(usize::MAX))
         .copied()
         .unwrap_or(0);
-    let (reuse, restart) = match prior {
-        Some(p) if p.root == root && p.layout == l => (Some(p), false),
-        Some(_) => (None, true),
-        None => (None, false),
+    let (reuse, stale) = match prior {
+        Some(p) if p.root == root && p.layout == l => (Some(p), None),
+        other => (None, other),
     };
-    if restart {
-        remove_part_and_hashes(&s.sdir, file);
+    // Старый `<i>.part` другого файла (или без прогресса) удаляется строго: если убрать его не
+    // удалось, дальше нельзя (он мог остаться жёсткой ссылкой на уже размещённый файл), и
+    // передача встаёт на паузу.
+    if reuse.is_none() {
+        let removed =
+            s.sh.hook(HookPoint::RemovePart { file })
+                .and_then(|()| remove_part_strict(&s.sdir, file));
+        if let Err(e) = removed {
+            return Err((e, stale));
+        }
     }
     let bits = if let Some(p) = reuse {
         s.emit(TransferEvent::Verifying { key: s.key });
@@ -608,6 +679,10 @@ fn prepare(
                 let mut bits = p.bits.clone();
                 for b in bad {
                     bits.clear(b);
+                }
+                // файла может не быть (все блоки тогда в `bad`): создаётся новый
+                if let Err(e) = ensure_part(&s.sdir, file) {
+                    return Err((e, Some(p)));
                 }
                 bits
             }
@@ -622,7 +697,7 @@ fn prepare(
     } else {
         let step = || -> io::Result<()> {
             write_hashes(&s.sdir, file, &encode_hashes(&leaves))?;
-            open_part_write(&s.sdir, file)?;
+            create_part_new(&s.sdir, file)?;
             Ok(())
         };
         if let Err(e) = step() {
@@ -865,9 +940,19 @@ async fn run_attempt<L: Links>(
     if conn.remote_pair() != s.key.pair {
         return Outcome::Retry;
     }
+    let is_first = first.is_some();
+    // Возобновление занимает место среди активных входящих (приём принятых передач уже занял
+    // его в `accept_flow`). Нет места: передача остаётся на паузе, повтор через время опроса.
+    let claimed = if is_first {
+        None
+    } else {
+        match inner.claim_slot(s) {
+            Some(prev) => prev,
+            None => return Outcome::Retry,
+        }
+    };
     // удержание: пока идёт передача, `max_live` соединение не закрывает
     let hold = inner.links.hold(&s.key.pair);
-    let is_first = first.is_some();
     let (ctl_tx, ctl_rx, buf) = match first {
         Some((t, r)) => (t, r, Vec::new()),
         None => {
@@ -875,6 +960,9 @@ async fn run_attempt<L: Links>(
             match (hs, streams) {
                 (Hs::Ok, Some(x)) => x,
                 (Hs::Retry, _) => {
+                    if let Some(prev) = claimed {
+                        s.unclaim(prev);
+                    }
                     s.set_paused(PauseReason::Disconnected);
                     return lost(&conn).await;
                 }
@@ -917,6 +1005,9 @@ async fn run_attempt<L: Links>(
             verdict: crate::codec::Verdict::Accept,
         });
     } else {
+        if claimed.is_some() {
+            s.emit(TransferEvent::Resumed { key: s.key });
+        }
         s.set_active();
         // файлы, размещённые до обрыва: отправитель мог не получить FILE_DONE
         let placed: Vec<u32> = {
@@ -1006,6 +1097,14 @@ async fn run_attempt<L: Links>(
         c.sched.reset_requests();
         c.att = None;
         c.ctl = None;
+    }
+    // изменение, поднятое уже после последней контрольной точки писателя
+    if s.is_dirty() {
+        let (s2, g) = (s.clone(), s.jobs.guard());
+        sh.spawn_blocking(move || {
+            let _g = g;
+            let _ = s2.persist();
+        });
     }
     match why {
         Why::Complete => {

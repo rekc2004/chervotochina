@@ -8,10 +8,11 @@ use chervo_identity::PairId;
 use tokio::sync::watch;
 use tokio::time::Instant;
 
+use crate::events::PauseReason;
 use crate::links::Links;
 use crate::names::TransferKey;
 use crate::policy::AcceptPolicy;
-use crate::receiver::RecvSession;
+use crate::receiver::{RPhase, RecvSession};
 use crate::sender::SendSession;
 use crate::shared::{Shared, lock};
 
@@ -53,6 +54,43 @@ impl<L: Links> Inner<L> {
 
     pub(crate) fn bump(&self) {
         self.conn_gen.send_modify(|v| *v = v.wrapping_add(1));
+    }
+
+    /// Сколько входящих передач сейчас идут (`Active`). Передачи на паузе и ожидающие решения
+    /// не считаются: они остаются в списке, но не занимают места для новых приёмов.
+    pub(crate) fn active_inbound(&self) -> usize {
+        lock(&self.reg)
+            .inb
+            .values()
+            .filter(|s| lock(&s.core).phase == RPhase::Active)
+            .count()
+    }
+
+    /// Занимает место среди активных входящих (атомарно по реестру). `None`: мест нет.
+    /// `Some(prev)`: занято; `prev` это причина паузы, из которой передача вышла (`None`, если
+    /// она была не на паузе).
+    pub(crate) fn claim_slot(&self, s: &Arc<RecvSession>) -> Option<Option<PauseReason>> {
+        let reg = lock(&self.reg);
+        let others = reg
+            .inb
+            .values()
+            .filter(|x| !Arc::ptr_eq(x, s) && lock(&x.core).phase == RPhase::Active)
+            .count();
+        if others >= self.sh.cfg.max_inbound_active {
+            return None;
+        }
+        let mut c = lock(&s.core);
+        match c.phase {
+            RPhase::Paused(r) => {
+                c.phase = RPhase::Active;
+                Some(Some(r))
+            }
+            RPhase::Pending => {
+                c.phase = RPhase::Active;
+                Some(None)
+            }
+            RPhase::Active | RPhase::Ended => Some(None),
+        }
     }
 
     /// Не больше `ctl_in_per_min` потоков управления в минуту от одного друга.

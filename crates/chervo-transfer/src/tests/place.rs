@@ -11,7 +11,7 @@ use super::kit::*;
 use crate::fsio::hash_source;
 use crate::placement::{PlaceMethod, place_no_clobber_with};
 use crate::sched::Run;
-use crate::state::{FileStatus, RecvState, StateFile, encode_state};
+use crate::state::{FileStatus, RecvState, StateFile, encode_names, encode_state};
 use crate::util::now_unix;
 use crate::{
     CompletedFile, FileFailure, GeneratedNames, Message, PlaceError, Placement, TransferConfig,
@@ -139,6 +139,8 @@ async fn startup_sweep_deletes_only_ours() {
     let a = p.join(hex32('a'));
     std::fs::create_dir(&a).unwrap();
     put(&a, "state", b"garbage");
+    put(&a, "names", b"garbage");
+    put(&a, "names.tmp", b"garbage");
     put(&a, "0.part", b"data");
     put(&a, "1.hashes", b"data");
     put(&a, "2.hashes.tmp", b"data");
@@ -172,6 +174,8 @@ async fn startup_sweep_deletes_only_ours() {
         assert!(a.is_dir());
         assert_eq!(std::fs::read(a.join("keep.txt")).unwrap(), b"foreign");
         assert!(!a.join("state").exists());
+        assert!(!a.join("names").exists());
+        assert!(!a.join("names.tmp").exists());
         assert!(!a.join("0.part").exists());
         assert!(!a.join("1.hashes").exists());
         assert!(!a.join("2.hashes.tmp").exists());
@@ -181,20 +185,38 @@ async fn startup_sweep_deletes_only_ours() {
     }
 }
 
-fn waiting_state(pair: PairId, id: TransferId, last: u64) -> (String, Vec<u8>) {
+/// Каталог сеанса на диске: файл имён и состояние, согласованные между собой.
+fn session_on_disk(
+    pair: PairId,
+    id: TransferId,
+    last: u64,
+    files: &[(&str, u64, FileStatus)],
+) -> (String, Vec<u8>, Vec<u8>) {
+    let names: Vec<UntrustedName> = files
+        .iter()
+        .map(|f| UntrustedName::new(f.0).unwrap())
+        .collect();
+    let (names_bytes, names_sum) = encode_names(&pair, &id, &names);
     let st = RecvState {
         pair,
         id,
         created_unix: last,
         last_progress_unix: last,
-        total_size: 100,
-        files: vec![StateFile {
-            name: UntrustedName::new("a.bin").unwrap(),
-            size: 100,
-            status: FileStatus::Waiting,
-        }],
+        total_size: files.iter().map(|f| f.1).sum(),
+        names_sum,
+        files: files
+            .iter()
+            .map(|f| StateFile {
+                size: f.1,
+                status: f.2.clone(),
+            })
+            .collect(),
     };
-    (state_dir_name(&pair, &id), encode_state(&st))
+    (state_dir_name(&pair, &id), encode_state(&st), names_bytes)
+}
+
+fn waiting_state(pair: PairId, id: TransferId, last: u64) -> (String, Vec<u8>, Vec<u8>) {
+    session_on_disk(pair, id, last, &[("a.bin", 100, FileStatus::Waiting)])
 }
 
 #[tokio::test]
@@ -205,12 +227,13 @@ async fn partial_ttl_expiry() {
     let node = Node::start(pre);
     let now = now_unix();
     let week = 7 * 24 * 3600;
-    let (old_dir, old) = waiting_state(pair, TransferId([1; 16]), now - week - 3600);
-    let (new_dir, fresh) = waiting_state(pair, TransferId([2; 16]), now - 3600);
-    for (dir, bytes) in [(&old_dir, old), (&new_dir, fresh)] {
+    let (old_dir, old, old_names) = waiting_state(pair, TransferId([1; 16]), now - week - 3600);
+    let (new_dir, fresh, fresh_names) = waiting_state(pair, TransferId([2; 16]), now - 3600);
+    for (dir, bytes, names) in [(&old_dir, old, old_names), (&new_dir, fresh, fresh_names)] {
         let sd = partial.path().join(dir);
         std::fs::create_dir(&sd).unwrap();
         put(&sd, "state", &bytes);
+        put(&sd, "names", &names);
         put(&sd, "0.part", b"partial");
     }
     let dest = TestDir::new();
@@ -267,7 +290,7 @@ async fn progress_rate_limited() {
 // ------------------------------------------------------------- лимиты друга и политика
 
 /// Узел с `n` друзьями-заглушками, соединения от каждого уже приняты.
-async fn node_with_friends(
+pub(super) async fn node_with_friends(
     n: usize,
     tweak: impl FnOnce(&mut TransferConfig),
 ) -> (Peer, Vec<(PairId, FakeConn)>) {
@@ -434,6 +457,9 @@ fn config_validate_rejects_bad() {
     c.recv_buffer_budget = 1024;
     assert!(c.validate().is_err());
     let mut c = ok.clone();
+    c.min_block_rate = 0;
+    assert!(c.validate().is_err());
+    let mut c = ok.clone();
     c.partial_dir = PathBuf::from("relative/dir");
     assert!(c.validate().is_err());
     let mut c = ok;
@@ -448,28 +474,19 @@ async fn startup_clears_failures() {
     let pair = pre.solo_friend();
     let node = Node::start(pre);
     let id = TransferId([7; 16]);
-    let st = RecvState {
+    let (dir, state, names) = session_on_disk(
         pair,
         id,
-        created_unix: now_unix(),
-        last_progress_unix: now_unix(),
-        total_size: 300,
-        files: vec![
-            StateFile {
-                name: UntrustedName::new("a.bin").unwrap(),
-                size: 100,
-                status: FileStatus::Failed,
-            },
-            StateFile {
-                name: UntrustedName::new("b.bin").unwrap(),
-                size: 200,
-                status: FileStatus::Placed(crate::FileRoot([5; 32])),
-            },
+        now_unix(),
+        &[
+            ("a.bin", 100, FileStatus::Failed),
+            ("b.bin", 200, FileStatus::Placed(crate::FileRoot([5; 32]))),
         ],
-    };
-    let sd = partial.path().join(state_dir_name(&pair, &id));
+    );
+    let sd = partial.path().join(dir);
     std::fs::create_dir(&sd).unwrap();
-    put(&sd, "state", &encode_state(&st));
+    put(&sd, "state", &state);
+    put(&sd, "names", &names);
     put(&sd, "0.part", b"stale");
     let dest = TestDir::new();
     let cfg = small_cfg(partial.path());

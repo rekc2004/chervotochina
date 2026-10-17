@@ -57,8 +57,8 @@ pub use hash::{BlockHash, FileRoot, file_root, leaf_hash};
 pub use layout::{Layout, block_len, check_block_len, check_manifest_layout, layout};
 pub use limits::{
     MAX_BLOCK, MAX_BLOCKS, MAX_FILE_SIZE, MAX_FILES_PER_OFFER, MAX_INPROGRESS, MAX_MESSAGE_LEN,
-    MAX_NAME_BYTES, MAX_OFFER_BYTES, MAX_OFFER_TOTAL, MAX_STATE_LEN, MIN_BLOCK, PROTO_VERSION,
-    STREAM_TRANSFER_CTL, STREAM_TRANSFER_DATA,
+    MAX_NAME_BYTES, MAX_NAMES_LEN, MAX_OFFER_BYTES, MAX_OFFER_TOTAL, MAX_STATE_LEN, MIN_BLOCK,
+    PROTO_VERSION, STREAM_TRANSFER_CTL, STREAM_TRANSFER_DATA,
 };
 pub use links::Links;
 pub use names::{OfferedFile, TransferId, TransferKey, UntrustedName};

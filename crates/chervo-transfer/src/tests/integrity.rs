@@ -645,3 +645,136 @@ async fn final_name_only_after_root_match() {
         );
     }
 }
+
+// ---------------------------------------------- пределы памяти и потоков на стороне отправителя
+
+/// Пока читатель стоит, поток держит память: ждём, когда бюджет уменьшится.
+async fn wait_budget_held(p: &Peer, total_kib: usize) -> usize {
+    for _ in 0..1500 {
+        let avail = p.tr.inner().sh.send_budget.available_permits();
+        if avail < total_kib {
+            // дать остальным потокам занять свою долю
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            return p.tr.inner().sh.send_budget.available_permits();
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("nothing is held");
+}
+
+#[tokio::test]
+async fn slow_readers_hold_only_their_share_of_send_budget() {
+    // бюджет отправки 16 МиБ (наименьший допустимый), долей на передачу 4 МиБ (при 4
+    // передачах); восемь потоков по блоку в 1 МиБ без чтения без доли держали бы 8 МиБ
+    let h = hostile_receiver(&[16 << 20], |c| {
+        c.send_buffer_budget = 16 << 20;
+        c.max_data_streams = 8;
+    })
+    .await;
+    h.peer.set_stream_cap(64 << 10);
+    let mut held = Vec::new();
+    for b in 0..8u32 {
+        let (mut tx, rx) = bind(&h.peer, h.id).await;
+        send_frame(&mut tx, &Message::GetBlock { index: 0, block: b }).await;
+        held.push((tx, rx));
+    }
+    let total = 16 * 1024;
+    let avail = wait_budget_held(&h.a, total).await;
+    assert!(
+        avail >= total - 4 * 1024,
+        "hostile receiver holds {} KiB, share is 4096",
+        total - avail
+    );
+    assert!(avail < total);
+    drop(held);
+}
+
+#[tokio::test]
+async fn slow_reader_is_cut_by_block_deadline_on_send() {
+    // читатель отдаёт ~200 КиБ/с: таймер потока (3 с на порцию) не срабатывает, но блок в
+    // 1 МиБ не укладывается в срок 3 с + 1 МиБ / (1 МиБ/с) = 4 с
+    let h = hostile_receiver(&[2 << 20], |c| {
+        c.stall_timeout = Duration::from_secs(3);
+        c.min_block_rate = 1 << 20;
+    })
+    .await;
+    h.peer.set_stream_cap(16 << 10);
+    let (mut tx, mut rx) = bind(&h.peer, h.id).await;
+    send_frame(&mut tx, &Message::GetBlock { index: 0, block: 0 }).await;
+    let started = std::time::Instant::now();
+    let mut got = 0usize;
+    let mut buf = vec![0u8; 20 << 10];
+    while let Ok(Ok(Some(n))) =
+        tokio::time::timeout(Duration::from_secs(15), rx.read(&mut buf)).await
+    {
+        got += n;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(got < 1_000_000, "block delivered in full: {got} bytes");
+    assert!(
+        started.elapsed() < Duration::from_secs(12),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn manifest_serve_cap_per_file() {
+    let mut h = hostile_receiver(&[3 << 20], |_| {}).await;
+    let (mut dtx, mut drx) = bind(&h.peer, h.id).await;
+    for _ in 0..4 {
+        send_frame(&mut dtx, &Message::GetManifest { index: 0 }).await;
+        let Some(Message::Manifest { block_count, .. }) = recv_frame(&mut drx, 10).await else {
+            panic!("no manifest");
+        };
+        let mut raw = vec![0u8; block_count as usize * 32];
+        read_exact(&mut drx, &mut raw, Duration::from_secs(10))
+            .await
+            .unwrap();
+    }
+    // пятая выдача манифеста того же файла за попытку
+    send_frame(&mut dtx, &Message::GetManifest { index: 0 }).await;
+    expect_cancel(&mut h.ctl_rx, CancelReason::Limits).await;
+    let f = wait_ev(&mut h.a.ev, 10, |e| {
+        matches!(e, TransferEvent::Failed { .. })
+    })
+    .await;
+    assert!(matches!(
+        f,
+        TransferEvent::Failed {
+            reason: FailReason::Limits,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn manifest_buffer_comes_from_send_budget() {
+    // 40 блоков: ответ 49 + 40 * 32 байт, с запасом 1344 байта = 2 КиБ бюджета
+    let h = hostile_receiver(&[40 << 20], |_| {}).await;
+    h.peer.set_stream_cap(100);
+    let (mut tx, rx) = bind(&h.peer, h.id).await;
+    send_frame(&mut tx, &Message::GetManifest { index: 0 }).await;
+    let total = 128 * 1024;
+    let avail = wait_budget_held(&h.a, total).await;
+    assert_eq!(avail, total - 2);
+    drop((tx, rx));
+}
+
+#[tokio::test]
+async fn bind_total_per_attempt_capped() {
+    let h = hostile_receiver(&[16 << 20], |c| c.max_data_streams = 2).await;
+    let mut accepted = 0;
+    for b in 0..12u32 {
+        let (mut tx, mut rx) = bind(&h.peer, h.id).await;
+        send_frame(&mut tx, &Message::GetBlock { index: 0, block: b }).await;
+        if matches!(recv_frame(&mut rx, 5).await, Some(Message::Block { .. })) {
+            accepted += 1;
+        }
+        drop((tx, rx));
+        // дать отправителю закрыть поток: одновременный предел здесь не проверяется
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    // замена потоков не бесконечна: 4 × max_data_streams за попытку
+    assert_eq!(accepted, 8);
+}

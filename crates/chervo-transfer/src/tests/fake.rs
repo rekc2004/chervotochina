@@ -35,6 +35,11 @@ pub enum Resp {
     BlockErr(BlockErrCode),
     /// Закрыть поток.
     Drop,
+    /// Заголовок BLOCK с верной длиной, затем по одному байту раз в `period`; блок не
+    /// дописывается (капающий отправитель: таймер потока не срабатывает).
+    Trickle(Duration),
+    /// Заголовок BLOCK с верной длиной и ни одного байта тела.
+    HeadOnly,
 }
 
 type Responder = Box<dyn FnMut(&Req) -> Resp + Send>;
@@ -42,12 +47,32 @@ type Responder = Box<dyn FnMut(&Req) -> Resp + Send>;
 pub struct FakeFile {
     pub name: String,
     pub data: Vec<u8>,
+    /// Объявленный размер: `data.len()`, либо больше у `huge` (данных нет, только хэши).
+    pub size: u64,
     pub layout: Layout,
     pub leaves: Vec<BlockHash>,
     pub root: FileRoot,
 }
 
 impl FakeFile {
+    /// Файл объявленного размера без данных: список хэшей случайный, но согласован с корнем.
+    /// Годится враждебному отправителю, который не отдаёт тела блоков.
+    pub fn huge(name: &str, size: u64) -> Self {
+        let l = layout(size).unwrap();
+        let leaves: Vec<BlockHash> = (0..l.block_count)
+            .map(|i| leaf_hash(i, &i.to_be_bytes()))
+            .collect();
+        let root = file_root(size, l, &leaves).unwrap();
+        Self {
+            name: name.to_owned(),
+            data: Vec::new(),
+            size,
+            layout: l,
+            leaves,
+            root,
+        }
+    }
+
     pub fn new(name: &str, data: Vec<u8>) -> Self {
         let size = data.len() as u64;
         let l = layout(size).unwrap();
@@ -62,15 +87,19 @@ impl FakeFile {
         Self {
             name: name.to_owned(),
             data,
+            size,
             layout: l,
             leaves,
             root,
         }
     }
 
+    /// Тело блока; у файла без данных пусто.
     pub fn block(&self, b: u32) -> Vec<u8> {
-        let size = self.data.len() as u64;
-        let len = block_len(size, self.layout, b).unwrap() as usize;
+        if self.data.is_empty() {
+            return Vec::new();
+        }
+        let len = block_len(self.size, self.layout, b).unwrap() as usize;
         let off = b as usize * self.layout.block_size as usize;
         self.data[off..off + len].to_vec()
     }
@@ -114,7 +143,7 @@ impl Fake {
     }
 
     pub fn total(&self) -> u64 {
-        self.files.iter().map(|f| f.data.len() as u64).sum()
+        self.files.iter().map(|f| f.size).sum()
     }
 
     /// Открывает поток управления и шлёт предложение. Возвращает потоки.
@@ -125,7 +154,7 @@ impl Fake {
             .iter()
             .map(|f| OfferedFile {
                 name: UntrustedName::new(&f.name).unwrap(),
-                size: f.data.len() as u64,
+                size: f.size,
             })
             .collect();
         let bytes: u32 = list.iter().map(|f| 10 + f.name.len() as u32).sum();
@@ -140,7 +169,21 @@ impl Fake {
             },
         )
         .await;
-        send_frame(&mut tx, &Message::OfferFiles(list)).await;
+        // записи пачками, которые влезают в кадр целиком
+        let mut batch: Vec<OfferedFile> = Vec::new();
+        let mut used = 3usize;
+        for f in list {
+            let need = 10 + f.name.len();
+            if !batch.is_empty() && used + need > crate::MAX_MESSAGE_LEN {
+                send_frame(&mut tx, &Message::OfferFiles(std::mem::take(&mut batch))).await;
+                used = 3;
+            }
+            used += need;
+            batch.push(f);
+        }
+        if !batch.is_empty() {
+            send_frame(&mut tx, &Message::OfferFiles(batch)).await;
+        }
         (tx, rx)
     }
 
@@ -296,10 +339,22 @@ async fn serve_stream(
                     return;
                 };
                 let mut data = f.block(block);
-                let len = data.len() as u32;
+                let len = block_len(f.size, f.layout, block).unwrap_or(0);
                 match r {
                     Resp::Silent => {}
                     Resp::Drop => return,
+                    Resp::HeadOnly => {
+                        send_frame(&mut tx, &Message::Block { index, block, len }).await;
+                    }
+                    Resp::Trickle(period) => {
+                        send_frame(&mut tx, &Message::Block { index, block, len }).await;
+                        loop {
+                            tokio::time::sleep(period).await;
+                            if tx.write_all(&[0u8]).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
                     Resp::BlockErr(code) => {
                         send_frame(&mut tx, &Message::BlockErr { index, block, code }).await;
                     }

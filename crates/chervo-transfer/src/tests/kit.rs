@@ -87,6 +87,23 @@ impl ListKeyStore for MemStore {
     }
 }
 
+/// Тесты с остановленными часами чувствительны к задержкам потоков в реальном времени; тест,
+/// который сильно грузит диск и процессор (10 000 файлов), идёт отдельно от них: они берут
+/// общий доступ, он исключительный.
+static TIMING: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+pub fn timing_shared() -> std::sync::RwLockReadGuard<'static, ()> {
+    TIMING
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+pub fn timing_exclusive() -> std::sync::RwLockWriteGuard<'static, ()> {
+    TIMING
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 static DIR_SEQ: AtomicUsize = AtomicUsize::new(0);
 
 /// Каталог в temp, удаляется целиком при уничтожении (только каталоги самих тестов).
@@ -158,33 +175,87 @@ impl RouteProbe for FakeProbe {
 
 // --------------------------------------------------------------------- потоки
 
-pub struct FakeTx(Option<mpsc::UnboundedSender<Vec<u8>>>);
+/// Учёт непрочитанных читателем байт потока (окно управления потоком). Без предела запись
+/// никогда не ждёт; с пределом запись ждёт, пока читатель не прочтёт (как окно QUIC).
+pub struct Flow {
+    used: AtomicUsize,
+    cap: usize,
+    /// Порция записи: не больше предела окна, чтобы маленькое окно всё же блокировало запись.
+    piece: usize,
+    closed: std::sync::atomic::AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+/// Размер порции записи при заданном пределе окна.
+const PIECE: usize = 4096;
+
+pub struct FakeTx(Option<mpsc::UnboundedSender<Vec<u8>>>, Arc<Flow>);
 
 pub struct FakeRx {
     rx: mpsc::UnboundedReceiver<Vec<u8>>,
     cur: Vec<u8>,
     pos: usize,
+    flow: Arc<Flow>,
 }
 
-fn chan() -> (FakeTx, FakeRx) {
+impl Drop for FakeRx {
+    fn drop(&mut self) {
+        self.flow.closed.store(true, Ordering::SeqCst);
+        self.flow.notify.notify_waiters();
+    }
+}
+
+fn chan(cap: usize) -> (FakeTx, FakeRx) {
     let (tx, rx) = mpsc::unbounded_channel();
+    let flow = Arc::new(Flow {
+        used: AtomicUsize::new(0),
+        cap,
+        piece: cap.clamp(1, PIECE),
+        closed: std::sync::atomic::AtomicBool::new(false),
+        notify: tokio::sync::Notify::new(),
+    });
     (
-        FakeTx(Some(tx)),
+        FakeTx(Some(tx), flow.clone()),
         FakeRx {
             rx,
             cur: Vec::new(),
             pos: 0,
+            flow,
         },
     )
 }
 
 impl SendStream for FakeTx {
     fn write_all(&mut self, buf: &[u8]) -> impl Future<Output = Result<(), TransportError>> + Send {
-        let r = match &self.0 {
-            Some(tx) => tx.send(buf.to_vec()).map_err(|_| TransportError::Closed),
-            None => Err(TransportError::Closed),
-        };
-        std::future::ready(r)
+        let tx = self.0.clone();
+        let flow = self.1.clone();
+        let data = buf.to_vec();
+        async move {
+            let Some(tx) = tx else {
+                return Err(TransportError::Closed);
+            };
+            if flow.cap == usize::MAX {
+                return tx.send(data).map_err(|_| TransportError::Closed);
+            }
+            for piece in data.chunks(flow.piece) {
+                loop {
+                    let n = flow.notify.notified();
+                    tokio::pin!(n);
+                    n.as_mut().enable();
+                    if flow.closed.load(Ordering::SeqCst) {
+                        return Err(TransportError::Closed);
+                    }
+                    if flow.used.load(Ordering::SeqCst) < flow.cap {
+                        break;
+                    }
+                    n.await;
+                }
+                flow.used.fetch_add(piece.len(), Ordering::SeqCst);
+                tx.send(piece.to_vec())
+                    .map_err(|_| TransportError::Closed)?;
+            }
+            Ok(())
+        }
     }
 
     fn finish(&mut self) -> Result<(), TransportError> {
@@ -212,6 +283,10 @@ impl RecvStream for FakeRx {
             let n = (self.cur.len() - self.pos).min(buf.len());
             buf[..n].copy_from_slice(&self.cur[self.pos..self.pos + n]);
             self.pos += n;
+            if self.flow.cap != usize::MAX {
+                self.flow.used.fetch_sub(n, Ordering::SeqCst);
+                self.flow.notify.notify_waiters();
+            }
             Ok(Some(n))
         }
     }
@@ -236,6 +311,8 @@ pub struct ConnInner {
     outbox: mpsc::UnboundedSender<StreamPair>,
     inbox: tokio::sync::Mutex<mpsc::UnboundedReceiver<StreamPair>>,
     peer: Mutex<Option<FakeConn>>,
+    /// Окно непрочитанных байт для потоков, открытых этим концом (`usize::MAX`: без предела).
+    cap: AtomicUsize,
 }
 
 #[derive(Clone)]
@@ -274,6 +351,7 @@ impl FakeConn {
                 outbox,
                 inbox: tokio::sync::Mutex::new(inbox),
                 peer: Mutex::new(None),
+                cap: AtomicUsize::new(usize::MAX),
             }))
         };
         let a = mk(pair_a, remote_a, b_tx, a_rx, ids.map(|i| i.0));
@@ -301,6 +379,11 @@ impl FakeConn {
     pub fn is_closed(&self) -> bool {
         *self.0.closed.borrow()
     }
+
+    /// Для потоков, которые этот конец откроет дальше: окно непрочитанных байт в обе стороны.
+    pub fn set_stream_cap(&self, bytes: usize) {
+        self.0.cap.store(bytes, Ordering::SeqCst);
+    }
 }
 
 impl Connection for FakeConn {
@@ -321,8 +404,9 @@ impl Connection for FakeConn {
             if *this.closed.borrow() {
                 return Err(TransportError::Closed);
             }
-            let (a_tx, b_rx) = chan();
-            let (b_tx, a_rx) = chan();
+            let cap = this.cap.load(Ordering::SeqCst);
+            let (a_tx, b_rx) = chan(cap);
+            let (b_tx, a_rx) = chan(cap);
             this.outbox
                 .send((b_tx, b_rx))
                 .map_err(|_| TransportError::Closed)?;
@@ -512,6 +596,10 @@ pub struct Node {
 
 impl Node {
     pub fn start(pre: Pre) -> Node {
+        Self::start_cfg(pre, ConnectConfig::default())
+    }
+
+    pub fn start_cfg(pre: Pre, cfg: ConnectConfig) -> Node {
         let t = FakeTransport::new();
         let c: Arc<dyn Clock> = Arc::new(TestClock);
         let p: Arc<dyn RouteProbe> = FakeProbe::new();
@@ -522,7 +610,7 @@ impl Node {
             pre.store.clone(),
             c,
             p,
-            ConnectConfig::default(),
+            cfg,
         )
         .unwrap();
         Node {
@@ -546,6 +634,9 @@ pub enum Ev {
     FinalVerify(u32),
     BeforePlace(u32),
     HashBlock(u32, u32),
+    /// Длина записываемого файла имён.
+    NamesWrite(usize),
+    RemovePart(u32),
 }
 
 type Handler = Box<dyn FnMut(&Ev) -> io::Result<()> + Send>;
@@ -589,6 +680,8 @@ impl Hook for TestHook {
             HookPoint::FinalVerify { file } => Ev::FinalVerify(file),
             HookPoint::BeforePlace { file } => Ev::BeforePlace(file),
             HookPoint::HashBlock { file, block } => Ev::HashBlock(file, block),
+            HookPoint::NamesWrite { bytes } => Ev::NamesWrite(bytes.len()),
+            HookPoint::RemovePart { file } => Ev::RemovePart(file),
         };
         self.log.lock().unwrap().push(ev.clone());
         match self.handler.lock().unwrap().as_mut() {

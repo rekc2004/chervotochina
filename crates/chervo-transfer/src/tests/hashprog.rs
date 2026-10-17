@@ -22,7 +22,10 @@ const MIB: u64 = 1 << 20;
 
 /// Страховка от зависания при остановленном времени: по истечении реального срока процесс
 /// завершается (иначе упавший тест ждал бы вечно).
-struct Failsafe(std::sync::mpsc::Sender<()>);
+struct Failsafe(
+    std::sync::mpsc::Sender<()>,
+    std::sync::RwLockReadGuard<'static, ()>,
+);
 
 fn failsafe(secs: u64) -> Failsafe {
     let (tx, rx) = std::sync::mpsc::channel::<()>();
@@ -33,7 +36,7 @@ fn failsafe(secs: u64) -> Failsafe {
             std::process::exit(101);
         }
     });
-    Failsafe(tx)
+    Failsafe(tx, timing_shared())
 }
 
 /// Ждёт условие, отдавая ход задачам и реальное время потокам (до 30 с реального времени).

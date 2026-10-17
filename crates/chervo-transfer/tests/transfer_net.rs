@@ -726,7 +726,7 @@ fn assert_dest_only_complete(dest: &TestDir, kb: &TransferKey, srcs: &[SourceFil
 }
 
 fn is_ours_file(n: &str) -> bool {
-    if n == "state" || n == "state.tmp" {
+    if matches!(n, "state" | "state.tmp" | "names" | "names.tmp") {
         return true;
     }
     let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());

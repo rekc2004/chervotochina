@@ -1,21 +1,18 @@
 use chervo_identity::PairId;
 
 use crate::hash::sha256;
-use crate::state::{FileStatus, Progress, RecvState, StateFile};
+use crate::state::{FileStatus, Progress, RecvState, StateFile, decode_names, encode_names};
 use crate::{
-    BlockHash, FileRoot, Layout, MAX_STATE_LEN, StateError, TransferId, UntrustedName,
-    decode_state, encode_hashes, encode_state, file_root, layout, leaf_hash, parse_hashes,
-    state_dir_name,
+    BlockHash, FileRoot, Layout, MAX_NAMES_LEN, MAX_STATE_LEN, StateError, TransferId,
+    UntrustedName, decode_state, encode_hashes, encode_state, file_root, layout, leaf_hash,
+    parse_hashes, state_dir_name,
 };
 
 const MIB: u64 = 1 << 20;
 
-fn file(name: &str, size: u64, status: FileStatus) -> StateFile {
-    StateFile {
-        name: UntrustedName::new(name).unwrap(),
-        size,
-        status,
-    }
+/// Имя файла в состоянии больше не хранится (оно в файле имён); параметр для читаемости.
+fn file(_name: &str, size: u64, status: FileStatus) -> StateFile {
+    StateFile { size, status }
 }
 
 fn progress(size: u64, bitmap: Vec<u8>) -> FileStatus {
@@ -35,6 +32,7 @@ fn sample() -> RecvState {
         created_unix: 1_700_000_000,
         last_progress_unix: 1_700_000_500,
         total_size: sizes.iter().sum(),
+        names_sum: [3; 32],
         files: vec![
             file(
                 "a/in progress.bin",
@@ -171,6 +169,7 @@ fn state_inprogress_cap() {
             created_unix: 1,
             last_progress_unix: 2,
             total_size: n as u64,
+            names_sum: [3; 32],
             files,
         }
     };
@@ -223,18 +222,96 @@ fn state_nothing_trusted() {
         bad(&|s| s.total_size = (1 << 44) + 1),
         Some(StateError::Malformed)
     );
-    // Неизвестный статус и NUL в имени (правка байтов с пересчётом суммы).
-    let b = encode_state(&base);
-    let pos = b
-        .windows(7)
-        .position(|w| w == b"waiting")
-        .expect("имя в файле");
+    // Неизвестный статус (правка байта с пересчётом суммы). Заголовок 100 байт, затем размер
+    // файла (8) и статус.
+    let mut one = base.clone();
+    one.files = vec![file("w", 10, FileStatus::Waiting)];
+    one.total_size = 10;
+    let b = encode_state(&one);
+    assert_eq!(b[108], 0);
     let mut x = b.clone();
-    x[pos + 7] = 9;
+    x[108] = 9;
     assert_eq!(decode_state(&reseal(x)).err(), Some(StateError::Malformed));
+}
+
+/// Состояние хранит только компактные статусы: его размер не зависит от длины имён.
+#[test]
+fn state_size_independent_of_names() {
+    let n = 10_000usize;
+    let files: Vec<_> = (0..n).map(|_| file("", 0, FileStatus::Waiting)).collect();
+    let s = RecvState {
+        pair: PairId::from_bytes([1; 16]),
+        id: TransferId([2; 16]),
+        created_unix: 1,
+        last_progress_unix: 2,
+        total_size: 0,
+        names_sum: [3; 32],
+        files,
+    };
+    let b = encode_state(&s);
+    // 100 байт заголовка + 9 на файл + 32 трейлер
+    assert_eq!(b.len(), 100 + 9 * n + 32);
+    assert!(decode_state(&b).is_ok());
+}
+
+fn names(n: usize, len: usize) -> Vec<UntrustedName> {
+    (0..n)
+        .map(|i| {
+            let mut s = format!("{i}-");
+            while s.len() < len {
+                s.push('x');
+            }
+            UntrustedName::new(&s).unwrap()
+        })
+        .collect()
+}
+
+#[test]
+fn names_roundtrip_and_binding() {
+    let pair = PairId::from_bytes([1; 16]);
+    let id = TransferId([2; 16]);
+    let list = names(5, 40);
+    let (b, sum) = encode_names(&pair, &id, &list);
+    let nf = decode_names(&b).unwrap();
+    assert!(nf.pair == pair && nf.id == id && nf.sum == sum);
+    assert!(nf.names == list);
+    assert_eq!(&b[b.len() - 32..], &sum);
+    // любой перевёрнутый бит отвергается
+    for i in 0..b.len() {
+        let mut x = b.clone();
+        x[i] ^= 1;
+        assert!(decode_names(&x).is_err(), "byte {i}");
+    }
+    // усечение и лишний байт
+    for n in 0..b.len() {
+        assert!(decode_names(&b[..n]).is_err(), "prefix {n}");
+    }
     let mut x = b.clone();
-    x[pos] = 0;
-    assert_eq!(decode_state(&reseal(x)).err(), Some(StateError::Malformed));
+    x.push(0);
+    assert!(decode_names(&x).is_err());
+}
+
+#[test]
+fn names_bounds() {
+    let pair = PairId::from_bytes([1; 16]);
+    let id = TransferId([2; 16]);
+    // предел длины проверяется до разбора
+    let big = vec![0u8; MAX_NAMES_LEN as usize + 1];
+    assert_eq!(decode_names(&big).err(), Some(StateError::TooLong));
+    // предложение предельного размера (10 000 имён, ~2 МиБ) укладывается
+    let (b, _) = encode_names(&pair, &id, &names(10_000, 190));
+    assert!((b.len() as u64) <= MAX_NAMES_LEN, "{}", b.len());
+    assert_eq!(decode_names(&b).unwrap().names.len(), 10_000);
+    // больше записей, чем допускает предложение: отвергается
+    let (b, _) = encode_names(&pair, &id, &names(10_001, 1));
+    assert_eq!(decode_names(&b).err(), Some(StateError::Malformed));
+    // нулевое число имён
+    let (b, _) = encode_names(&pair, &id, &[]);
+    assert_eq!(decode_names(&b).err(), Some(StateError::Malformed));
+    // сумма записей больше предела предложения
+    let (b, _) = encode_names(&pair, &id, &names(2_090, 1000));
+    assert!((b.len() as u64) <= MAX_NAMES_LEN);
+    assert_eq!(decode_names(&b).err(), Some(StateError::Malformed));
 }
 
 #[test]

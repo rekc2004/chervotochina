@@ -39,8 +39,14 @@ pub struct TransferConfig {
     pub partial_ttl: Duration,
     pub checkpoint_bytes: u64,
     pub checkpoint_interval: Duration,
+    /// Перечитывать готовый файл с диска перед размещением. `false` допускается только в
+    /// тестах этого крейта (`validate` отвергает его в рабочей сборке).
     pub verify_after_write: bool,
     pub progress_interval: Duration,
+    /// Наименьшая допустимая скорость приёма или отдачи одного блока (байт/с). Срок на блок:
+    /// `stall_timeout + длина / min_block_rate`; таймер потока (`stall_timeout`) сбрасывается
+    /// каждым байтом, этот срок нет.
+    pub min_block_rate: u64,
     /// Получатель: наименьшая средняя скорость хэширования у отправителя (байт/с), которую он
     /// терпит, ожидая HASH_PROGRESS. Ниже: пауза `Stalled`.
     pub min_hash_rate: u64,
@@ -72,6 +78,7 @@ impl TransferConfig {
             checkpoint_interval: Duration::from_secs(2),
             verify_after_write: true,
             progress_interval: Duration::from_millis(250),
+            min_block_rate: 32 << 10,
             min_hash_rate: 8 << 20,
         }
     }
@@ -94,6 +101,9 @@ impl TransferConfig {
             && (1..=8).contains(&self.max_data_streams)
             && self.checkpoint_bytes >= 1
             && self.min_hash_rate >= 1 << 20
+            && self.min_block_rate >= 1024
+            // проверка файла с диска обязательна вне тестов крейта
+            && (self.verify_after_write || cfg!(test))
             && !self.offer_read_timeout.is_zero()
             && !self.msg_timeout.is_zero()
             && !self.offer_ttl.is_zero()

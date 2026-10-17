@@ -8,7 +8,7 @@ use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 use chervo_transport::{Connection, RecvStream, SendStream};
-use tokio::sync::{OwnedSemaphorePermit, TryAcquireError, mpsc};
+use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use crate::codec::{BlockErrCode, CancelReason, FileErrCode, Message, ProtocolError, encode};
@@ -18,7 +18,7 @@ use crate::layout::check_manifest_layout;
 use crate::limits::STREAM_TRANSFER_DATA;
 use crate::receiver::{Attempt, End, RecvSession};
 use crate::sched::{BadBlock, Work};
-use crate::shared::{kib, lock};
+use crate::shared::{Acquired, Permits, acquire_pair, io_deadline, kib, lock};
 use crate::wire_io::{read_exact, read_message};
 use crate::writer::WCmd;
 
@@ -230,7 +230,7 @@ enum Pend {
         file: u32,
         block: u32,
         len: u32,
-        _permit: OwnedSemaphorePermit,
+        _permit: Permits,
     },
 }
 
@@ -324,32 +324,22 @@ async fn fill<T: SendStream>(
             }
             Work::Block { file, block, len } => {
                 let need = kib(len);
-                let permit = match s.sh.recv_budget.clone().try_acquire_many_owned(need) {
-                    Ok(p) => p,
-                    Err(TryAcquireError::NoPermits) => {
-                        if pending.is_empty() {
-                            let got = tokio::select! {
-                                p = s.sh.recv_budget.clone().acquire_many_owned(need) => p.ok(),
-                                () = stop.stopped() => None,
-                            };
-                            match got {
-                                Some(p) => p,
-                                None => {
-                                    lock(&s.core).sched.release_block(file, block);
-                                    return Err(StreamEnd::Stopped);
-                                }
-                            }
-                        } else {
-                            // свои же невычитанные ответы держат бюджет: сначала читать
+                // Память берётся из доли этой передачи и из общего бюджета. Свои же
+                // невычитанные ответы держат память: пока они есть, не ждём, а читаем.
+                let permit =
+                    match acquire_pair(&s.share, &s.sh.recv_budget, need, pending.is_empty(), stop)
+                        .await
+                    {
+                        Acquired::Got(p) => p,
+                        Acquired::Busy => {
                             lock(&s.core).sched.release_block(file, block);
                             return Ok(Fill::NoBudget);
                         }
-                    }
-                    Err(TryAcquireError::Closed) => {
-                        lock(&s.core).sched.release_block(file, block);
-                        return Err(StreamEnd::Stopped);
-                    }
-                };
+                        Acquired::Stopped => {
+                            lock(&s.core).sched.release_block(file, block);
+                            return Err(StreamEnd::Stopped);
+                        }
+                    };
                 pending.push_back(Pend::Block {
                     file,
                     block,
@@ -429,7 +419,12 @@ async fn data_stream<C: Connection>(
                     root,
                 },
             ) if index == file => {
-                handle_manifest(s, att, &mut rx, file, block_size, block_count, root).await
+                let r = handle_manifest(s, att, &mut rx, file, block_size, block_count, root).await;
+                if r.is_err() {
+                    // запрос уже снят с очереди потока: без этого файл остался бы «запрошенным»
+                    lock(&s.core).sched.release_manifest(file);
+                }
+                r
             }
             (Pend::Manifest { file }, Message::BlockErr { index, code, .. }) if index == file => {
                 s.fail_file(file, block_failure(code), None);
@@ -450,9 +445,16 @@ async fn data_stream<C: Connection>(
             ) if index == file && b == block => {
                 if l != len {
                     // длина не равна `block_len`: тело не читается
+                    lock(&s.core).sched.release_block(file, block);
                     Err(StreamEnd::Protocol)
                 } else {
-                    handle_block(s, att, wtx, &mut rx, file, block, len, _permit).await
+                    let r = handle_block(s, att, wtx, &mut rx, file, block, len, _permit).await;
+                    if r.is_err() {
+                        // блок не дочитан (обрыв, срок на блок): он снова свободен, иначе он
+                        // остался бы «в полёте» до конца попытки
+                        lock(&s.core).sched.release_block(file, block);
+                    }
+                    r
                 }
             }
             (
@@ -494,6 +496,21 @@ fn block_failure(code: BlockErrCode) -> FileFailure {
     }
 }
 
+/// Сырые данные ровно в `out`: таймер потока сбрасывается каждым куском, но весь блок
+/// должен прийти за `stall_timeout + длина / min_block_rate`. Узел, капающий по байту, не
+/// держит память бесконечно.
+async fn read_bounded<R: RecvStream>(
+    rx: &mut R,
+    out: &mut [u8],
+    cfg: &crate::config::TransferConfig,
+) -> Result<(), StreamEnd> {
+    let limit = io_deadline(cfg, out.len());
+    match timeout(limit, read_exact(rx, out, cfg.stall_timeout)).await {
+        Ok(r) => r.map_err(map_read),
+        Err(_) => Err(StreamEnd::Stalled),
+    }
+}
+
 async fn handle_manifest<R: RecvStream>(
     s: &Arc<RecvSession>,
     att: &Arc<Attempt>,
@@ -516,9 +533,7 @@ async fn handle_manifest<R: RecvStream>(
         .and_then(|c| c.checked_mul(32))
         .ok_or(StreamEnd::Protocol)?;
     let mut raw = vec![0u8; n];
-    read_exact(rx, &mut raw, s.sh.cfg.stall_timeout)
-        .await
-        .map_err(map_read)?;
+    read_bounded(rx, &mut raw, &s.sh.cfg).await?;
     let (chunks, _) = raw.as_chunks::<32>();
     let leaves: Vec<BlockHash> = chunks.iter().map(|c| BlockHash(*c)).collect();
     // список хэшей обязан воспроизвести корень, который прислал отправитель
@@ -545,13 +560,11 @@ async fn handle_block<R: RecvStream>(
     file: u32,
     block: u32,
     len: u32,
-    permit: OwnedSemaphorePermit,
+    permit: Permits,
 ) -> Result<(), StreamEnd> {
     let n = usize::try_from(len).map_err(|_| StreamEnd::Protocol)?;
     let mut data = vec![0u8; n];
-    read_exact(rx, &mut data, s.sh.cfg.stall_timeout)
-        .await
-        .map_err(map_read)?;
+    read_bounded(rx, &mut data, &s.sh.cfg).await?;
     let job = tokio::task::spawn_blocking(move || {
         let h = leaf_hash(block, &data);
         (data, h)

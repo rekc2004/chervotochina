@@ -98,7 +98,9 @@ async fn no_disk_write_before_accept() {
 }
 
 #[tokio::test(start_paused = true)]
+#[allow(clippy::await_holding_lock)]
 async fn offer_expires_after_ttl() {
+    let _t = timing_shared();
     let mut rig = Rig::with(|_| {}, |c| c.offer_ttl = Duration::from_secs(600)).await;
     let src = TestDir::new();
     let files = vec![write_src(src.path(), "a.bin", &rand_bytes(1, 3000))];

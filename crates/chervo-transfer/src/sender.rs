@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use chervo_connect::{ConnHold, IncomingStream};
 use chervo_transport::{Connection, RecvStream, SendStream};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::time::timeout;
 
 use crate::codec::{
@@ -26,7 +26,10 @@ use crate::links::Links;
 use crate::names::{OfferedFile, TransferKey, UntrustedName};
 use crate::receiver::Finish;
 use crate::rstream::{write_loop, write_msg};
-use crate::shared::{HookPoint, Shared, kib, lock};
+use crate::shared::{
+    Acquired, HookPoint, Shared, acquire_pair, buffer_floor, io_deadline, kib, lock,
+    share_semaphore,
+};
 use crate::util::{Stop, StopWatch, Tracker};
 use crate::wire_io::read_message;
 
@@ -70,9 +73,19 @@ pub(crate) struct SAttempt {
     pub(crate) tracker: Tracker,
     conn_id: u64,
     pub(crate) ctl: mpsc::UnboundedSender<Message>,
+    /// Живые потоки данных попытки.
     streams: AtomicUsize,
+    /// Все принятые BIND попытки (живые и закрытые): предел замены потоков.
+    binds: AtomicUsize,
+    /// Выдач манифеста по файлам за попытку.
+    manifests: Mutex<HashMap<u32, u8>>,
     _hold: Option<ConnHold>,
 }
+
+/// Во сколько раз все принятые BIND попытки могут превысить `max_data_streams`: получатель
+/// заменяет молчащий поток новым, но после `3 × потоков` подряд оборванных ставит передачу на
+/// паузу, то есть честная попытка не открывает больше `4 × потоков` без прогресса.
+const BIND_CHURN_FACTOR: usize = 4;
 
 impl SAttempt {
     fn new(conn_id: u64, hold: Option<ConnHold>) -> (Arc<Self>, mpsc::UnboundedReceiver<Message>) {
@@ -84,6 +97,8 @@ impl SAttempt {
                 conn_id,
                 ctl: tx,
                 streams: AtomicUsize::new(0),
+                binds: AtomicUsize::new(0),
+                manifests: Mutex::new(HashMap::new()),
                 _hold: hold,
             }),
             rx,
@@ -109,6 +124,8 @@ pub(crate) struct SendSession {
     pub(crate) key: TransferKey,
     files: Vec<SrcFile>,
     pub(crate) total: u64,
+    /// Доля этой передачи в бюджете памяти отправки.
+    pub(crate) share: Arc<Semaphore>,
     hashes: Vec<watch::Sender<FileHash>>,
     /// Сколько байт предложения захэшировано (в порядке предложения). Принадлежит сессии, а не
     /// попытке: обрыв соединения хэширование не останавливает.
@@ -142,11 +159,18 @@ impl SendSession {
                 acc
             })
             .collect();
+        let sizes: Vec<u64> = files.iter().map(|f| f.size).collect();
+        let share = share_semaphore(
+            sh.cfg.send_buffer_budget,
+            sh.cfg.max_outbound_active,
+            buffer_floor(&sizes),
+        );
         Arc::new(Self {
             sh,
             key,
             files,
             total,
+            share,
             hashes,
             hashed: AtomicU64::new(0),
             prefix,
@@ -862,6 +886,11 @@ pub(crate) async fn handle_data<L: Links>(inner: Arc<Inner<L>>, st: IncomingStre
     if n >= usize::from(cfg.max_data_streams) {
         return;
     }
+    // сумма за попытку: замена потоков не бесконечна (поверх предела движка на потоки в минуту)
+    let total = att.binds.fetch_add(1, Ordering::SeqCst);
+    if total >= usize::from(cfg.max_data_streams).saturating_mul(BIND_CHURN_FACTOR) {
+        return;
+    }
     serve_stream(&inner, &s, &att, &mut tx, rx, buf).await;
     drop(slot);
     let _ = tx.finish();
@@ -940,9 +969,28 @@ async fn serve_one<L: Links, T: SendStream>(
                 s.protocol_fail(inner, CancelReason::Protocol);
                 return false;
             }
+            // выдач манифеста одного файла за попытку не больше `max_serve_per_block`
+            let over = {
+                let mut m = lock(&att.manifests);
+                let n = m.entry(index).or_insert(0);
+                *n = n.saturating_add(1);
+                *n > cfg.max_serve_per_block
+            };
+            if over {
+                s.protocol_fail(inner, CancelReason::Limits);
+                return false;
+            }
             match wait_hash(s, index, stop).await {
                 Waited::Ready(h) => {
-                    let mut out = Vec::new();
+                    // буфер ответа (до 2 МиБ на запрос в 9 байт) берётся из бюджета отправки
+                    let want = h.leaves.len().saturating_mul(32).saturating_add(64);
+                    let need = kib(u32::try_from(want).unwrap_or(u32::MAX));
+                    let permit =
+                        match acquire_pair(&s.share, &s.sh.send_budget, need, true, stop).await {
+                            Acquired::Got(p) => p,
+                            Acquired::Busy | Acquired::Stopped => return false,
+                        };
+                    let mut out = Vec::with_capacity(want);
                     let m = Message::Manifest {
                         index,
                         block_size: h.layout.block_size,
@@ -955,7 +1003,9 @@ async fn serve_one<L: Links, T: SendStream>(
                     for l in &h.leaves {
                         out.extend_from_slice(&l.0);
                     }
-                    write_chunks(tx, &out, cfg.stall_timeout).await
+                    let ok = write_all_bounded(tx, &out, cfg).await;
+                    drop(permit);
+                    ok
                 }
                 Waited::Failed(why) => {
                     s.report_failure(index, why);
@@ -999,11 +1049,12 @@ async fn serve_one<L: Links, T: SendStream>(
             if let Some(why) = known {
                 return block_err(tx, index, block, why, cfg.msg_timeout).await;
             }
-            let permit = tokio::select! {
-                p = s.sh.send_budget.clone().acquire_many_owned(kib(len)) => p.ok(),
-                () = stop.stopped() => None,
+            // память: доля этой передачи и общий бюджет
+            let permit = match acquire_pair(&s.share, &s.sh.send_budget, kib(len), true, stop).await
+            {
+                Acquired::Got(p) => p,
+                Acquired::Busy | Acquired::Stopped => return false,
             };
-            let Some(permit) = permit else { return false };
             let (path, size) = (file.path.clone(), file.size);
             let h2 = hashes.clone();
             let job = tokio::task::spawn_blocking(move || {
@@ -1049,7 +1100,9 @@ async fn serve_one<L: Links, T: SendStream>(
             if !write_msg_raw(tx, &out, cfg.msg_timeout).await {
                 return false;
             }
-            let ok = write_chunks(tx, &data, cfg.stall_timeout).await;
+            // весь блок за `stall_timeout + длина / min_block_rate`: медленный читатель не
+            // держит память бесконечно
+            let ok = write_all_bounded(tx, &data, cfg).await;
             drop(permit);
             if ok {
                 s.note_progress(u64::from(len));
@@ -1070,6 +1123,19 @@ async fn write_msg_raw<T: SendStream>(
     limit: std::time::Duration,
 ) -> bool {
     matches!(timeout(limit, tx.write_all(bytes)).await, Ok(Ok(())))
+}
+
+/// Запись частями с общим сроком на весь буфер (`io_deadline`).
+async fn write_all_bounded<T: SendStream>(
+    tx: &mut T,
+    data: &[u8],
+    cfg: &crate::config::TransferConfig,
+) -> bool {
+    let limit = io_deadline(cfg, data.len());
+    matches!(
+        timeout(limit, write_chunks(tx, data, cfg.stall_timeout)).await,
+        Ok(true)
+    )
 }
 
 /// Запись частями: таймер сбрасывается при каждой части, медленный канал не режется.

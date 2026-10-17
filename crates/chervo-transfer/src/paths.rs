@@ -7,10 +7,12 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::limits::MAX_STATE_LEN;
+use crate::limits::{MAX_NAMES_LEN, MAX_STATE_LEN};
 
 const STATE: &str = "state";
 const STATE_TMP: &str = "state.tmp";
+const NAMES: &str = "names";
+const NAMES_TMP: &str = "names.tmp";
 
 pub(crate) fn session_dir(base: &Path, name: &str) -> PathBuf {
     base.join(name)
@@ -38,7 +40,7 @@ pub(crate) fn is_session_name(name: &str) -> bool {
 
 /// Имя файла по нашим шаблонам; только такие файлы мы удаляем.
 pub(crate) fn is_ours_file(name: &str) -> bool {
-    if name == STATE || name == STATE_TMP {
+    if name == STATE || name == STATE_TMP || name == NAMES || name == NAMES_TMP {
         return true;
     }
     let digits = |s: &str| !s.is_empty() && s.len() <= 10 && s.bytes().all(|b| b.is_ascii_digit());
@@ -125,6 +127,11 @@ pub(crate) fn write_state(sdir: &Path, bytes: &[u8]) -> io::Result<()> {
     write_atomic(&sdir.join(STATE_TMP), &sdir.join(STATE), bytes)
 }
 
+/// Файл имён предложения: пишется один раз при принятии.
+pub(crate) fn write_names(sdir: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_atomic(&sdir.join(NAMES_TMP), &sdir.join(NAMES), bytes)
+}
+
 pub(crate) fn write_hashes(sdir: &Path, index: u32, bytes: &[u8]) -> io::Result<()> {
     write_atomic(
         &hashes_tmp_path(sdir, index),
@@ -152,23 +159,46 @@ pub(crate) fn read_state(sdir: &Path) -> io::Result<Vec<u8>> {
     read_bounded(&sdir.join(STATE), MAX_STATE_LEN)
 }
 
+pub(crate) fn read_names(sdir: &Path) -> io::Result<Vec<u8>> {
+    read_bounded(&sdir.join(NAMES), MAX_NAMES_LEN)
+}
+
 /// `<i>.hashes` не длиннее `max` (ожидаемая длина считается вызывающим).
 pub(crate) fn read_hashes(sdir: &Path, index: u32, max: u64) -> io::Result<Vec<u8>> {
     read_bounded(&hashes_path(sdir, index), max)
 }
 
-/// `<i>.part` для записи: создаётся при отсутствии, существующий не усекается.
-pub(crate) fn open_part_write(sdir: &Path, index: u32) -> io::Result<File> {
+/// Новый `<i>.part`: `create_new`, существующий файл (в том числе жёсткая ссылка на уже
+/// размещённый) никогда не открывается для записи.
+pub(crate) fn create_part_new(sdir: &Path, index: u32) -> io::Result<File> {
     OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(false)
+        .create_new(true)
         .open(part_path(sdir, index))
 }
 
-/// `<i>.part` без создания (для `sync_all` и `set_len`; запись нужна для FlushFileBuffers).
+/// Существующий `<i>.part` для записи без создания и без усечения.
 pub(crate) fn open_part_existing(sdir: &Path, index: u32) -> io::Result<File> {
     OpenOptions::new().write(true).open(part_path(sdir, index))
+}
+
+/// `<i>.part` существует: есть (его проверили по хэшам) или создан новый пустой.
+pub(crate) fn ensure_part(sdir: &Path, index: u32) -> io::Result<()> {
+    match open_part_existing(sdir, index) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => create_part_new(sdir, index).map(|_| ()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Удаляет `<i>.part`, ошибка удаления это ошибка (кроме «нет такого файла»): продолжать
+/// запись рядом с файлом, который не удалось убрать, нельзя (он мог остаться жёсткой ссылкой
+/// на уже размещённый файл).
+pub(crate) fn remove_part_strict(sdir: &Path, index: u32) -> io::Result<()> {
+    match remove_file_retry(&part_path(sdir, index)) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
 }
 
 /// Путь временного файла для `Placement`.
