@@ -29,7 +29,10 @@ use chervo_friends::{
     AutoAcceptLimits, FriendBook, NewFriend, PendingRole, Permission, TrustConfirmation,
 };
 use chervo_identity::{IdentityError, ListKeyStore, PairId, PairKey, SecretStore};
-use chervo_receive::{DiskSpace, ReceiveConfig, ReceivePlacement, ReceivePolicy, ReceiveRoot};
+use chervo_receive::{
+    AcceptIntoError, ChooseRootError, DiskSpace, ReceiveConfig, ReceivePlacement, ReceivePolicy,
+    ReceiveRoot, SpaceCheck, accept_into, insufficient_space_text,
+};
 use chervo_transfer::{
     AskAlways, CompletedFile, FailReason, OfferedFile, PlaceError, Placed, Placement, SourceFile,
     TransferConfig, TransferEvent, TransferEvents, TransferKey, Transfers,
@@ -251,32 +254,37 @@ struct Rx {
     /// Свободное место «тома» (том 1 ТиБ): настоящее на Windows узнать нельзя, поэтому в
     /// сетевых тестах место подставное и одинаковое на всех ОС.
     free: Arc<AtomicU64>,
+    /// То же для любой другой папки приёма (выбранной для отдельного предложения).
+    free2: Arc<AtomicU64>,
 }
 
 const TEST_VOLUME: u64 = 1 << 40;
 
+type SpaceFn = dyn Fn(&Path) -> Option<DiskSpace> + Send + Sync;
+
 impl Rx {
     fn new(cfg: ReceiveConfig) -> Self {
         let root = ReceiveRoot::open(&cfg).unwrap();
-        let place = Arc::new(ReceivePlacement::new(root.clone(), &cfg));
         let free = Arc::new(AtomicU64::new(TEST_VOLUME));
-        let f2 = free.clone();
-        let policy = Arc::new(ReceivePolicy::with_space_probe(
-            root.clone(),
-            &cfg,
-            Arc::new(move |_| {
-                Some(DiskSpace {
-                    total_bytes: TEST_VOLUME,
-                    available_bytes: f2.load(Ordering::SeqCst),
-                })
-            }),
-        ));
+        let free2 = Arc::new(AtomicU64::new(TEST_VOLUME));
+        let (f1, f2, main) = (free.clone(), free2.clone(), root.root().to_path_buf());
+        let probe: Arc<SpaceFn> = Arc::new(move |p: &Path| {
+            let avail = if p.starts_with(&main) { &f1 } else { &f2 };
+            Some(DiskSpace {
+                total_bytes: TEST_VOLUME,
+                available_bytes: avail.load(Ordering::SeqCst),
+            })
+        });
+        let place =
+            Arc::new(ReceivePlacement::new(root.clone(), &cfg).with_space_probe(probe.clone()));
+        let policy = Arc::new(ReceivePolicy::with_space_probe(root.clone(), &cfg, probe));
         Self {
             root,
             cfg,
             policy,
             place,
             free,
+            free2,
         }
     }
 }
@@ -1064,6 +1072,14 @@ impl Placement for Hold {
     fn forget(&self, key: &TransferKey) {
         self.inner.forget(key);
     }
+
+    fn partial_base(&self, key: &TransferKey) -> Option<PathBuf> {
+        self.inner.partial_base(key)
+    }
+
+    fn extra_partial_dirs(&self) -> Vec<PathBuf> {
+        self.inner.extra_partial_dirs()
+    }
 }
 
 #[tokio::test]
@@ -1226,4 +1242,132 @@ async fn net_receiver_restart_idempotent_placement() {
     drop(tmp);
     drop(xpartial);
     drop(src);
+}
+
+// ------------------------------------- Рев. 5: не хватает места, другая папка приёма
+
+/// Вторая папка приёма рядом с основной (Unix: права 0o700).
+fn open_second_root(d: &Duo) -> ReceiveRoot {
+    let dir = d.tmp.path().join("recv2");
+    fs::create_dir(&dir).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    ReceiveRoot::open(&ReceiveConfig::new(dir)).unwrap()
+}
+
+/// В `.chervo-partial` папки нет каталогов состояния (32 hex): передача убрана.
+async fn assert_partial_clean_of(root: &ReceiveRoot) {
+    for _ in 0..50 {
+        let left = fs::read_dir(root.partial_dir())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().len() == 32)
+            .count();
+        if left == 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("state dirs left in a partial dir");
+}
+
+fn auto_perm() -> Permission {
+    Permission::AutoAccept(AutoAcceptLimits {
+        max_total_bytes: 1,
+        max_files: 1,
+    })
+}
+
+#[tokio::test]
+async fn net_insufficient_space_asks_then_accepts_into_other_folder() {
+    // друг с автоприёмом, файл безопасного типа, но в основной папке не хватает места:
+    // автоприёма нет, вопрос с числами; пользователь выбирает другую папку, файл лежит там
+    let mut d = duo(auto_perm(), |c| c.min_free_percent = 0).await;
+    let data = rand_bytes(5, 200_000);
+    d.rx.free.store(150_000, Ordering::SeqCst);
+    let kx = send(&d, "o", &[("pic.jpg", data.clone())]).await;
+    let ky = wait_offer(&mut d.y).await;
+    let view = d.y.tr.offer(&ky).unwrap();
+    let SpaceCheck::Short(s) = d.rx.policy.space_check(&view) else {
+        panic!("expected a shortfall");
+    };
+    assert_eq!((s.needed, s.available), (200_000, 150_000));
+    assert_eq!(s.root, d.rx.root.root());
+    let text = insufficient_space_text(&s);
+    assert!(
+        text.contains("195,3 КБ") && text.contains("146,4 КБ"),
+        "{text}"
+    );
+    assert!(text.contains("другую папку"), "{text}");
+
+    let root2 = open_second_root(&d);
+    accept_into(&d.y.tr, &d.rx.place, &ky, root2.clone()).unwrap();
+    finish(&mut d.x, &kx, &d.px, &mut d.y, &ky, &d.py, 120, false).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // файл в выбранной папке, основная не тронута, временные данные убраны с обоих томов
+    assert_eq!(tree(root2.root()), vec!["pic.jpg".to_owned()]);
+    let p = root2.root().join("pic.jpg");
+    assert!(fs::canonicalize(&p).unwrap().starts_with(root2.root()));
+    assert_content(&p, &data);
+    assert_marks(&p);
+    assert!(tree(d.rx.root.root()).is_empty(), "main root untouched");
+    assert_partial_clean(&d).await;
+    assert_partial_clean_of(&root2).await;
+    assert!(fs::read_dir(&d.outside).unwrap().next().is_none());
+}
+
+#[tokio::test]
+async fn net_other_folder_rechecks_space_and_offer_stays_pending() {
+    let mut d = duo(auto_perm(), |c| c.min_free_percent = 0).await;
+    let data = rand_bytes(6, 200_000);
+    d.rx.free.store(150_000, Ordering::SeqCst);
+    d.rx.free2.store(100_000, Ordering::SeqCst);
+    let kx = send(&d, "o", &[("clip.mp4", data.clone())]).await;
+    let ky = wait_offer(&mut d.y).await;
+    let root2 = open_second_root(&d);
+
+    // на новой папке тоже мало: отказ с числами для новой папки, предложение ждёт ответа
+    match accept_into(&d.y.tr, &d.rx.place, &ky, root2.clone()) {
+        Err(AcceptIntoError::Root(ChooseRootError::Insufficient(s))) => {
+            assert_eq!((s.needed, s.available), (200_000, 100_000));
+            assert_eq!(s.root, root2.root());
+        }
+        other => panic!("expected Insufficient, got {other:?}"),
+    }
+    assert!(d.y.tr.offer(&ky).is_some(), "the offer is still waiting");
+    assert!(tree(root2.root()).is_empty());
+
+    // места прибавилось: тот же вызов проходит, передача идёт в новую папку
+    d.rx.free2.store(10_000_000, Ordering::SeqCst);
+    accept_into(&d.y.tr, &d.rx.place, &ky, root2.clone()).unwrap();
+    finish(&mut d.x, &kx, &d.px, &mut d.y, &ky, &d.py, 120, false).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(tree(root2.root()), vec!["clip.mp4".to_owned()]);
+    assert_content(&root2.root().join("clip.mp4"), &data);
+    assert!(tree(d.rx.root.root()).is_empty());
+    assert_partial_clean(&d).await;
+    assert_partial_clean_of(&root2).await;
+
+    // вторая передача: основная папка снова годится и принимает как обычно (выбор не «прилип»)
+    d.rx.free.store(TEST_VOLUME, Ordering::SeqCst);
+    round_auto(&mut d, "again", &[("b.jpg", rand_bytes(7, 3000))]).await;
+    assert!(tree(d.rx.root.root()).contains(&"b.jpg".to_owned()));
+}
+
+#[tokio::test]
+async fn net_accept_into_unknown_offer_is_an_error() {
+    let d = duo(Permission::Ask, |_| {}).await;
+    let root2 = open_second_root(&d);
+    let ghost = TransferKey {
+        pair: d.py,
+        id: chervo_transfer::TransferId([9; 16]),
+    };
+    assert_eq!(
+        accept_into(&d.y.tr, &d.rx.place, &ghost, root2).err(),
+        Some(AcceptIntoError::NoSuchOffer)
+    );
 }

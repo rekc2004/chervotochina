@@ -15,6 +15,7 @@
     clippy::todo
 )]
 
+mod accept;
 mod classify;
 mod journal;
 mod limits;
@@ -28,23 +29,24 @@ mod space;
 mod texts;
 mod trust;
 
+pub use accept::{AcceptIntoError, accept_into};
 pub use classify::{FileClass, TypeInfo, classify, is_known_inert};
 pub use limits::{PathError, ReceiveLimits};
 pub use name::{
     NameFlags, SafeRelPath, fold, is_portable_component, portable_component, sanitize_path,
     sanitize_relative_path,
 };
-pub use place::ReceivePlacement;
 #[doc(hidden)]
 pub use place::TestPoint;
+pub use place::{ChooseRootError, ReceivePlacement};
 pub use plan::{OfferPlan, PlannedFile, plan_offer, plan_offer_for_root, plan_offer_in};
-pub use policy::ReceivePolicy;
+pub use policy::{ReceiveDecision, ReceivePolicy};
 pub use root::{ReceiveConfig, ReceiveRoot, RootError};
-pub use space::{DiskSpace, disk_space};
+pub use space::{DiskSpace, SpaceCheck, SpaceShortfall, disk_space};
 pub use texts::{
-    ACTIVE_DOC_TEXT, ASK_FILE_TEXT, DECEPTIVE_TEXT, DISK_IMAGE_TEXT, EXECUTABLE_TEXT,
-    HOSTILE_DECLINED_TEXT, LONG_PATH_TEXT, NAME_CHANGED_TEXT, SHARED_ROOT_TEXT,
-    SUSPICIOUS_NAME_TEXT, TRUST_QUESTION_TEXT,
+    ACTIVE_DOC_TEXT, ASK_FILE_TEXT, CHOOSE_OTHER_FOLDER_TEXT, DECEPTIVE_TEXT, DISK_IMAGE_TEXT,
+    EXECUTABLE_TEXT, HOSTILE_DECLINED_TEXT, LONG_PATH_TEXT, NAME_CHANGED_TEXT, SHARED_ROOT_TEXT,
+    SUSPICIOUS_NAME_TEXT, TRUST_QUESTION_TEXT, insufficient_space_text,
 };
 pub use trust::{
     TrustConfirmation, auto_accept_permission, disable_auto_accept, enable_auto_accept,

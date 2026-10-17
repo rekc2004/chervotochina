@@ -266,24 +266,51 @@ const DECOYS: &[&str] = &[
     "zip",
 ];
 
+/// Суффиксы, которые только сжимают один файл и не являются контейнером (Рев. 5, решение
+/// владельца 2026-10-18): `x.iso.gz` это образ диска, а не «архив». Сравниваются после `fold`
+/// (`.Z` даёт `z`). Контейнеры (zip 7z rar tar tgz) сюда НЕ входят: они остаются обычными
+/// файлами (решение владельца 2026-10-17).
+const COMPRESSION_ONLY: &[&str] = &["gz", "xz", "bz2", "zst", "lz", "lz4", "z"];
+
+/// Имя без внешних суффиксов сжатия, если под ними есть собственное расширение:
+/// `x.iso.gz` даёт `x.iso`, `x.exe.xz` даёт `x.exe`, `a.tar.gz` даёт `a.tar`, `x.img.zst.gz`
+/// даёт `x.img`. Без внутреннего расширения (`x.gz`) имя остаётся как есть. Каждый шаг
+/// укорачивает имя, поэтому цикл конечен.
+fn effective_name(last: &str) -> &str {
+    let mut cur = last;
+    loop {
+        let (stem, ext) = split_ext(cur);
+        let Some(e) = ext.strip_prefix('.') else {
+            return cur;
+        };
+        if !COMPRESSION_ONLY.contains(&fold(e).as_str()) || split_ext(stem).1.is_empty() {
+            return cur;
+        }
+        cur = stem;
+    }
+}
+
 /// Расширение после `fold` (Рев. 3, F3): `ſ` даёт `s`, `ı` даёт `i`, знак Кельвина `k`; так
-/// `x.vbſ` попадает в тот же класс, что `x.vbs`. `None`, если расширения нет.
+/// `x.vbſ` попадает в тот же класс, что `x.vbs`. У сжатого одиночного файла берётся внутреннее
+/// расширение (Рев. 5). `None`, если расширения нет.
 fn folded_ext(comp: &str) -> Option<String> {
-    let (_, ext) = split_ext(comp);
+    let (_, ext) = split_ext(effective_name(comp));
     Some(fold(ext.strip_prefix('.')?))
 }
 
 /// Есть ли у последнего компонента расширение с не-ASCII символом (после `fold` оно может
-/// совпасть с расширением программы, оболочка ОС этого может не показывать).
+/// совпасть с расширением программы, оболочка ОС этого может не показывать). У сжатого
+/// одиночного файла проверяется и внутреннее расширение.
 pub(crate) fn has_non_ascii_ext(p: &SafeRelPath) -> bool {
     p.components().last().is_some_and(|last| {
-        let (_, ext) = split_ext(last);
-        !ext.is_ascii()
+        !split_ext(last).1.is_ascii() || !split_ext(effective_name(last)).1.is_ascii()
     })
 }
 
 /// Файл заведомо безопасного типа (решения владельца 2026-10-18): класс обычный, расширение
-/// ASCII и входит в список `KNOWN_INERT`. Только такие файлы принимаются без вопроса.
+/// ASCII и входит в список `KNOWN_INERT`. Только такие файлы принимаются без вопроса. Сжатый
+/// одиночный файл (`x.jpg.gz`) оценивается по внутреннему расширению (Рев. 5): внутри
+/// неизвестный тип (`x.foo.gz`) это вопрос.
 pub fn is_known_inert(p: &SafeRelPath) -> bool {
     if classify(p).class != FileClass::Ordinary {
         return false;
@@ -291,7 +318,7 @@ pub fn is_known_inert(p: &SafeRelPath) -> bool {
     let Some(last) = p.components().last() else {
         return false;
     };
-    let (_, ext) = split_ext(last);
+    let (_, ext) = split_ext(effective_name(last));
     if !ext.is_ascii() {
         return false;
     }
@@ -320,7 +347,7 @@ pub fn classify(p: &SafeRelPath) -> TypeInfo {
     };
     TypeInfo {
         class,
-        deceptive: class == FileClass::Executable && has_decoy(last),
+        deceptive: class == FileClass::Executable && has_decoy(effective_name(last)),
     }
 }
 

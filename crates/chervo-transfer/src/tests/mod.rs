@@ -19,6 +19,7 @@ mod integrity;
 mod kit;
 mod liveness;
 mod place;
+mod reserve;
 mod resume;
 mod round2;
 mod src_guard;

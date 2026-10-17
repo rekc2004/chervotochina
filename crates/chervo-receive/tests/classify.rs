@@ -307,3 +307,122 @@ fn known_inert_allowlist() {
         assert!(!inert(n), "{n}");
     }
 }
+
+#[test]
+fn compressed_single_files_classified_by_inner_extension() {
+    use FileClass::*;
+    // сжатие без контейнера: класс по внутреннему расширению (Рев. 5, решение владельца)
+    for (n, class) in [
+        ("x.iso.gz", DiskImage),
+        ("X.ISO.GZ", DiskImage),
+        ("x.exe.xz", Executable),
+        ("x.img.zst", DiskImage),
+        ("x.vhdx.bz2", DiskImage),
+        ("x.dmg.lz", DiskImage),
+        ("x.msi.lz4", Executable),
+        ("x.exe.Z", Executable),
+        ("run.ps1.gz", Executable),
+        ("My.sh.xz", Executable),
+        ("report.docm.zst", ActiveDocument),
+        ("page.html.gz", ActiveDocument),
+        // вложенное сжатие снимается целиком
+        ("x.iso.gz.xz", DiskImage),
+        ("x.exe.bz2.gz", Executable),
+        // внутри обычное или неизвестное
+        ("photo.jpg.gz", Ordinary),
+        ("a.tar.gz", Ordinary),
+        ("a.zip.gz", Ordinary),
+        ("x.foo.gz", Ordinary),
+        // без внутреннего расширения имя остаётся как есть
+        ("x.gz", Ordinary),
+        ("x.lz", Ordinary),
+        ("x.Z", Ordinary),
+        // контейнеры остаются обычными файлами (решение владельца 2026-10-17): внутрь не смотрим
+        ("x.iso.zip", Ordinary),
+        ("x.exe.7z", Ordinary),
+        ("x.exe.rar", Ordinary),
+        ("x.exe.tar", Ordinary),
+        ("x.iso.tgz", Ordinary),
+        ("x.iso.tar.gz", Ordinary),
+    ] {
+        is(n, class, false);
+    }
+    // приманка считается по имени без сжатия
+    is("photo.jpg.exe.gz", Executable, true);
+    is("photo.jpg.exe.xz", Executable, true);
+    is("x.exe.gz", Executable, false);
+}
+
+#[test]
+fn compressed_single_files_known_inert_only_with_inert_inner() {
+    use chervo_receive::is_known_inert;
+    let inert = |n: &str| {
+        let (p, _) = sanitize_path(n, &ReceiveLimits::default()).expect("sanitizable");
+        is_known_inert(&p)
+    };
+    for n in [
+        "photo.jpg.gz",
+        "clip.mp4.xz",
+        "doc.pdf.zst",
+        "note.txt.bz2",
+        "pic.png.lz4",
+        "song.mp3.lz",
+        "scan.tif.Z",
+        "photo.jpg.gz.xz",
+        // контейнер внутри тоже обычный файл
+        "a.tar.gz",
+        "a.zip.gz",
+        "a.tar.zst",
+        // сам по себе известный суффикс сжатия (как до Рев. 5)
+        "x.gz",
+        "x.xz",
+        "x.zst",
+        "x.bz2",
+    ] {
+        assert!(inert(n), "{n}");
+    }
+    for n in [
+        // программы и образы внутри
+        "x.iso.gz",
+        "x.exe.xz",
+        "x.img.zst",
+        "x.msi.lz4",
+        "x.bin.gz",
+        "x.docm.gz",
+        // неизвестный внутри: вопрос
+        "x.foo.gz",
+        "x.dat.xz",
+        "backup.2024.gz",
+        "table.csv.gz",
+        "data.json.zst",
+        "model.pt.gz",
+        // суффиксы сжатия не из списка безопасных и без внутреннего расширения: вопрос
+        "x.lz",
+        "x.lz4",
+        "x.Z",
+        // не-ASCII во внутреннем расширении
+        "photo.jp\u{435}g.gz",
+        "a.\u{435}\u{445}\u{435}.gz",
+        // приманка
+        "photo.jpg.exe.gz",
+    ] {
+        assert!(!inert(n), "{n}");
+    }
+}
+
+#[test]
+fn compressed_single_files_auto_ok_and_flags() {
+    assert!(auto_ok(&["photo.jpg.gz", "clip.mp4.xz", "a.tar.gz"]));
+    for n in ["x.iso.gz", "x.exe.xz", "x.img.zst", "x.foo.gz", "x.dat.zst"] {
+        assert!(!auto_ok(&[n]), "{n}");
+        assert!(!auto_ok(&["clean.txt", n]), "{n} mixed");
+    }
+    // не-ASCII во внутреннем расширении это подозрительное имя
+    let p = plan_offer(
+        &offer(&["a.\u{435}\u{445}\u{435}.gz"]),
+        &ReceiveLimits::default(),
+    )
+    .expect("plan");
+    assert!(p.files.iter().all(|f| f.flags.suspicious));
+    assert!(!p.auto_ok());
+}

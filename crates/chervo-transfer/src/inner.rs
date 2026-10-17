@@ -11,7 +11,7 @@ use tokio::time::Instant;
 use crate::events::PauseReason;
 use crate::links::Links;
 use crate::names::TransferKey;
-use crate::policy::AcceptPolicy;
+use crate::policy::{AcceptPolicy, InboundReservation, OfferView};
 use crate::receiver::{RPhase, RecvSession};
 use crate::sender::SendSession;
 use crate::shared::{Shared, lock};
@@ -33,6 +33,9 @@ pub(crate) struct Inner<L: Links> {
     pub(crate) conn_gen: watch::Sender<u64>,
     /// Период опроса соединения и прав друзей (5 с).
     pub(crate) poll: Duration,
+    /// Решения о предложениях принимаются по одному: политика видит резерв места всех уже
+    /// принятых передач, а принятое предложение сразу попадает в этот резерв (Рев. 5).
+    pub(crate) decide_lock: Mutex<()>,
 }
 
 impl<L: Links> Inner<L> {
@@ -42,6 +45,23 @@ impl<L: Links> Inner<L> {
 
     pub(crate) fn find_inb(&self, key: &TransferKey) -> Option<Arc<RecvSession>> {
         lock(&self.reg).inb.get(key).cloned()
+    }
+
+    /// Место, которое ещё понадобится всем остальным входящим передачам (кроме `except`).
+    pub(crate) fn inbound_reservations(&self, except: &TransferKey) -> Vec<InboundReservation> {
+        lock(&self.reg)
+            .inb
+            .values()
+            .filter(|s| s.key != *except)
+            .filter_map(|s| s.reservation())
+            .collect()
+    }
+
+    /// Предложение вместе с резервом места остальных передач.
+    pub(crate) fn offer_view_for(&self, s: &Arc<RecvSession>) -> OfferView {
+        let mut v = s.offer_view();
+        v.inbound = self.inbound_reservations(&s.key);
+        v
     }
 
     pub(crate) fn remove_out(&self, key: &TransferKey) {

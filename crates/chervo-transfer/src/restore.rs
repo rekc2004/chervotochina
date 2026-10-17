@@ -36,15 +36,29 @@ fn prior(sdir: &Path, index: u32, size: u64, l: Layout, root: FileRoot, bits: Bi
     }
 }
 
-/// Все годные передачи; негодные и просроченные удаляются (только наши файлы по шаблонам).
+/// Все годные передачи из `partial_dir` и из дополнительных каталогов размещения
+/// (`Placement::extra_partial_dirs`, Рев. 5 этапа 15); негодные и просроченные удаляются
+/// (только наши файлы по шаблонам).
 pub(crate) fn load_all(sh: &Arc<Shared>) -> Vec<Arc<RecvSession>> {
-    let base = &sh.cfg.partial_dir;
+    let mut bases = vec![sh.cfg.partial_dir.clone()];
+    for extra in sh.placement.extra_partial_dirs() {
+        if !bases.contains(&extra) {
+            bases.push(extra);
+        }
+    }
+    let mut out = Vec::new();
+    for base in &bases {
+        load_dir(sh, base, &mut out);
+    }
+    out
+}
+
+fn load_dir(sh: &Arc<Shared>, base: &Path, out: &mut Vec<Arc<RecvSession>>) {
     let Ok(names) = list_session_dirs(base) else {
-        return Vec::new();
+        return;
     };
     let now = now_unix();
     let ttl = sh.cfg.partial_ttl.as_secs();
-    let mut out = Vec::new();
     for name in names {
         let sdir = session_dir(base, &name);
         let decoded = read_state(&sdir)
@@ -115,6 +129,10 @@ pub(crate) fn load_all(sh: &Arc<Shared>) -> Vec<Arc<RecvSession>> {
             pair: st.pair,
             id: st.id,
         };
+        // одна передача в двух каталогах: берётся первая, вторая остаётся нетронутой
+        if out.iter().any(|x| x.key == key) {
+            continue;
+        }
         out.push(RecvSession::restored(
             sh.clone(),
             key,
@@ -125,5 +143,4 @@ pub(crate) fn load_all(sh: &Arc<Shared>) -> Vec<Arc<RecvSession>> {
             st.names_sum,
         ));
     }
-    out
 }

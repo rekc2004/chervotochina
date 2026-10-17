@@ -110,6 +110,7 @@ impl<L: Links> Transfers<L> {
             reg: std::sync::Mutex::new(Registry::default()),
             conn_gen: watch::channel(0u64).0,
             poll,
+            decide_lock: std::sync::Mutex::new(()),
         });
         for s in crate::restore::load_all(&sh) {
             lock(&inner.reg).inb.insert(s.key, s.clone());
@@ -189,7 +190,7 @@ impl<L: Links> Transfers<L> {
     pub fn offer(&self, key: &TransferKey) -> Option<OfferView> {
         let s = self.inner.find_inb(key)?;
         let pending = lock(&s.core).phase == RPhase::Pending;
-        pending.then(|| s.offer_view())
+        pending.then(|| self.inner.offer_view_for(&s))
     }
 
     /// Ответ пользователя на предложение.
@@ -461,8 +462,19 @@ async fn receive_offer<L: Links>(
         write_decision(&mut tx, key.id, Verdict::Busy, cfg.msg_timeout).await;
         return;
     }
-    let view = s.offer_view();
-    let verdict = inner.policy.decide(&key.pair, perm, &view);
+    // Решения по одному (Рев. 5): политика видит резерв места уже принятых передач, а
+    // принятое предложение (ответ взят) сразу входит в этот резерв для следующего решения.
+    let verdict = {
+        let _g = lock(&inner.decide_lock);
+        let view = inner.offer_view_for(&s);
+        let verdict = inner.policy.decide(&key.pair, perm, &view);
+        if verdict == PolicyVerdict::Accept
+            && let Some(a) = s.take_answer()
+        {
+            let _ = a.send(true);
+        }
+        verdict
+    };
     match verdict {
         PolicyVerdict::Decline => {
             inner.remove_inb(&key);
@@ -470,11 +482,7 @@ async fn receive_offer<L: Links>(
             return;
         }
         PolicyVerdict::Ask => s.emit(TransferEvent::OfferReceived { key }),
-        PolicyVerdict::Accept => {
-            if let Some(a) = s.take_answer() {
-                let _ = a.send(true);
-            }
-        }
+        PolicyVerdict::Accept => {}
     }
     pending_task(inner.clone(), s, conn, tx, rx, buf, ans_rx).await;
 }
@@ -582,19 +590,22 @@ async fn accept_flow<L: Links>(
         return;
     }
     let dir = state_dir_name(&key.pair, &key.id);
-    let (base, s2) = (cfg.partial_dir.clone(), s.clone());
+    let s2 = s.clone();
     let g = inner.sh.tracker.guard();
     let made = inner
         .sh
         .rt
         .spawn_blocking(move || {
             let _g = g;
+            // каталог передачи: база от размещения (папка, выбранная для этого предложения)
+            // или `partial_dir` из настроек
+            let base = s2.choose_sdir()?;
             create_session_dir(&base, &dir)?;
             // имена один раз в отдельный неизменяемый файл; состояние хранит только статусы
             s2.write_names_once()?;
             // служебные данные размещения (этап 15); ошибка отменяет передачу как `Limits`
             if s2.ensure_prepared().is_err() {
-                remove_session(&s2.sdir);
+                remove_session(s2.sdir());
                 s2.sh.placement.forget(&s2.key);
                 return Err(std::io::Error::from(std::io::ErrorKind::Other));
             }

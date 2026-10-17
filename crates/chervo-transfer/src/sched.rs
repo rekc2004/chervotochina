@@ -536,6 +536,28 @@ impl Sched {
         }
     }
 
+    /// Сколько байт ещё предстоит получить (для резерва места под приём, Рев. 5 этапа 15).
+    /// Размещённые файлы, записанные блоки и блоки из остатков прошлого запуска (они уже лежат
+    /// на диске) не считаются; неудавшийся файл больше ничего не займёт.
+    pub(crate) fn outstanding_bytes(&self) -> u64 {
+        let mut sum = 0u64;
+        for (i, r) in self.runs.iter().enumerate() {
+            let size = self.sizes.get(i).copied().unwrap_or(0);
+            let have = match r {
+                Run::Placed(_) | Run::Failed => size,
+                Run::Active(a) | Run::Finalizing(a) => a.have_bytes,
+                Run::Waiting(Some(p)) | Run::Requested(Some(p)) => (0..p.layout.block_count)
+                    .filter(|b| p.bits.get(*b))
+                    .fold(0u64, |acc, b| {
+                        acc.saturating_add(u64::from(block_len(size, p.layout, b).unwrap_or(0)))
+                    }),
+                _ => 0,
+            };
+            sum = sum.saturating_add(size.saturating_sub(have));
+        }
+        sum
+    }
+
     /// Сколько байт уже принято (размещённые файлы целиком и записанные блоки).
     pub(crate) fn done_bytes(&self) -> u64 {
         let mut sum = 0u64;

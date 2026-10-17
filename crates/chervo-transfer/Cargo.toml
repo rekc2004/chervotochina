@@ -17,7 +17,7 @@ tokio.workspace = true
 [dev-dependencies]
 chervo-addr.workspace = true
 chervo-transport-quinn.workspace = true
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }
 zeroize.workspace = true
 
 [lints]

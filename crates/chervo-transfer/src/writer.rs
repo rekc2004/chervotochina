@@ -88,7 +88,7 @@ fn write_one(
     if let std::collections::hash_map::Entry::Vacant(e) = files.entry(file) {
         // только существующий `.part`: новый создаёт `prepare` (create_new), писатель его не
         // воссоздаёт
-        match open_part_existing(&s.sdir, file) {
+        match open_part_existing(s.sdir(), file) {
             Ok(f) => {
                 e.insert(f);
             }
@@ -240,7 +240,7 @@ pub(crate) fn finalize_file(s: &Arc<RecvSession>, file: u32) {
     // Файл уже переименован в `.placing` (крах между переименованием и записью `Placed`;
     // `prepare` перепроверил его чтением): `.part` не открывается и не создаётся, длина и
     // содержимое `.placing` не меняются. Он мог уже быть жёсткой ссылкой на размещённый файл.
-    let from_placing = size > 0 && placing_present(&s.sdir, file);
+    let from_placing = size > 0 && placing_present(s.sdir(), file);
     // 1. файл на диске: точная длина и `sync_all`
     let synced = (|| -> io::Result<()> {
         if from_placing {
@@ -250,13 +250,13 @@ pub(crate) fn finalize_file(s: &Arc<RecvSession>, file: u32) {
             // пустой файл: старые `.part` и `.placing` (если остались) убираются строго (оба
             // могли остаться вторым именем размещённого файла), создаётся новый `.part`
             s.sh.hook(HookPoint::RemovePart { file })?;
-            remove_part_strict(&s.sdir, file)?;
-            remove_placing_strict(&s.sdir, file)?;
-            create_part_new(&s.sdir, file)?
+            remove_part_strict(s.sdir(), file)?;
+            remove_placing_strict(s.sdir(), file)?;
+            create_part_new(s.sdir(), file)?
         } else {
-            match open_part_existing(&s.sdir, file) {
+            match open_part_existing(s.sdir(), file) {
                 Ok(f) => f,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => create_part_new(&s.sdir, file)?,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => create_part_new(s.sdir(), file)?,
                 Err(e) => return Err(e),
             }
         };
@@ -282,9 +282,9 @@ pub(crate) fn finalize_file(s: &Arc<RecvSession>, file: u32) {
         s.mark_dirty();
         return;
     }
-    let part = part_path(&s.sdir, file);
+    let part = part_path(s.sdir(), file);
     let checked = if from_placing {
-        placing_path(&s.sdir, file)
+        placing_path(s.sdir(), file)
     } else {
         part.clone()
     };
@@ -295,7 +295,7 @@ pub(crate) fn finalize_file(s: &Arc<RecvSession>, file: u32) {
             Ok(_) if from_placing => {
                 // `.placing` изменился после проверки в `prepare`: в него не пишут, имя
                 // убирается, файл закрывается как повреждённый
-                let _ = remove_placing_strict(&s.sdir, file);
+                let _ = remove_placing_strict(s.sdir(), file);
                 s.fail_file(file, FileFailure::Damaged, Some(FileErrCode::Damaged));
                 return;
             }
@@ -339,7 +339,7 @@ pub(crate) fn finalize_file(s: &Arc<RecvSession>, file: u32) {
     let Some(name) = name else { return };
     // До размещения `.part` атомарно переименовывается в `.placing` (тот же каталог): жёсткая
     // ссылка на размещённый файл никогда не получает имя `.part`, в которое пишет получатель.
-    if !from_placing && let Err(e) = part_to_placing(&s.sdir, file) {
+    if !from_placing && let Err(e) = part_to_placing(s.sdir(), file) {
         abort_finalize(s, file, &e);
         return;
     }
@@ -349,7 +349,7 @@ pub(crate) fn finalize_file(s: &Arc<RecvSession>, file: u32) {
         name,
         size,
         root,
-        temp_for_placement(&s.sdir, file),
+        temp_for_placement(s.sdir(), file),
     );
     // восстановленная с диска передача: служебные данные размещения готовятся лениво, до
     // первого `place` в этом процессе; ошибка считается ошибкой размещения

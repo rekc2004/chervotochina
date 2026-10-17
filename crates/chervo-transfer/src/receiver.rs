@@ -3,9 +3,9 @@
 //! проверка в `writer.rs`.
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use chervo_transport::{Connection, SendStream};
@@ -28,7 +28,7 @@ use crate::paths::{
     remove_part_strict, remove_placing_strict, remove_session, session_dir, write_hashes,
     write_state,
 };
-use crate::policy::OfferView;
+use crate::policy::{InboundReservation, OfferView};
 use crate::sched::{Active, Prior, Run, Sched};
 use crate::shared::{HookPoint, Shared, buffer_floor, lock, share_semaphore};
 use crate::state::{
@@ -156,7 +156,11 @@ pub(crate) struct RecvSession {
     pub(crate) names: Vec<UntrustedName>,
     pub(crate) sizes: Vec<u64>,
     pub(crate) total: u64,
-    pub(crate) sdir: PathBuf,
+    /// Каталог передачи по умолчанию (`TransferConfig::partial_dir`); у загруженной с диска
+    /// передачи это её настоящий каталог.
+    default_sdir: PathBuf,
+    /// Каталог передачи, выбранный при принятии (`Placement::partial_base`, Рев. 5 этапа 15).
+    chosen_sdir: OnceLock<PathBuf>,
     pub(crate) core: Mutex<RCore>,
     /// Сроки ожидания отправителя и счётчики обрывов на всю сессию (не по попыткам).
     pub(crate) live: Mutex<Liveness>,
@@ -226,7 +230,8 @@ impl RecvSession {
             names,
             sizes,
             total,
-            sdir,
+            default_sdir: sdir,
+            chosen_sdir: OnceLock::new(),
             core: Mutex::new(RCore {
                 phase: RPhase::Pending,
                 sched,
@@ -277,7 +282,8 @@ impl RecvSession {
             names,
             sizes,
             total,
-            sdir,
+            chosen_sdir: OnceLock::from(sdir.clone()),
+            default_sdir: sdir,
             core: Mutex::new(RCore {
                 phase: RPhase::Paused(PauseReason::Disconnected),
                 sched,
@@ -309,6 +315,59 @@ impl RecvSession {
 
     pub(crate) fn emit(&self, e: TransferEvent) {
         self.sh.emit(e);
+    }
+
+    /// Каталог этой передачи на диске: выбранный при принятии или каталог по умолчанию.
+    pub(crate) fn sdir(&self) -> &Path {
+        self.chosen_sdir
+            .get()
+            .map_or(self.default_sdir.as_path(), PathBuf::as_path)
+    }
+
+    /// Выбирает каталог передачи при принятии (блокирующая): `Placement::partial_base` или
+    /// `TransferConfig::partial_dir`. Возвращает его базу. Негодная база (не абсолютная, не
+    /// каталог) это ошибка: временные файлы нельзя класть на другой том.
+    pub(crate) fn choose_sdir(&self) -> io::Result<PathBuf> {
+        let base = self
+            .sh
+            .placement
+            .partial_base(&self.key)
+            .unwrap_or_else(|| self.sh.cfg.partial_dir.clone());
+        if !base.is_absolute() || !base.is_dir() {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+        }
+        let dir = session_dir(&base, &state_dir_name(&self.key.pair, &self.key.id));
+        let _ = self.chosen_sdir.set(dir);
+        Ok(base)
+    }
+
+    /// Предложение принято (ответ взят), а передача ещё не стала `Active`.
+    fn answered(&self) -> bool {
+        lock(&self.answer).is_none()
+    }
+
+    /// Место, которое этой передаче ещё понадобится (Рев. 5 этапа 15). `None`: не займёт
+    /// (ждёт ответа пользователя, закончена). Принятые, но ещё не начавшиеся тоже считаются,
+    /// чтобы два одновременных предложения не получили одно и то же место.
+    pub(crate) fn reservation(&self) -> Option<InboundReservation> {
+        let outstanding = {
+            let c = lock(&self.core);
+            match c.phase {
+                RPhase::Active | RPhase::Paused(_) => {}
+                RPhase::Pending if self.answered() => {}
+                RPhase::Pending | RPhase::Ended => return None,
+            }
+            c.sched.outstanding_bytes()
+        };
+        let base = match self.chosen_sdir.get() {
+            Some(d) => d.parent().map(Path::to_path_buf),
+            None => self.sh.placement.partial_base(&self.key),
+        }
+        .unwrap_or_else(|| self.sh.cfg.partial_dir.clone());
+        Some(InboundReservation {
+            partial_dir: base,
+            outstanding,
+        })
     }
 
     /// Событие `Preparing` по принятому кадру HASH_PROGRESS; не чаще `progress_interval`,
@@ -422,6 +481,7 @@ impl RecvSession {
                 })
                 .collect(),
             total_size: self.total,
+            inbound: Vec::new(),
         }
     }
 
@@ -503,7 +563,7 @@ impl RecvSession {
     pub(crate) fn write_names_once(&self) -> io::Result<()> {
         let (bytes, sum) = crate::state::encode_names(&self.key.pair, &self.key.id, &self.names);
         self.sh.hook(HookPoint::NamesWrite { bytes: &bytes })?;
-        crate::paths::write_names(&self.sdir, &bytes)?;
+        crate::paths::write_names(self.sdir(), &bytes)?;
         *lock(&self.names_sum) = sum;
         Ok(())
     }
@@ -525,13 +585,15 @@ impl RecvSession {
         let res = self
             .sh
             .hook(HookPoint::StateWrite { bytes: &bytes })
-            .and_then(|()| write_state(&self.sdir, &bytes));
+            .and_then(|()| write_state(self.sdir(), &bytes));
         match &res {
             Ok(()) => {
                 for f in placed {
-                    remove_hashes(&self.sdir, f);
-                    let _ =
-                        crate::paths::remove_file_retry(&crate::paths::placing_path(&self.sdir, f));
+                    remove_hashes(self.sdir(), f);
+                    let _ = crate::paths::remove_file_retry(&crate::paths::placing_path(
+                        self.sdir(),
+                        f,
+                    ));
                 }
             }
             Err(_) => {
@@ -624,9 +686,9 @@ impl RecvSession {
             let _g = g;
             // временный файл с неудачным размещением остаётся (до отмены или срока)
             if why == FileFailure::PlaceFailed {
-                remove_hashes(&s.sdir, file);
+                remove_hashes(s.sdir(), file);
             } else {
-                remove_part_and_hashes(&s.sdir, file);
+                remove_part_and_hashes(s.sdir(), file);
             }
             s.mark_dirty();
             s.flush_detached();
@@ -779,14 +841,14 @@ pub(crate) fn prepare(
     // манифеста (корень уже проверен) сверяются с диском. Всё совпало: файл готов, дальше
     // только размещение (идемпотентное). Не совпало: имя убирается (содержимое не трогается),
     // файл качается заново.
-    if size > 0 && placing_present(&s.sdir, file) {
+    if size > 0 && placing_present(s.sdir(), file) {
         s.emit(TransferEvent::Verifying { key: s.key });
-        let placing = crate::paths::placing_path(&s.sdir, file);
+        let placing = crate::paths::placing_path(s.sdir(), file);
         match verify_blocks(&placing, size, l, &leaves, None, &s.halt) {
             Ok(bad) if bad.is_empty() => {
                 let gone =
                     s.sh.hook(HookPoint::RemovePart { file })
-                        .and_then(|()| remove_part_strict(&s.sdir, file));
+                        .and_then(|()| remove_part_strict(s.sdir(), file));
                 if let Err(e) = gone {
                     return Err((e, prior));
                 }
@@ -801,7 +863,7 @@ pub(crate) fn prepare(
                 ));
             }
             Ok(_) => {
-                if let Err(e) = remove_placing_strict(&s.sdir, file) {
+                if let Err(e) = remove_placing_strict(s.sdir(), file) {
                     return Err((e, prior));
                 }
                 // прежний прогресс описывал `.part`, которого больше нет
@@ -826,14 +888,14 @@ pub(crate) fn prepare(
     if reuse.is_none() {
         let removed =
             s.sh.hook(HookPoint::RemovePart { file })
-                .and_then(|()| remove_part_strict(&s.sdir, file));
+                .and_then(|()| remove_part_strict(s.sdir(), file));
         if let Err(e) = removed {
             return Err((e, stale));
         }
     }
     let bits = if let Some(p) = reuse {
         s.emit(TransferEvent::Verifying { key: s.key });
-        let part = crate::paths::part_path(&s.sdir, file);
+        let part = crate::paths::part_path(s.sdir(), file);
         match verify_blocks(&part, size, l, &leaves, Some(&p.bits), &s.halt) {
             Ok(bad) => {
                 let mut bits = p.bits.clone();
@@ -841,7 +903,7 @@ pub(crate) fn prepare(
                     bits.clear(b);
                 }
                 // файла может не быть (все блоки тогда в `bad`): создаётся новый
-                if let Err(e) = ensure_part(&s.sdir, file) {
+                if let Err(e) = ensure_part(s.sdir(), file) {
                     return Err((e, Some(p)));
                 }
                 bits
@@ -856,8 +918,8 @@ pub(crate) fn prepare(
         }
     } else {
         let step = || -> io::Result<()> {
-            write_hashes(&s.sdir, file, &encode_hashes(&leaves))?;
-            create_part_new(&s.sdir, file)?;
+            write_hashes(s.sdir(), file, &encode_hashes(&leaves))?;
+            create_part_new(s.sdir(), file)?;
             Ok(())
         };
         if let Err(e) = step() {
@@ -1014,7 +1076,7 @@ pub(crate) async fn finish_session<L: Links>(
     s.halt.store(true, Ordering::Relaxed);
     s.jobs.idle().await;
     if !keep {
-        let dir = s.sdir.clone();
+        let dir = s.sdir().to_path_buf();
         let s2 = s.clone();
         let g = s.sh.tracker.guard();
         let _ =

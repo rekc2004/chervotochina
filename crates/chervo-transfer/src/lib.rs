@@ -66,7 +66,7 @@ pub use names::{OfferedFile, TransferId, TransferKey, UntrustedName};
 pub use placement::{
     CompletedFile, GeneratedNames, PlaceError, PlaceMethod, Placed, Placement, place_no_clobber,
 };
-pub use policy::{AcceptPolicy, AskAlways, OfferView, PolicyVerdict};
+pub use policy::{AcceptPolicy, AskAlways, InboundReservation, OfferView, PolicyVerdict};
 #[doc(hidden)]
 pub use state::{RecvState, decode_state, encode_state};
 pub use state::{StateError, encode_hashes, parse_hashes, state_dir_name};

@@ -17,18 +17,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use chervo_transfer::{
-    CompletedFile, FileRoot, OfferedFile, PlaceError, Placed, Placement, TransferKey,
+    CompletedFile, FileRoot, OfferView, OfferedFile, PlaceError, Placed, Placement, TransferKey,
     UntrustedName, block_len, file_root, layout, leaf_hash, place_no_clobber, state_dir_name,
 };
 
 use crate::journal::{
     MAX_K, PlacedLog, plan_digest, read_dirs, remove_journals, sweep, write_dirs,
 };
-use crate::limits::ReceiveLimits;
+use crate::limits::{PathError, ReceiveLimits};
 use crate::mark::mark_origin;
 use crate::name::{cut, split_ext};
 use crate::plan::{OfferPlan, plan_offer_for_root, suffix_budget};
 use crate::root::{ReceiveConfig, ReceiveRoot, private_dir_builder};
+use crate::space::{SpaceCheck, SpaceProbe, SpaceShortfall, check_space, disk_space};
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -49,6 +50,8 @@ type TestHook = dyn Fn(TestPoint<'_>) -> io::Result<()> + Send + Sync;
 
 /// План одной принятой передачи в памяти.
 struct SessionPlan {
+    /// Папка приёма этой передачи (основная или выбранная для этого предложения, Рев. 5).
+    root: ReceiveRoot,
     hex: String,
     plan: OfferPlan,
     names: Vec<UntrustedName>,
@@ -63,7 +66,14 @@ struct SessionPlan {
 
 pub struct ReceivePlacement {
     root: ReceiveRoot,
+    /// Другие известные папки приёма: выбранные для отдельных предложений и заданные при
+    /// запуске (чтобы найти недокачанные передачи после перезапуска).
+    known: Mutex<Vec<ReceiveRoot>>,
+    /// Папка, выбранная для ещё не принятого предложения.
+    choices: Mutex<HashMap<TransferKey, ReceiveRoot>>,
     limits: ReceiveLimits,
+    min_free_percent: u8,
+    probe: Arc<SpaceProbe>,
     motw: bool,
     quarantine: bool,
     sessions: Mutex<HashMap<TransferKey, Arc<SessionPlan>>>,
@@ -75,6 +85,16 @@ impl std::fmt::Debug for ReceivePlacement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("ReceivePlacement(..)")
     }
+}
+
+/// Почему другая папка не подошла (`ReceivePlacement::choose_root`). `Debug` без путей.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ChooseRootError {
+    /// Имена предложения не годятся (не должно случаться: то же предложение уже прошло план).
+    Plan(PathError),
+    /// На томе новой папки не хватает места (за вычетом остальных приёмов и запаса).
+    Insufficient(SpaceShortfall),
 }
 
 /// Имя-кандидат номер `k`: 1 это само имя, иначе `основа (k)расширение` (файл) или
@@ -203,13 +223,84 @@ impl ReceivePlacement {
         };
         Self {
             root,
+            known: Mutex::new(Vec::new()),
+            choices: Mutex::new(HashMap::new()),
             limits,
+            min_free_percent: cfg.min_free_percent,
+            probe: Arc::new(disk_space),
             motw: cfg.mark_of_the_web,
             quarantine: cfg.quarantine,
             sessions: Mutex::new(HashMap::new()),
             hook: Mutex::new(None),
             full_reads: AtomicU64::new(0),
         }
+    }
+
+    /// Свой способ узнать свободное место при выборе другой папки (тесты).
+    #[doc(hidden)]
+    pub fn with_space_probe(mut self, probe: Arc<SpaceProbe>) -> Self {
+        self.probe = probe;
+        self
+    }
+
+    /// Запоминает ещё одну папку приёма. Вызывать при запуске для всех папок, куда прежде
+    /// принимались отдельные предложения (список хранит приложение): иначе недокачанные там
+    /// передачи не найдутся после перезапуска (их данные остаются в `.chervo-partial` этой
+    /// папки). Папка выбранная через `choose_root` запоминается сама, до перезапуска.
+    pub fn add_known_root(&self, root: ReceiveRoot) {
+        if root.root() == self.root.root() {
+            return;
+        }
+        let mut known = lock(&self.known);
+        if known.iter().any(|r| r.root() == root.root()) {
+            return;
+        }
+        sweep(root.journal_dir(), root.partial_dir());
+        known.push(root);
+    }
+
+    /// Принять это предложение в другую папку приёма (Рев. 5, решение владельца 2026-10-18).
+    /// `offer` берётся из `Transfers::offer` (в нём резерв места остальных передач). Предложение
+    /// заново планируется под новую папку (тот же санитайзер), место проверяется на её томе с
+    /// тем же запасом `min_free_percent`; не хватает: `Insufficient` с обоими числами. Успех
+    /// запоминает выбор: временные файлы передачи и итоговые файлы лягут в новую папку (одна
+    /// `.chervo-partial` на одном томе), после чего вызывается `Transfers::respond(key, true)`.
+    /// Если место узнать нельзя, выбор пользователя сохраняется.
+    pub fn choose_root(&self, offer: &OfferView, root: ReceiveRoot) -> Result<(), ChooseRootError> {
+        let plan = plan_offer_for_root(&offer.files, &self.limits, &root)
+            .map_err(ChooseRootError::Plan)?;
+        if let SpaceCheck::Short(s) = check_space(
+            &*self.probe,
+            root.root(),
+            plan.total,
+            self.min_free_percent,
+            &offer.inbound,
+        ) {
+            return Err(ChooseRootError::Insufficient(s));
+        }
+        self.add_known_root(root.clone());
+        lock(&self.choices).insert(offer.key, root);
+        Ok(())
+    }
+
+    /// Снимает выбор папки для предложения (пользователь передумал или отказал).
+    pub fn unchoose_root(&self, key: &TransferKey) {
+        lock(&self.choices).remove(key);
+    }
+
+    /// Папка этой передачи: выбранная для предложения, иначе та, где лежит её каталог
+    /// временных данных (после перезапуска), иначе основная.
+    fn root_for(&self, key: &TransferKey) -> ReceiveRoot {
+        if let Some(r) = lock(&self.choices).get(key) {
+            return r.clone();
+        }
+        let hex = state_dir_name(&key.pair, &key.id);
+        let known = lock(&self.known).clone();
+        std::iter::once(&self.root)
+            .chain(known.iter())
+            .find(|r| is_real_dir(&r.partial_dir().join(&hex)))
+            .unwrap_or(&self.root)
+            .clone()
     }
 
     /// Подмена точек размещения для тестов.
@@ -238,8 +329,12 @@ impl ReceivePlacement {
 
     /// Создаёт новые каталоги верхнего уровня; возвращает выбранные `k`. При ошибке созданные
     /// здесь пустые каталоги убираются.
-    fn create_top_dirs(&self, names: &[String]) -> Result<Vec<(u16, u64)>, PlaceError> {
-        let root = self.root.root();
+    fn create_top_dirs(
+        &self,
+        rt: &ReceiveRoot,
+        names: &[String],
+    ) -> Result<Vec<(u16, u64)>, PlaceError> {
+        let root = rt.root();
         if !is_real_dir(root) {
             return Err(PlaceError::Refused);
         }
@@ -279,10 +374,10 @@ impl ReceivePlacement {
 
     /// Папки верхнего уровня из журнала на месте и это те же папки (не ссылки; идентичность
     /// совпала). Любое расхождение: журнал негоден, каталоги создаются заново.
-    fn top_dirs_match(&self, names: &[String], ks: &[(u16, u64)]) -> bool {
+    fn top_dirs_match(&self, rt: &ReceiveRoot, names: &[String], ks: &[(u16, u64)]) -> bool {
         names.len() == ks.len()
             && names.iter().zip(ks).all(|(name, (k, ident))| {
-                let mut p = self.root.root().to_path_buf();
+                let mut p = rt.root().to_path_buf();
                 candidate_name(name, *k, false, self.max_name())
                     .ok()
                     .is_some_and(|cn| safe_push(&mut p, &cn).is_ok())
@@ -290,8 +385,8 @@ impl ReceivePlacement {
             })
     }
 
-    fn top_path(&self, dirs: &[String]) -> Option<PathBuf> {
-        let mut p = self.root.root().to_path_buf();
+    fn top_path(&self, rt: &ReceiveRoot, dirs: &[String]) -> Option<PathBuf> {
+        let mut p = rt.root().to_path_buf();
         safe_push(&mut p, dirs.first()?).ok()?;
         Some(p)
     }
@@ -305,7 +400,7 @@ impl ReceivePlacement {
         top_orig: Option<&String>,
         dirs: &[String],
     ) -> Result<(), PlaceError> {
-        let (Some(orig), Some(path)) = (top_orig, self.top_path(dirs)) else {
+        let (Some(orig), Some(path)) = (top_orig, self.top_path(&sess.root, dirs)) else {
             return Ok(());
         };
         let (_, cell) = sess.tops.get(orig).ok_or(PlaceError::Refused)?;
@@ -326,7 +421,7 @@ impl ReceivePlacement {
     /// Запоминает идентичность каталога верхнего уровня после `walk_create` (он мог создать
     /// каталог заново). Только под `dir_lock`.
     fn store_top_ident(&self, sess: &SessionPlan, top_orig: Option<&String>, dirs: &[String]) {
-        if let (Some(orig), Some(path)) = (top_orig, self.top_path(dirs))
+        if let (Some(orig), Some(path)) = (top_orig, self.top_path(&sess.root, dirs))
             && let Some((_, cell)) = sess.tops.get(orig)
             && let Some(id) = real_dir_ident(&path)
         {
@@ -339,8 +434,8 @@ impl ReceivePlacement {
     }
 
     /// Цепочка каталогов от корня вниз без создания: каждый обязан быть настоящим каталогом.
-    fn walk_check(&self, dirs: &[String]) -> Result<PathBuf, PlaceError> {
-        let mut p = self.root.root().to_path_buf();
+    fn walk_check(&self, rt: &ReceiveRoot, dirs: &[String]) -> Result<PathBuf, PlaceError> {
+        let mut p = rt.root().to_path_buf();
         if !is_real_dir(&p) {
             return Err(PlaceError::Refused);
         }
@@ -356,8 +451,8 @@ impl ReceivePlacement {
     /// То же с созданием недостающих каталогов (Unix: 0o700) и повторной проверкой каждого.
     /// Каталог верхнего уровня создаётся только нами (`create_dir`): если он появился
     /// между проверкой и созданием, это отказ. Ниже существующий настоящий каталог наш.
-    fn walk_create(&self, dirs: &[String]) -> Result<PathBuf, PlaceError> {
-        let mut p = self.root.root().to_path_buf();
+    fn walk_create(&self, rt: &ReceiveRoot, dirs: &[String]) -> Result<PathBuf, PlaceError> {
+        let mut p = rt.root().to_path_buf();
         if !is_real_dir(&p) {
             return Err(PlaceError::Refused);
         }
@@ -384,8 +479,8 @@ impl ReceivePlacement {
     }
 
     /// Проверка после размещения: цепочка, обычный файл, настоящий путь внутри корня.
-    fn verify_placed(&self, dirs: &[String], cand: &Path) -> bool {
-        let Ok(dir) = self.walk_check(dirs) else {
+    fn verify_placed(&self, rt: &ReceiveRoot, dirs: &[String], cand: &Path) -> bool {
+        let Ok(dir) = self.walk_check(rt, dirs) else {
             return false;
         };
         if cand.parent() != Some(dir.as_path()) {
@@ -394,18 +489,19 @@ impl ReceivePlacement {
         if !fs::symlink_metadata(cand).is_ok_and(|m| m.file_type().is_file()) {
             return false;
         }
-        fs::canonicalize(&dir).is_ok_and(|c| c.starts_with(self.root.root()))
+        fs::canonicalize(&dir).is_ok_and(|c| c.starts_with(rt.root()))
     }
 
     /// Повтор после краха: файл из последней записи журнала уже стоит на месте.
     fn replay(
         &self,
+        rt: &ReceiveRoot,
         dirs: &[String],
         file_name: &str,
         k: u16,
         f: &CompletedFile,
     ) -> Option<PathBuf> {
-        let dir = self.walk_check(dirs).ok()?;
+        let dir = self.walk_check(rt, dirs).ok()?;
         let mut cand = dir;
         safe_push(
             &mut cand,
@@ -420,7 +516,7 @@ impl ReceivePlacement {
         if disk_root(&cand, f.size).ok()? != f.root {
             return None;
         }
-        self.verify_placed(dirs, &cand).then_some(cand)
+        self.verify_placed(rt, dirs, &cand).then_some(cand)
     }
 }
 
@@ -429,28 +525,29 @@ impl Placement for ReceivePlacement {
         if lock(&self.sessions).contains_key(key) {
             return Ok(());
         }
-        let plan = plan_offer_for_root(files, &self.limits, &self.root)
-            .map_err(|_| PlaceError::Refused)?;
+        let rt = self.root_for(key);
+        let plan =
+            plan_offer_for_root(files, &self.limits, &rt).map_err(|_| PlaceError::Refused)?;
         let tops = top_names(&plan);
         let hex = state_dir_name(&key.pair, &key.id);
         let refs: Vec<&str> = tops.iter().map(String::as_str).collect();
         let digest = plan_digest(&refs);
-        let journals = self.root.journal_dir();
+        let journals = rt.journal_dir();
         // журнал размещения открывается первым: его отказ не оставляет созданных каталогов
         let log = PlacedLog::open(journals, &hex).map_err(|e| io_err(&e))?;
         // каталоги созданы в прошлой жизни процесса; негодный журнал не доверяется, а каждая
         // папка из него должна быть той самой (inode / время создания, F5)
         let journaled = read_dirs(journals, &hex, key, &digest, tops.len())
-            .filter(|ks| self.top_dirs_match(&tops, ks));
+            .filter(|ks| self.top_dirs_match(&rt, &tops, ks));
         let ks = match journaled {
             Some(ks) => ks,
             None => {
-                let ks = self.create_top_dirs(&tops)?;
+                let ks = self.create_top_dirs(&rt, &tops)?;
                 if !ks.is_empty()
                     && let Err(e) = write_dirs(journals, &hex, key, &digest, &ks)
                 {
                     for (name, (k, _)) in tops.iter().zip(&ks).rev() {
-                        let mut p = self.root.root().to_path_buf();
+                        let mut p = rt.root().to_path_buf();
                         if let Ok(cn) = candidate_name(name, *k, false, self.max_name())
                             && safe_push(&mut p, &cn).is_ok()
                             && is_real_dir(&p)
@@ -464,6 +561,7 @@ impl Placement for ReceivePlacement {
             }
         };
         let sess = Arc::new(SessionPlan {
+            root: rt,
             hex,
             plan,
             names: files.iter().map(|f| f.name.clone()).collect(),
@@ -481,12 +579,12 @@ impl Placement for ReceivePlacement {
 
     fn place(&self, f: &CompletedFile) -> Result<Placed, PlaceError> {
         let temp = f.temp_path();
-        if !temp.starts_with(self.root.partial_dir())
+        let sess = self.session(&f.key).ok_or(PlaceError::Refused)?;
+        if !temp.starts_with(sess.root.partial_dir())
             || temp.components().any(|c| matches!(c, Component::ParentDir))
         {
             return Err(PlaceError::Refused);
         }
-        let sess = self.session(&f.key).ok_or(PlaceError::Refused)?;
         let idx = usize::try_from(f.index).map_err(|_| PlaceError::Refused)?;
         let planned = sess.plan.files.get(idx).ok_or(PlaceError::Refused)?;
         let offered = sess.names.get(idx).ok_or(PlaceError::Refused)?;
@@ -508,7 +606,7 @@ impl Placement for ReceivePlacement {
         // повтор после краха: файл уже поставлен прошлой жизнью процесса
         let prior = lock(&sess.log).last(f.index);
         if let Some(k) = prior
-            && let Some(path) = self.replay(&dirs, file_name, k, f)
+            && let Some(path) = self.replay(&sess.root, &dirs, file_name, k, f)
         {
             return Ok(Placed { path });
         }
@@ -526,7 +624,7 @@ impl Placement for ReceivePlacement {
         let dir = {
             let _g = lock(&sess.dir_lock);
             self.check_top_ident(&sess, dir_comps.first(), &dirs)?;
-            let dir = self.walk_create(&dirs)?;
+            let dir = self.walk_create(&sess.root, &dirs)?;
             self.store_top_ident(&sess, dir_comps.first(), &dirs);
             dir
         };
@@ -542,7 +640,7 @@ impl Placement for ReceivePlacement {
             match place_no_clobber(temp, &cand) {
                 Ok(_) => {
                     let _ = self.at(TestPoint::AfterLink { dir: &dir });
-                    if self.verify_placed(&dirs, &cand) {
+                    if self.verify_placed(&sess.root, &dirs, &cand) {
                         return Ok(Placed { path: cand });
                     }
                     // подмена каталога: на Unix убираем только тот файл, который сами поставили
@@ -565,11 +663,20 @@ impl Placement for ReceivePlacement {
 
     fn forget(&self, key: &TransferKey) {
         let sess = lock(&self.sessions).remove(key);
+        lock(&self.choices).remove(key);
         let hex = match &sess {
             Some(s) => s.hex.clone(),
             None => state_dir_name(&key.pair, &key.id),
         };
+        // журналы лежат у папки этой передачи; без плана (сеанс снят до `prepare`) чистятся у всех
+        let roots: Vec<ReceiveRoot> = match &sess {
+            Some(s) => vec![s.root.clone()],
+            None => std::iter::once(self.root.clone())
+                .chain(lock(&self.known).iter().cloned())
+                .collect(),
+        };
         if let Some(s) = sess {
+            let rt = s.root.clone();
             // пустые каталоги этой передачи (отмена до размещения): снизу вверх, только пустые
             let mut dirs: HashSet<Vec<String>> = HashSet::new();
             for pf in &s.plan.files {
@@ -593,12 +700,27 @@ impl Placement for ReceivePlacement {
             dirs.sort_by_key(|d| std::cmp::Reverse(d.len()));
             drop(s);
             for d in dirs {
-                let mut p = self.root.root().to_path_buf();
+                let mut p = rt.root().to_path_buf();
                 if d.iter().all(|c| safe_push(&mut p, c).is_ok()) && is_real_dir(&p) {
                     let _ = fs::remove_dir(&p);
                 }
             }
         }
-        remove_journals(self.root.journal_dir(), &hex);
+        for r in &roots {
+            remove_journals(r.journal_dir(), &hex);
+        }
+    }
+
+    fn partial_base(&self, key: &TransferKey) -> Option<PathBuf> {
+        lock(&self.choices)
+            .get(key)
+            .map(|r| r.partial_dir().to_path_buf())
+    }
+
+    fn extra_partial_dirs(&self) -> Vec<PathBuf> {
+        lock(&self.known)
+            .iter()
+            .map(|r| r.partial_dir().to_path_buf())
+            .collect()
     }
 }

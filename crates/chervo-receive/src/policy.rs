@@ -3,11 +3,17 @@
 //! `Permission::AutoAccept` (его включают после вопроса доверия, см. `trust.rs`) и только если
 //! каждый файл заведомо безопасного типа (список `KNOWN_INERT`), имена чистые (ни одного
 //! изменения и флага), а путь короткий. Любой другой или неизвестный тип, программы, образы
-//! дисков, документы с макросами: вопрос пользователю. Лимитов объёма нет. Единственная
-//! защита: после приёма на томе должно остаться не меньше `min_free_percent` процентов; если
-//! места не хватает или оно неизвестно, это обычный вопрос.
+//! дисков, документы с макросами: вопрос пользователю. Лимитов объёма нет.
+//!
+//! Единственная защита от переполнения диска (Рев. 5): перед решением (и для автоприёма, и для
+//! обычного вопроса) считается свободное место тома папки приёма за вычетом ещё не полученных
+//! байтов ВСЕХ идущих и приостановленных приёмов на этом томе (их даёт `OfferView::inbound`;
+//! `Transfers` решает по одному предложению за раз, поэтому два одновременных предложения не
+//! получают одно и то же место). Предложение плюс запас `min_free_percent` не помещается:
+//! `ReceiveDecision::InsufficientSpace` (никогда не автоприём; экран предупреждает обоими
+//! числами и предлагает выбрать другую папку, см. `ReceivePlacement::choose_root`). Место
+//! узнать нельзя: автоприёма нет, обычный вопрос.
 
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -18,9 +24,18 @@ use chervo_transfer::{AcceptPolicy, OfferView, PolicyVerdict};
 use crate::limits::ReceiveLimits;
 use crate::plan::plan_offer_for_root;
 use crate::root::{ReceiveConfig, ReceiveRoot};
-use crate::space::{DiskSpace, disk_space};
+use crate::space::{SpaceCheck, SpaceProbe, SpaceShortfall, check_space, disk_space};
 
-type SpaceProbe = dyn Fn(&Path) -> Option<DiskSpace> + Send + Sync;
+/// Решение политики приёма до сведения к `PolicyVerdict`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReceiveDecision {
+    Accept,
+    Ask,
+    Decline,
+    /// Места в основной папке приёма не хватает: никогда не автоприём; пользователю нужно
+    /// показать `needed` и `available` и предложить другую папку.
+    InsufficientSpace(SpaceShortfall),
+}
 
 pub struct ReceivePolicy {
     root: ReceiveRoot,
@@ -67,26 +82,58 @@ impl ReceivePolicy {
         self.declined.load(Ordering::SeqCst)
     }
 
-    /// После приёма `bytes` на томе останется достаточно места. Неизвестное место: нет.
-    fn space_ok(&self, bytes: u64) -> bool {
-        (self.probe)(self.root.root()).is_some_and(|s| s.allows(bytes, self.min_free_percent))
+    /// Хватает ли места в основной папке приёма для этого предложения прямо сейчас (с резервом
+    /// остальных приёмов из `offer.inbound`). Для экрана вопроса: предложение берётся из
+    /// `Transfers::offer`, чтобы числа были свежими. Сумма размеров считается по файлам.
+    pub fn space_check(&self, offer: &OfferView) -> SpaceCheck {
+        let total = offer
+            .files
+            .iter()
+            .fold(0u64, |acc, f| acc.saturating_add(f.size));
+        check_space(
+            &*self.probe,
+            self.root.root(),
+            total,
+            self.min_free_percent,
+            &offer.inbound,
+        )
+    }
+
+    /// Полное решение. `decide` сводит его к `PolicyVerdict`: `InsufficientSpace` там это `Ask`
+    /// (пользователь решает; экран зовёт `space_check` и показывает предупреждение).
+    pub fn evaluate(&self, p: Permission, offer: &OfferView) -> ReceiveDecision {
+        let Ok(plan) = plan_offer_for_root(&offer.files, &self.limits, &self.root) else {
+            self.declined.fetch_add(1, Ordering::SeqCst);
+            return ReceiveDecision::Decline;
+        };
+        let space = check_space(
+            &*self.probe,
+            self.root.root(),
+            plan.total,
+            self.min_free_percent,
+            &offer.inbound,
+        );
+        if let SpaceCheck::Short(s) = space {
+            return ReceiveDecision::InsufficientSpace(s);
+        }
+        // Значения лимитов в `AutoAccept` не читаются: объёма как предела нет.
+        let Permission::AutoAccept(_) = p else {
+            return ReceiveDecision::Ask;
+        };
+        if plan.auto_ok() && space == SpaceCheck::Fits {
+            ReceiveDecision::Accept
+        } else {
+            ReceiveDecision::Ask
+        }
     }
 }
 
 impl AcceptPolicy for ReceivePolicy {
     fn decide(&self, _pair: &PairId, p: Permission, offer: &OfferView) -> PolicyVerdict {
-        let Ok(plan) = plan_offer_for_root(&offer.files, &self.limits, &self.root) else {
-            self.declined.fetch_add(1, Ordering::SeqCst);
-            return PolicyVerdict::Decline;
-        };
-        // Значения лимитов в `AutoAccept` не читаются: объёма как предела нет.
-        let Permission::AutoAccept(_) = p else {
-            return PolicyVerdict::Ask;
-        };
-        if plan.auto_ok() && self.space_ok(plan.total) {
-            PolicyVerdict::Accept
-        } else {
-            PolicyVerdict::Ask
+        match self.evaluate(p, offer) {
+            ReceiveDecision::Accept => PolicyVerdict::Accept,
+            ReceiveDecision::Decline => PolicyVerdict::Decline,
+            ReceiveDecision::Ask | ReceiveDecision::InsufficientSpace(_) => PolicyVerdict::Ask,
         }
     }
 }

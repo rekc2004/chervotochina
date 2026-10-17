@@ -10,9 +10,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use chervo_friends::{AutoAcceptLimits, Permission};
 use chervo_identity::PairId;
 use chervo_receive::{
-    ASK_FILE_TEXT, DiskSpace, ReceiveConfig, ReceivePolicy, TRUST_QUESTION_TEXT, disk_space,
+    ASK_FILE_TEXT, CHOOSE_OTHER_FOLDER_TEXT, DiskSpace, ReceiveConfig, ReceiveDecision,
+    ReceivePolicy, SpaceCheck, SpaceShortfall, TRUST_QUESTION_TEXT, disk_space,
+    insufficient_space_text,
 };
-use chervo_transfer::{AcceptPolicy, OfferView, OfferedFile, PolicyVerdict, UntrustedName};
+use chervo_transfer::{
+    AcceptPolicy, InboundReservation, OfferView, OfferedFile, PolicyVerdict, UntrustedName,
+};
 use common::{Env, key};
 
 fn view(files: &[(&str, u64)]) -> OfferView {
@@ -27,6 +31,7 @@ fn view(files: &[(&str, u64)]) -> OfferView {
         key: key(1),
         total_size: files.iter().map(|f| f.size).sum(),
         files,
+        inbound: Vec::new(),
     }
 }
 
@@ -375,5 +380,197 @@ fn real_disk_space_probe() {
     } else {
         assert_eq!(got, None);
         println!("real_disk_space_probe: unknown on this OS, auto-accept asks");
+    }
+}
+
+// ------------------------------------------------------------ Рев. 5: резерв места
+
+fn with_inbound(mut v: OfferView, inbound: Vec<InboundReservation>) -> OfferView {
+    v.inbound = inbound;
+    v
+}
+
+fn reserve(env: &Env, outstanding: u64) -> InboundReservation {
+    InboundReservation {
+        partial_dir: env.root.partial_dir().to_path_buf(),
+        outstanding,
+    }
+}
+
+#[test]
+fn space_shortfall_is_a_decision_never_auto_accept() {
+    let env = Env::new("pshort");
+    // том 1 ТиБ, свободно 300 ГиБ, запас 10 % = floor(1 ТиБ * 10 / 100)
+    let (_free, f) = fake_disk(300 * GIB);
+    let p = f.policy(&env);
+    let keep = TIB * 10 / 100;
+    let v = view(&[("a.mp4", 250 * GIB)]);
+    for perm in [Permission::Ask, auto()] {
+        match p.evaluate(perm, &v) {
+            ReceiveDecision::InsufficientSpace(s) => {
+                assert_eq!(s.needed, 250 * GIB + keep);
+                assert_eq!(s.available, 300 * GIB);
+                assert_eq!(s.root, env.root.root());
+            }
+            other => panic!("expected InsufficientSpace, got {other:?}"),
+        }
+        // для транспорта это вопрос пользователю, но не автоприём
+        assert_eq!(p.decide(&pair(1), perm, &v), PolicyVerdict::Ask);
+    }
+    // помещается: автоприём да, обычный друг вопрос
+    let ok = view(&[("a.mp4", 100 * GIB)]);
+    assert_eq!(p.evaluate(auto(), &ok), ReceiveDecision::Accept);
+    assert_eq!(p.evaluate(Permission::Ask, &ok), ReceiveDecision::Ask);
+    assert_eq!(p.space_check(&ok), SpaceCheck::Fits);
+}
+
+#[test]
+fn space_shortfall_text_has_both_numbers_and_the_suggestion() {
+    let s = SpaceShortfall {
+        needed: 150 * GIB,
+        available: 100 * GIB + GIB / 2,
+        root: std::path::PathBuf::from("SECRET-ROOT"),
+    };
+    let t = insufficient_space_text(&s);
+    assert!(t.contains("150,0 ГБ"), "{t}");
+    assert!(t.contains("100,5 ГБ"), "{t}");
+    assert!(t.contains(CHOOSE_OTHER_FOLDER_TEXT), "{t}");
+    assert!(t.contains("другую папку"), "{t}");
+    // Debug без пути, с числами
+    let d = format!("{s:?}");
+    assert!(!d.contains("SECRET") && d.contains("needed"), "{d}");
+    assert!(!t.contains("SECRET"), "{t}");
+    let small = SpaceShortfall {
+        needed: 1500,
+        available: 512,
+        root: std::path::PathBuf::new(),
+    };
+    let t = insufficient_space_text(&small);
+    assert!(t.contains("1,4 КБ") && t.contains("512 Б"), "{t}");
+}
+
+#[test]
+fn space_reservation_of_other_receives_reduces_available() {
+    let env = Env::with("presv", |c: &mut ReceiveConfig| c.min_free_percent = 0);
+    let (_free, f) = fake_disk(300 * GIB);
+    let p = f.policy(&env);
+    let v = view(&[("a.mp4", 200 * GIB)]);
+    // один приём помещается
+    assert_eq!(p.evaluate(auto(), &v), ReceiveDecision::Accept);
+    // другой идущий приём ещё должен получить 150 ГиБ: остаётся 150
+    let busy = with_inbound(v.clone(), vec![reserve(&env, 150 * GIB)]);
+    match p.evaluate(auto(), &busy) {
+        ReceiveDecision::InsufficientSpace(s) => {
+            assert_eq!(s.needed, 200 * GIB);
+            assert_eq!(s.available, 150 * GIB);
+        }
+        other => panic!("expected InsufficientSpace, got {other:?}"),
+    }
+    assert_eq!(p.decide(&pair(1), auto(), &busy), PolicyVerdict::Ask);
+    // два резерва суммируются; ровно до границы помещается
+    let edge = with_inbound(
+        v.clone(),
+        vec![reserve(&env, 60 * GIB), reserve(&env, 40 * GIB)],
+    );
+    assert_eq!(p.evaluate(auto(), &edge), ReceiveDecision::Accept);
+    let over = with_inbound(
+        v.clone(),
+        vec![reserve(&env, 60 * GIB), reserve(&env, 40 * GIB + 1)],
+    );
+    assert!(matches!(
+        p.evaluate(auto(), &over),
+        ReceiveDecision::InsufficientSpace(_)
+    ));
+    // обычный друг: то же предупреждение (вопрос с числами)
+    assert!(matches!(
+        p.evaluate(Permission::Ask, &busy),
+        ReceiveDecision::InsufficientSpace(_)
+    ));
+    // экран видит те же числа
+    match p.space_check(&busy) {
+        SpaceCheck::Short(s) => assert_eq!((s.needed, s.available), (200 * GIB, 150 * GIB)),
+        other => panic!("expected Short, got {other:?}"),
+    }
+}
+
+#[test]
+fn space_reservation_extremes_do_not_overflow() {
+    let env = Env::new("pextreme");
+    let p = policy(&env);
+    let v = with_inbound(
+        view(&[("a.mp4", 1)]),
+        vec![reserve(&env, u64::MAX), reserve(&env, u64::MAX)],
+    );
+    match p.evaluate(auto(), &v) {
+        ReceiveDecision::InsufficientSpace(s) => assert_eq!(s.available, 0),
+        other => panic!("expected InsufficientSpace, got {other:?}"),
+    }
+}
+
+#[test]
+fn space_reservation_with_unknown_volume_counts() {
+    // том приёма определить нельзя (каталога нет): считается тем же, запас в безопасную сторону
+    let env = Env::with("punkvol", |c: &mut ReceiveConfig| c.min_free_percent = 0);
+    let (_free, f) = fake_disk(100 * GIB);
+    let p = f.policy(&env);
+    let ghost = InboundReservation {
+        partial_dir: env.tmp.path().join("no-such-dir").join(".chervo-partial"),
+        outstanding: 90 * GIB,
+    };
+    let v = with_inbound(view(&[("a.mp4", 20 * GIB)]), vec![ghost]);
+    assert!(matches!(
+        p.evaluate(auto(), &v),
+        ReceiveDecision::InsufficientSpace(_)
+    ));
+}
+
+#[test]
+fn space_probe_failure_stays_ask_not_a_shortfall() {
+    let env = Env::new("pprobefail");
+    let p = ReceivePolicy::with_space_probe(env.root.clone(), &env.cfg, Arc::new(|_| None));
+    let v = with_inbound(view(&[("a.txt", 1)]), vec![reserve(&env, 5)]);
+    assert_eq!(p.evaluate(auto(), &v), ReceiveDecision::Ask);
+    assert_eq!(p.evaluate(Permission::Ask, &v), ReceiveDecision::Ask);
+    assert_eq!(p.space_check(&v), SpaceCheck::Unknown);
+    assert_eq!(p.decide(&pair(1), auto(), &v), PolicyVerdict::Ask);
+}
+
+#[test]
+fn space_hostile_is_declined_before_space_is_looked_at() {
+    let env = Env::new("phostspace");
+    let (_free, f) = fake_disk(1);
+    let p = f.policy(&env);
+    assert_eq!(
+        p.evaluate(auto(), &view(&[("../x", 500 * GIB)])),
+        ReceiveDecision::Decline
+    );
+    assert_eq!(p.declined_hostile(), 1);
+}
+
+#[test]
+fn compressed_single_files_policy_follows_inner_extension() {
+    let env = Env::new("pcompressed");
+    let p = policy(&env);
+    let v = view(&[("photo.jpg.gz", 10), ("clip.mp4.xz", 10), ("a.tar.gz", 10)]);
+    assert_eq!(p.decide(&pair(1), auto(), &v), PolicyVerdict::Accept);
+    for name in [
+        "x.iso.gz",
+        "x.exe.xz",
+        "x.img.zst",
+        "x.foo.gz",
+        "x.dat.zst",
+        "x.msi.bz2",
+        "x.lz",
+    ] {
+        assert_eq!(
+            p.decide(&pair(1), auto(), &view(&[(name, 10)])),
+            PolicyVerdict::Ask,
+            "{name}"
+        );
+        assert_eq!(
+            p.decide(&pair(1), auto(), &view(&[("clean.txt", 10), (name, 10)])),
+            PolicyVerdict::Ask,
+            "{name} mixed"
+        );
     }
 }
