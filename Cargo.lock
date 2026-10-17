@@ -394,12 +394,18 @@ dependencies = [
 name = "chervo-receive"
 version = "0.0.0"
 dependencies = [
+ "chervo-addr",
+ "chervo-connect",
  "chervo-friends",
  "chervo-identity",
  "chervo-transfer",
+ "chervo-transport",
+ "chervo-transport-quinn",
  "ring",
  "rustix",
+ "tokio",
  "unicode-normalization",
+ "zeroize",
 ]
 
 [[package]]
