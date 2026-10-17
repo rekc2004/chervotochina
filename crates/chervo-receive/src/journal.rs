@@ -2,7 +2,10 @@
 //! только номера и счётчики. Из журнала не доверяется ничего: контрольные суммы, привязка к
 //! ключу передачи и к плану, `k <= 999`; имена всегда пересчитываются из предложения.
 //!
-//! * `receive/<hex32>.dirs`: один раз при `prepare`; `k` для каждого каталога верхнего уровня.
+//! * `receive/<hex32>.dirs`: один раз при `prepare`; для каждого каталога верхнего уровня `k` и
+//!   идентичность папки (Unix: номер inode, Windows: время создания). При повторном открытии
+//!   идентичность сверяется с живой папкой (Рев. 3, F5): подделанный журнал не заставит принять
+//!   чужую существующую папку.
 //! * `receive/<hex32>.placed`: дописываемые записи по 8 байт `index u32, k u16, check u16`
 //!   перед каждой попыткой имени; последняя годная запись индекса побеждает, первая негодная
 //!   запись заканчивает разбор.
@@ -19,11 +22,11 @@ use chervo_transfer::TransferKey;
 /// Наибольший номер имени-кандидата (`имя (k)`).
 pub(crate) const MAX_K: u16 = 999;
 /// Предел размера `.dirs`.
-const MAX_DIRS_LEN: u64 = 64 * 1024;
+const MAX_DIRS_LEN: u64 = 256 * 1024;
 /// Сколько байт `.placed` читается при открытии (дальше запись игнорируется: это даст лишь
 /// дубликат имени, не перезапись).
 const MAX_PLACED_READ: u64 = 8 * 1024 * 1024;
-const DIRS_MAGIC: &[u8; 8] = b"CHVRCVD1";
+const DIRS_MAGIC: &[u8; 8] = b"CHVRCVD2";
 const DIGEST_DOMAIN: &[u8] = b"chervo-recv-v1-dirs\0";
 const CHECK_SALT: u16 = 0xC4E7;
 const REC_LEN: usize = 8;
@@ -113,7 +116,7 @@ pub(crate) fn read_dirs(
     key: &TransferKey,
     digest: &[u8; 32],
     count: usize,
-) -> Option<Vec<u16>> {
+) -> Option<Vec<(u16, u64)>> {
     let raw = read_bounded(&dirs_path(dir, hex), MAX_DIRS_LEN)?;
     let body_len = raw.len().checked_sub(32)?;
     let (body, trailer) = raw.split_at_checked(body_len)?;
@@ -137,10 +140,11 @@ pub(crate) fn read_dirs(
     let mut ks = Vec::with_capacity(n);
     for _ in 0..n {
         let k = u16::from_be_bytes(c.array::<2>()?);
+        let ident = u64::from_be_bytes(c.array::<8>()?);
         if !(1..=MAX_K).contains(&k) {
             return None;
         }
-        ks.push(k);
+        ks.push((k, ident));
     }
     if !c.0.is_empty() {
         return None;
@@ -154,17 +158,18 @@ pub(crate) fn write_dirs(
     hex: &str,
     key: &TransferKey,
     digest: &[u8; 32],
-    ks: &[u16],
+    ks: &[(u16, u64)],
 ) -> io::Result<()> {
     let n = u32::try_from(ks.len()).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-    let mut body = Vec::with_capacity(8 + 16 + 16 + 32 + 4 + ks.len() * 2 + 32);
+    let mut body = Vec::with_capacity(8 + 16 + 16 + 32 + 4 + ks.len() * 10 + 32);
     body.extend_from_slice(DIRS_MAGIC);
     body.extend_from_slice(key.pair.as_bytes());
     body.extend_from_slice(&key.id.0);
     body.extend_from_slice(digest);
     body.extend_from_slice(&n.to_be_bytes());
-    for k in ks {
+    for (k, ident) in ks {
         body.extend_from_slice(&k.to_be_bytes());
+        body.extend_from_slice(&ident.to_be_bytes());
     }
     let sum = sha256(&[&body]);
     body.extend_from_slice(&sum);

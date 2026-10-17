@@ -7,8 +7,6 @@ use std::fs::{self, DirBuilder};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use chervo_friends::AutoAcceptLimits;
-
 use crate::limits::ReceiveLimits;
 
 /// Имя служебного каталога внутри папки приёма. Имя с точкой в начале нельзя прислать:
@@ -26,8 +24,11 @@ const PROBE_NAME: &str = "uid.probe";
 pub struct ReceiveConfig {
     pub root: PathBuf,
     pub limits: ReceiveLimits,
-    /// Потолок автоприёма на сутки по всем друзьям вместе: общий предел для любого друга.
-    pub auto_ceiling: AutoAcceptLimits,
+    /// Рев. 3: единственная защита автоприёма от переполнения диска. После приёма предложения
+    /// на томе папки приёма должно остаться не меньше этого процента его объёма; иначе вопрос
+    /// «принять?». Объёма предложения как предела нет. По умолчанию 10; 0 отключает запас
+    /// (остаётся проверка, что предложение вообще помещается).
+    pub min_free_percent: u8,
     /// Разрешить папку, доступную другим пользователям (Unix). По умолчанию нет.
     pub allow_shared_root: bool,
     /// Windows: поток `Zone.Identifier` (ZoneId=3) у каждого принятого файла.
@@ -37,15 +38,12 @@ pub struct ReceiveConfig {
 }
 
 impl ReceiveConfig {
-    /// Значения по умолчанию из спецификации: потолок 16 ГиБ и 1000 файлов, метки включены.
+    /// Значения по умолчанию: свободного места после приёма не меньше 10 %, метки включены.
     pub fn new(root: PathBuf) -> Self {
         Self {
             root,
             limits: ReceiveLimits::default(),
-            auto_ceiling: AutoAcceptLimits {
-                max_total_bytes: 16 * 1024 * 1024 * 1024,
-                max_files: 1000,
-            },
+            min_free_percent: 10,
             allow_shared_root: false,
             mark_of_the_web: true,
             quarantine: true,

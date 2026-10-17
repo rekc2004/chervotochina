@@ -24,9 +24,11 @@ mod place;
 mod plan;
 mod policy;
 mod root;
+mod space;
 mod texts;
+mod trust;
 
-pub use classify::{FileClass, TypeInfo, classify};
+pub use classify::{FileClass, TypeInfo, classify, is_known_inert};
 pub use limits::{PathError, ReceiveLimits};
 pub use name::{
     NameFlags, SafeRelPath, fold, is_portable_component, portable_component, sanitize_path,
@@ -38,7 +40,12 @@ pub use place::TestPoint;
 pub use plan::{OfferPlan, PlannedFile, plan_offer, plan_offer_for_root, plan_offer_in};
 pub use policy::ReceivePolicy;
 pub use root::{ReceiveConfig, ReceiveRoot, RootError};
+pub use space::{DiskSpace, disk_space};
 pub use texts::{
-    ACTIVE_DOC_TEXT, DECEPTIVE_TEXT, DISK_IMAGE_TEXT, EXECUTABLE_TEXT, HOSTILE_DECLINED_TEXT,
-    LONG_PATH_TEXT, NAME_CHANGED_TEXT, SHARED_ROOT_TEXT, SUSPICIOUS_NAME_TEXT,
+    ACTIVE_DOC_TEXT, ASK_FILE_TEXT, DECEPTIVE_TEXT, DISK_IMAGE_TEXT, EXECUTABLE_TEXT,
+    HOSTILE_DECLINED_TEXT, LONG_PATH_TEXT, NAME_CHANGED_TEXT, SHARED_ROOT_TEXT,
+    SUSPICIOUS_NAME_TEXT, TRUST_QUESTION_TEXT,
+};
+pub use trust::{
+    TrustConfirmation, auto_accept_permission, disable_auto_accept, enable_auto_accept,
 };

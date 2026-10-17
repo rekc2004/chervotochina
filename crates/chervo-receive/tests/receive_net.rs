@@ -18,7 +18,7 @@ use std::fs;
 use std::io::Read;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -27,7 +27,7 @@ use chervo_addr::{AddrSource, KnownAddr, RouteSources};
 use chervo_connect::{AllowSet, Clock, ConnectConfig, Engine, RouteProbe, SystemClock};
 use chervo_friends::{AutoAcceptLimits, FriendBook, NewFriend, PendingRole, Permission};
 use chervo_identity::{IdentityError, ListKeyStore, PairId, PairKey, SecretStore};
-use chervo_receive::{ReceiveConfig, ReceivePlacement, ReceivePolicy, ReceiveRoot};
+use chervo_receive::{DiskSpace, ReceiveConfig, ReceivePlacement, ReceivePolicy, ReceiveRoot};
 use chervo_transfer::{
     AskAlways, CompletedFile, FailReason, OfferedFile, PlaceError, Placed, Placement, SourceFile,
     TransferConfig, TransferEvent, TransferEvents, TransferKey, Transfers,
@@ -246,18 +246,35 @@ struct Rx {
     cfg: ReceiveConfig,
     policy: Arc<ReceivePolicy>,
     place: Arc<ReceivePlacement>,
+    /// Свободное место «тома» (том 1 ТиБ): настоящее на Windows узнать нельзя, поэтому в
+    /// сетевых тестах место подставное и одинаковое на всех ОС.
+    free: Arc<AtomicU64>,
 }
+
+const TEST_VOLUME: u64 = 1 << 40;
 
 impl Rx {
     fn new(cfg: ReceiveConfig) -> Self {
         let root = ReceiveRoot::open(&cfg).unwrap();
         let place = Arc::new(ReceivePlacement::new(root.clone(), &cfg));
-        let policy = Arc::new(ReceivePolicy::new(root.clone(), &cfg));
+        let free = Arc::new(AtomicU64::new(TEST_VOLUME));
+        let f2 = free.clone();
+        let policy = Arc::new(ReceivePolicy::with_space_probe(
+            root.clone(),
+            &cfg,
+            Arc::new(move |_| {
+                Some(DiskSpace {
+                    total_bytes: TEST_VOLUME,
+                    available_bytes: f2.load(Ordering::SeqCst),
+                })
+            }),
+        ));
         Self {
             root,
             cfg,
             policy,
             place,
+            free,
         }
     }
 }
@@ -921,6 +938,9 @@ async fn net_risky_classes_never_auto_accepted() {
         "page.html",
         "photo.jpg.exe",
         "My.app/Contents/MacOS/My",
+        "report.doc",
+        "pic.svg",
+        "x.vb\u{17F}",
     ];
     for (i, name) in risky.iter().enumerate() {
         let _ = send(&d, &format!("r{i}"), &[(name, b"payload".to_vec())]).await;
@@ -941,74 +961,64 @@ async fn net_risky_classes_never_auto_accepted() {
 }
 
 #[tokio::test]
-async fn net_auto_accept_limits_enforced() {
-    // лимит друга: 3 файла и 100 КиБ за сутки; потолок общий: 50 000 байт
+async fn net_auto_accept_unknown_type_asks() {
+    // Рев. 3: от друга с автоприёмом сами принимаются только типы из списка; неизвестное
+    // расширение, `.bin` и файл без расширения это вопрос пользователю
     let perm = Permission::AutoAccept(AutoAcceptLimits {
-        max_total_bytes: 100 * 1024,
-        max_files: 3,
+        max_total_bytes: 1,
+        max_files: 1,
     });
-    let mut d = duo(perm, |c| {
-        c.auto_ceiling = AutoAcceptLimits {
-            max_total_bytes: 50_000,
-            max_files: 1000,
-        };
-    })
-    .await;
-    // 1: два файла, 20 000 байт: автоприём
-    round_auto(
-        &mut d,
-        "l1",
-        &[
-            ("a1.dat", rand_bytes(1, 10_000)),
-            ("a2.dat", rand_bytes(2, 10_000)),
-        ],
-    )
-    .await;
-    // 2: ещё два файла: 4 > 3 файлов за окно -> вопрос
-    let _ = send(
-        &d,
-        "l2",
-        &[
-            ("b1.dat", rand_bytes(3, 100)),
-            ("b2.dat", rand_bytes(4, 100)),
-        ],
-    )
-    .await;
-    ask_then_decline(&mut d).await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    // 3: один файл 25 000 байт: файлов 3, байт 45 000 <= потолок 50 000 -> автоприём
-    round_auto(&mut d, "l3", &[("c1.dat", rand_bytes(5, 25_000))]).await;
-    // 4: ещё файл: четвёртый файл -> вопрос (и потолок байт тоже исчерпан)
-    let _ = send(&d, "l4", &[("d1.dat", rand_bytes(6, 10))]).await;
-    ask_then_decline(&mut d).await;
+    let mut d = duo(perm, |_| {}).await;
+    for (i, name) in ["data.dat", "weights.bin", "README", "report.doc", "pic.svg"]
+        .iter()
+        .enumerate()
+    {
+        let _ = send(&d, &format!("u{i}"), &[(name, b"payload".to_vec())]).await;
+        ask_then_decline(&mut d).await;
+        assert!(tree(d.rx.root.root()).is_empty(), "{name} was stored");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    // известный тип проходит без вопроса, неизвестный принимается по ответу «да»
+    round_auto(&mut d, "u-ok", &[("clip.mp4", rand_bytes(1, 4000))]).await;
+    round_ask(&mut d, "u-man", &[("data.dat", rand_bytes(2, 3000))]).await;
     assert_eq!(
         tree(d.rx.root.root()),
-        expected_tree(&["a1.dat", "a2.dat", "c1.dat"])
+        expected_tree(&["clip.mp4", "data.dat"])
     );
     assert_partial_clean(&d).await;
 }
 
 #[tokio::test]
-async fn net_auto_ceiling_bytes_enforced() {
-    // лимит друга большой, потолок 50 000 байт: единичный и накопленный расход
+async fn net_auto_accept_no_volume_limit_only_free_space() {
+    // лимитов объёма и числа файлов нет: подряд несколько приёмов и много файлов без вопроса;
+    // единственная защита это свободное место после приёма (по умолчанию 10 %)
     let perm = Permission::AutoAccept(AutoAcceptLimits {
-        max_total_bytes: 1 << 30,
-        max_files: 100,
+        max_total_bytes: 1,
+        max_files: 1,
     });
-    let mut d = duo(perm, |c| {
-        c.auto_ceiling = AutoAcceptLimits {
-            max_total_bytes: 50_000,
-            max_files: 1000,
-        };
-    })
-    .await;
-    let _ = send(&d, "c1", &[("big.dat", rand_bytes(1, 60_000))]).await;
+    let mut d = duo(perm, |_| {}).await;
+    for i in 0..4u8 {
+        round_auto(
+            &mut d,
+            &format!("n{i}"),
+            &[(&format!("a{i}.jpg"), rand_bytes(u64::from(i), 20_000))],
+        )
+        .await;
+    }
+    let many: Vec<(String, Vec<u8>)> = (0..30u8)
+        .map(|i| (format!("m/f{i}.png"), rand_bytes(u64::from(i), 100)))
+        .collect();
+    let many_ref: Vec<(&str, Vec<u8>)> =
+        many.iter().map(|(n, b)| (n.as_str(), b.clone())).collect();
+    round_auto(&mut d, "many", &many_ref).await;
+    // свободного места осталось ровно на минимум: любой файл свыше этого это вопрос
+    let keep = TEST_VOLUME / 10;
+    d.rx.free.store(keep + 1000, Ordering::SeqCst);
+    let _ = send(&d, "full", &[("big.mp4", rand_bytes(9, 1001))]).await;
     ask_then_decline(&mut d).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
-    round_auto(&mut d, "c2", &[("ok1.dat", rand_bytes(2, 30_000))]).await;
-    let _ = send(&d, "c3", &[("ok2.dat", rand_bytes(3, 30_000))]).await;
-    ask_then_decline(&mut d).await;
-    assert_eq!(tree(d.rx.root.root()), expected_tree(&["ok1.dat"]));
+    round_auto(&mut d, "fits", &[("small.mp4", rand_bytes(8, 1000))]).await;
+    assert_partial_clean(&d).await;
 }
 
 // ------------------------------------------------- перезапуск между ссылкой и `Placed`

@@ -8,7 +8,7 @@ use std::path::Path;
 
 use chervo_transfer::OfferedFile;
 
-use crate::classify::{FileClass, TypeInfo, classify};
+use crate::classify::{FileClass, TypeInfo, classify, has_non_ascii_ext, is_known_inert};
 use crate::limits::{PathError, ReceiveLimits};
 use crate::name::{NameFlags, SafeRelPath, cut, fold, sanitize_path, split_ext};
 use crate::root::ReceiveRoot;
@@ -56,13 +56,22 @@ impl fmt::Debug for OfferPlan {
 }
 
 impl OfferPlan {
-    /// Все файлы обычные и ни один флаг имени не поднят.
+    /// Автоприём допустим (Рев. 3): каждый файл заведомо безопасного типа из списка
+    /// (`is_known_inert`), класс обычный, ни один флаг имени не поднят. Неизвестное расширение
+    /// или файл без расширения это не автоприём.
     pub fn auto_ok(&self) -> bool {
         self.files.iter().all(|f| {
             f.kind.class == FileClass::Ordinary
                 && !f.kind.deceptive
                 && f.flags == NameFlags::default()
+                && is_known_inert(&f.path)
         })
+    }
+
+    /// Нужен ли пользователю вопрос «Вы доверяете отправителю и знаете, зачем этот файл?»
+    /// (есть файл не из списка безопасных типов). Для экрана этапа 18.
+    pub fn needs_file_trust_question(&self) -> bool {
+        self.files.iter().any(|f| !is_known_inert(&f.path))
     }
 }
 
@@ -83,6 +92,17 @@ struct Dir {
     counters: HashMap<String, u32>,
 }
 
+/// Сколько байт остаётся основе имени после расширения и суффикса ` (k)`; `None`, если основе
+/// не остаётся ни байта (Рев. 3, F7: ту же проверку делает размещение на диске).
+pub(crate) fn suffix_budget(max_name: usize, ext_len: usize, suffix_len: usize) -> Option<usize> {
+    max_name
+        .checked_sub(ext_len.checked_add(suffix_len)?)
+        .filter(|b| *b > 0)
+}
+
+/// Запас на суффикс ` (k)` при размещении на диске: каталог верхнего уровня и файл, `k` до 999.
+const DISK_SUFFIX_UNITS: usize = 6;
+
 impl Dir {
     /// Следующее свободное имя `основа (k)расширение`, `k` от 2. Счётчик общий для
     /// семейства, поэтому весь план линеен по числу имён.
@@ -93,10 +113,8 @@ impl Dir {
         max_name: usize,
     ) -> Result<(String, String), PathError> {
         let (stem, ext) = if is_file { split_ext(name) } else { (name, "") };
-        let budget = max_name
-            .checked_sub(ext.len() + SUFFIX_RESERVE)
-            .filter(|b| *b > 0)
-            .ok_or(PathError::TooLong)?;
+        let budget =
+            suffix_budget(max_name, ext.len(), SUFFIX_RESERVE).ok_or(PathError::TooLong)?;
         let base = match cut(stem, budget) {
             "" => "_",
             b => b,
@@ -227,13 +245,26 @@ fn build_plan(
     for (i, f) in files.iter().enumerate() {
         let (path, mut flags) = sanitize_path(f.name.untrusted_str(), l)?;
         let comps = place_in_tree(&mut tree, path.components(), max_name, &mut flags)?;
+        // Рев. 3, F6: длина считается уже с суффиксами ` (k)`, которые размещение может добавить
+        // на диске (каталог верхнего уровня и файл, `k` до 999: по 6 символов).
         if let Some(root) = root
             && cfg!(windows)
-            && win32_len(root, &comps) > WIN_PATH_LIMIT
         {
-            flags.long_path = true;
+            let disk_suffix = if comps.len() >= 2 {
+                2 * DISK_SUFFIX_UNITS
+            } else {
+                DISK_SUFFIX_UNITS
+            };
+            if win32_len(root, &comps) + disk_suffix > WIN_PATH_LIMIT {
+                flags.long_path = true;
+            }
         }
         let path = SafeRelPath::from_parts(comps);
+        // Рев. 3, F3: не-ASCII в расширении это подозрительное имя (оболочка ОС может
+        // сопоставить `ſ` с `s`, `ı` с `i`).
+        if has_non_ascii_ext(&path) {
+            flags.suspicious = true;
+        }
         let kind = classify(&path);
         max_class = max_class.max(kind.class);
         any_deceptive |= kind.deceptive;

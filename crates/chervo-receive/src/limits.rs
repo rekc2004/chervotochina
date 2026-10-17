@@ -18,7 +18,8 @@ impl Default for ReceiveLimits {
             max_depth: 16,
             max_name_bytes: 255,
             max_path_bytes: 1024,
-            max_total_bytes: 2 * 1024 * 1024 * 1024 * 1024,
+            // Рев. 3: объёма как предела нет (решение владельца); остаётся предел протокола этапа 14.
+            max_total_bytes: u64::MAX,
         }
     }
 }

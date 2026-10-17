@@ -395,12 +395,84 @@ fn swap_dir_for_link_detected() {
     let cf = stage(&env, &k, 0, "d/x.txt", b"data");
     assert_eq!(env.place.place(&cf).unwrap_err(), PlaceError::Refused);
     assert!(done.load(Ordering::SeqCst), "the swap happened");
+    let left = fs::read_dir(&env.outside).expect("outside").count();
+    if cfg!(unix) {
+        // Unix: файл опознан по устройству и inode и убран
+        assert_eq!(left, 0, "outside must be empty afterwards");
+    } else {
+        // Windows (Рев. 3, F1): ничего не удаляем, чтобы не стать подставным исполнителем
+        // удаления чужого файла; наш собственный файл остаётся снаружи (остаток записан)
+        println!("swap_dir_for_link_detected: {left} stray file(s) left outside, none deleted");
+        assert!(left <= 1);
+    }
+}
+
+#[test]
+fn confused_deputy_does_not_delete_user_file() {
+    // F1: после ссылки каталог D подменяется ссылкой на V, где лежит файл пользователя с тем же
+    // именем и той же длиной. Проверка не проходит; чужой файл удалять нельзя ни на одной ОС.
+    let env = Env::new("deputy");
+    let k = key(1);
+    env.place
+        .prepare(&k, &offered(&[("d/x.txt", 4)]))
+        .expect("prepare");
+    let probe = env.tmp.path().join("probe-link2");
+    if link_dir_or_skip(
+        "confused_deputy_does_not_delete_user_file",
+        &env.outside,
+        &probe,
+    )
+    .is_none()
+    {
+        return;
+    }
+    let _ = fs::remove_dir(&probe).or_else(|_| fs::remove_file(&probe));
+    let victim = env.outside.join("x.txt");
+    fs::write(&victim, b"USER").expect("victim");
+    let dir = env.root.root().join("d");
+    let outside = env.outside.clone();
+    let done = Arc::new(AtomicBool::new(false));
+    let d2 = done.clone();
+    env.place.set_test_hook(Arc::new(move |p| {
+        if let TestPoint::AfterLink { dir: made } = p
+            && made == dir
+            && !d2.swap(true, Ordering::SeqCst)
+        {
+            // наш файл и папка убираются, на месте папки ссылка к файлу пользователя
+            fs::remove_file(dir.join("x.txt"))?;
+            fs::remove_dir(&dir)?;
+            common::link_dir(&outside, &dir).map_err(std::io::Error::other)?;
+        }
+        Ok(())
+    }));
+    let cf = stage(&env, &k, 0, "d/x.txt", b"data");
+    assert_eq!(env.place.place(&cf).unwrap_err(), PlaceError::Refused);
+    assert!(done.load(Ordering::SeqCst), "the swap happened");
+    // файл пользователя цел (и содержимое, и длина совпадают с нашим 4 байта)
+    assert_eq!(fs::read(&victim).expect("victim survives"), b"USER");
+}
+
+#[test]
+fn small_max_name_never_makes_overlong_name() {
+    // F7: при малом `max_name_bytes` суффикс ` (2)` не помещается: отказ, а не слишком длинное имя
+    let env = Env::with("smallname", |c: &mut ReceiveConfig| {
+        c.limits.max_name_bytes = 7
+    });
+    fs::write(env.root.root().join("a.txt"), b"mine").expect("write");
+    let res = place_offer(&env, &key(1), &[("a.txt", data(1, 10))]);
     assert!(
-        fs::read_dir(&env.outside)
-            .expect("outside")
-            .next()
-            .is_none(),
-        "outside must be empty afterwards"
+        matches!(res.first(), Some(Err(PlaceError::Refused))),
+        "{res:?}"
+    );
+    for e in fs::read_dir(env.root.root()).expect("dir").flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name != ".chervo-partial" {
+            assert!(name.len() <= 7, "{name}");
+        }
+    }
+    assert_eq!(
+        fs::read(env.root.root().join("a.txt")).expect("read"),
+        b"mine"
     );
 }
 
@@ -482,7 +554,7 @@ fn motw_failure_ignored() {
     let env = Env::new("motwfail");
     env.place.set_test_hook(Arc::new(|p| match p {
         TestPoint::BeforeMark => Err(std::io::Error::other("forced mark failure")),
-        TestPoint::BeforeLink { .. } => Ok(()),
+        _ => Ok(()),
     }));
     let res = place_offer(&env, &key(1), &[("doc.pdf", data(1, 100))]);
     let p = placed_path(res.first().expect("r"));
@@ -670,6 +742,19 @@ fn journal_tampered_rejected() {
             "wrong plan digest",
             Box::new(|p| {
                 patch_dirs(p, |b| b[8 + 16 + 16] ^= 0xFF, true);
+            }),
+        ),
+        (
+            "wrong folder identity",
+            Box::new(|p| {
+                // F5: k и контрольные суммы верны, но папка не та, что мы создали
+                patch_dirs(p, |b| b[8 + 16 + 16 + 32 + 4 + 2 + 7] ^= 0x55, true);
+            }),
+        ),
+        (
+            "old format magic",
+            Box::new(|p| {
+                patch_dirs(p, |b| b[7] = b'1', true);
             }),
         ),
         (

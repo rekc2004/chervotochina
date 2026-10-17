@@ -27,7 +27,7 @@ use crate::journal::{
 use crate::limits::ReceiveLimits;
 use crate::mark::mark_origin;
 use crate::name::{cut, split_ext};
-use crate::plan::{OfferPlan, plan_offer_for_root};
+use crate::plan::{OfferPlan, plan_offer_for_root, suffix_budget};
 use crate::root::{ReceiveConfig, ReceiveRoot, private_dir_builder};
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -41,6 +41,8 @@ pub enum TestPoint<'a> {
     BeforeMark,
     /// После проверки цепочки каталогов, непосредственно перед жёсткой ссылкой.
     BeforeLink { dir: &'a Path },
+    /// Сразу после успешной жёсткой ссылки, до итоговой проверки; результат не учитывается.
+    AfterLink { dir: &'a Path },
 }
 
 type TestHook = dyn Fn(TestPoint<'_>) -> io::Result<()> + Send + Sync;
@@ -51,7 +53,9 @@ struct SessionPlan {
     plan: OfferPlan,
     names: Vec<UntrustedName>,
     /// Имя каталога верхнего уровня в плане -> выбранное `k` (1: имя как есть).
-    tops: HashMap<String, u16>,
+    /// Идентичность папки (inode / время создания) обновляется, если папку пришлось создать
+    /// заново; меняется только под `dir_lock`.
+    tops: HashMap<String, (u16, AtomicU64)>,
     log: Mutex<PlacedLog>,
     /// Создание каталогов этой передачи идёт по одному (писатели разных файлов параллельны).
     dir_lock: Mutex<()>,
@@ -75,14 +79,47 @@ impl std::fmt::Debug for ReceivePlacement {
 
 /// Имя-кандидат номер `k`: 1 это само имя, иначе `основа (k)расширение` (файл) или
 /// `имя (k)` (каталог); основа усекается, чтобы результат уложился в `max` байт.
-fn candidate_name(name: &str, k: u16, is_file: bool, max: usize) -> String {
+fn candidate_name(name: &str, k: u16, is_file: bool, max: usize) -> Result<String, PlaceError> {
     if k <= 1 {
-        return name.to_owned();
+        return Ok(name.to_owned());
     }
     let (stem, ext) = if is_file { split_ext(name) } else { (name, "") };
     let suffix = format!(" ({k})");
-    let budget = max.saturating_sub(ext.len() + suffix.len());
-    format!("{}{suffix}{ext}", cut(stem, budget))
+    // Рев. 3, F7: та же проверка запаса, что в плане: основе должен остаться хотя бы байт,
+    // иначе имя вышло бы за предел.
+    let budget = suffix_budget(max, ext.len(), suffix.len()).ok_or(PlaceError::Refused)?;
+    let stem = match cut(stem, budget) {
+        "" => "_",
+        s => s,
+    };
+    Ok(format!("{stem}{suffix}{ext}"))
+}
+
+/// Идентичность папки, которую мы создали: Unix номер inode, Windows время создания (Рев. 3,
+/// F5). На прочих ОС 0 (сверка тогда ничего не проверяет).
+fn dir_ident(m: &fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        m.ino()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        m.creation_time()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = m;
+        0
+    }
+}
+
+/// Идентичность настоящего каталога по пути (не ссылка); иначе `None`.
+fn real_dir_ident(p: &Path) -> Option<u64> {
+    let m = fs::symlink_metadata(p).ok()?;
+    let t = m.file_type();
+    (t.is_dir() && !t.is_symlink()).then(|| dir_ident(&m))
 }
 
 fn is_real_dir(p: &Path) -> bool {
@@ -130,17 +167,13 @@ fn disk_root(p: &Path, size: u64) -> io::Result<FileRoot> {
     file_root(size, l, &leaves).map_err(|_| io::ErrorKind::InvalidData.into())
 }
 
-/// Тот же файл, что мы поставили (Unix: устройство и номер; иначе длина).
+/// Тот же файл, что мы поставили (устройство и номер inode). Только Unix: на Windows надёжного
+/// признака в std нет, поэтому там неудавшуюся проверку НЕ чистим удалением (Рев. 3, F1:
+/// подставной исполнитель мог подменить папку ссылкой на чужой файл той же длины).
+#[cfg(unix)]
 fn same_file(before: &fs::Metadata, now: &fs::Metadata) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        before.dev() == now.dev() && before.ino() == now.ino()
-    }
-    #[cfg(not(unix))]
-    {
-        before.len() == now.len()
-    }
+    use std::os::unix::fs::MetadataExt;
+    before.dev() == now.dev() && before.ino() == now.ino()
 }
 
 /// Имена каталогов верхнего уровня плана в порядке появления.
@@ -205,7 +238,7 @@ impl ReceivePlacement {
 
     /// Создаёт новые каталоги верхнего уровня; возвращает выбранные `k`. При ошибке созданные
     /// здесь пустые каталоги убираются.
-    fn create_top_dirs(&self, names: &[String]) -> Result<Vec<u16>, PlaceError> {
+    fn create_top_dirs(&self, names: &[String]) -> Result<Vec<(u16, u64)>, PlaceError> {
         let root = self.root.root();
         if !is_real_dir(root) {
             return Err(PlaceError::Refused);
@@ -217,11 +250,12 @@ impl ReceivePlacement {
                 let mut chosen = None;
                 for k in 1..=MAX_K {
                     let mut p = root.to_path_buf();
-                    safe_push(&mut p, &candidate_name(name, k, false, self.max_name()))?;
+                    safe_push(&mut p, &candidate_name(name, k, false, self.max_name())?)?;
                     match make_dir(&p) {
                         Ok(()) => {
+                            let ident = real_dir_ident(&p);
                             made.push(p);
-                            chosen = Some(k);
+                            chosen = Some((k, ident.ok_or(PlaceError::Refused)?));
                             break;
                         }
                         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
@@ -241,6 +275,63 @@ impl ReceivePlacement {
             return Err(e);
         }
         Ok(ks)
+    }
+
+    /// Папки верхнего уровня из журнала на месте и это те же папки (не ссылки; идентичность
+    /// совпала). Любое расхождение: журнал негоден, каталоги создаются заново.
+    fn top_dirs_match(&self, names: &[String], ks: &[(u16, u64)]) -> bool {
+        names.len() == ks.len()
+            && names.iter().zip(ks).all(|(name, (k, ident))| {
+                let mut p = self.root.root().to_path_buf();
+                candidate_name(name, *k, false, self.max_name())
+                    .ok()
+                    .is_some_and(|cn| safe_push(&mut p, &cn).is_ok())
+                    && real_dir_ident(&p) == Some(*ident)
+            })
+    }
+
+    fn top_path(&self, dirs: &[String]) -> Option<PathBuf> {
+        let mut p = self.root.root().to_path_buf();
+        safe_push(&mut p, dirs.first()?).ok()?;
+        Some(p)
+    }
+
+    /// Рев. 3, F5: если каталог верхнего уровня уже есть, это обязана быть та самая папка,
+    /// которую мы создали (идентичность совпадает). Отсутствующую (пользователь убрал её
+    /// посреди передачи) `walk_create` создаст заново и запомнит. Только под `dir_lock`.
+    fn check_top_ident(
+        &self,
+        sess: &SessionPlan,
+        top_orig: Option<&String>,
+        dirs: &[String],
+    ) -> Result<(), PlaceError> {
+        let (Some(orig), Some(path)) = (top_orig, self.top_path(dirs)) else {
+            return Ok(());
+        };
+        let (_, cell) = sess.tops.get(orig).ok_or(PlaceError::Refused)?;
+        match fs::symlink_metadata(&path) {
+            Ok(m) if m.file_type().is_dir() && !m.file_type().is_symlink() => {
+                if dir_ident(&m) == cell.load(Ordering::SeqCst) {
+                    Ok(())
+                } else {
+                    Err(PlaceError::Refused)
+                }
+            }
+            Ok(_) => Err(PlaceError::Refused),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(io_err(&e)),
+        }
+    }
+
+    /// Запоминает идентичность каталога верхнего уровня после `walk_create` (он мог создать
+    /// каталог заново). Только под `dir_lock`.
+    fn store_top_ident(&self, sess: &SessionPlan, top_orig: Option<&String>, dirs: &[String]) {
+        if let (Some(orig), Some(path)) = (top_orig, self.top_path(dirs))
+            && let Some((_, cell)) = sess.tops.get(orig)
+            && let Some(id) = real_dir_ident(&path)
+        {
+            cell.store(id, Ordering::SeqCst);
+        }
     }
 
     fn session(&self, key: &TransferKey) -> Option<Arc<SessionPlan>> {
@@ -318,7 +409,7 @@ impl ReceivePlacement {
         let mut cand = dir;
         safe_push(
             &mut cand,
-            &candidate_name(file_name, k, true, self.max_name()),
+            &candidate_name(file_name, k, true, self.max_name()).ok()?,
         )
         .ok()?;
         let m = fs::symlink_metadata(&cand).ok()?;
@@ -347,18 +438,21 @@ impl Placement for ReceivePlacement {
         let journals = self.root.journal_dir();
         // журнал размещения открывается первым: его отказ не оставляет созданных каталогов
         let log = PlacedLog::open(journals, &hex).map_err(|e| io_err(&e))?;
-        let ks = match read_dirs(journals, &hex, key, &digest, tops.len()) {
-            // каталоги созданы в прошлой жизни процесса; негодный журнал не доверяется
+        // каталоги созданы в прошлой жизни процесса; негодный журнал не доверяется, а каждая
+        // папка из него должна быть той самой (inode / время создания, F5)
+        let journaled = read_dirs(journals, &hex, key, &digest, tops.len())
+            .filter(|ks| self.top_dirs_match(&tops, ks));
+        let ks = match journaled {
             Some(ks) => ks,
             None => {
                 let ks = self.create_top_dirs(&tops)?;
                 if !ks.is_empty()
                     && let Err(e) = write_dirs(journals, &hex, key, &digest, &ks)
                 {
-                    for (name, k) in tops.iter().zip(&ks).rev() {
+                    for (name, (k, _)) in tops.iter().zip(&ks).rev() {
                         let mut p = self.root.root().to_path_buf();
-                        if safe_push(&mut p, &candidate_name(name, *k, false, self.max_name()))
-                            .is_ok()
+                        if let Ok(cn) = candidate_name(name, *k, false, self.max_name())
+                            && safe_push(&mut p, &cn).is_ok()
                             && is_real_dir(&p)
                         {
                             let _ = fs::remove_dir(&p);
@@ -373,7 +467,11 @@ impl Placement for ReceivePlacement {
             hex,
             plan,
             names: files.iter().map(|f| f.name.clone()).collect(),
-            tops: tops.into_iter().zip(ks).collect(),
+            tops: tops
+                .into_iter()
+                .zip(ks)
+                .map(|(name, (k, ident))| (name, (k, AtomicU64::new(ident))))
+                .collect(),
             log: Mutex::new(log),
             dir_lock: Mutex::new(()),
         });
@@ -400,8 +498,8 @@ impl Placement for ReceivePlacement {
         let mut dirs: Vec<String> = Vec::with_capacity(dir_comps.len());
         for (i, c) in dir_comps.iter().enumerate() {
             if i == 0 {
-                let k = *sess.tops.get(c).ok_or(PlaceError::Refused)?;
-                dirs.push(candidate_name(c, k, false, self.max_name()));
+                let (k, _) = sess.tops.get(c).ok_or(PlaceError::Refused)?;
+                dirs.push(candidate_name(c, *k, false, self.max_name())?);
             } else {
                 dirs.push(c.clone());
             }
@@ -427,23 +525,29 @@ impl Placement for ReceivePlacement {
 
         let dir = {
             let _g = lock(&sess.dir_lock);
-            self.walk_create(&dirs)?
+            self.check_top_ident(&sess, dir_comps.first(), &dirs)?;
+            let dir = self.walk_create(&dirs)?;
+            self.store_top_ident(&sess, dir_comps.first(), &dirs);
+            dir
         };
         for k in 1..=MAX_K {
             lock(&sess.log).append(f.index, k).map_err(|e| io_err(&e))?;
             let mut cand = dir.clone();
             safe_push(
                 &mut cand,
-                &candidate_name(file_name, k, true, self.max_name()),
+                &candidate_name(file_name, k, true, self.max_name())?,
             )?;
             self.at(TestPoint::BeforeLink { dir: &dir })
                 .map_err(|e| io_err(&e))?;
             match place_no_clobber(temp, &cand) {
                 Ok(_) => {
+                    let _ = self.at(TestPoint::AfterLink { dir: &dir });
                     if self.verify_placed(&dirs, &cand) {
                         return Ok(Placed { path: cand });
                     }
-                    // подмена каталога: убираем только тот файл, который сами поставили
+                    // подмена каталога: на Unix убираем только тот файл, который сами поставили
+                    // (устройство и inode). На Windows не удаляем ничего (F1).
+                    #[cfg(unix)]
                     if let Ok(m) = fs::symlink_metadata(&cand)
                         && m.file_type().is_file()
                         && same_file(&tmeta, &m)
@@ -474,8 +578,11 @@ impl Placement for ReceivePlacement {
                 let mut resolved: Vec<String> = Vec::with_capacity(n);
                 for (i, c) in comps.iter().take(n).enumerate() {
                     if i == 0 {
-                        let Some(k) = s.tops.get(c) else { break };
-                        resolved.push(candidate_name(c, *k, false, self.max_name()));
+                        let Some((k, _)) = s.tops.get(c) else { break };
+                        let Ok(cn) = candidate_name(c, *k, false, self.max_name()) else {
+                            break;
+                        };
+                        resolved.push(cn);
                     } else {
                         resolved.push(c.clone());
                     }

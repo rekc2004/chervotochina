@@ -241,14 +241,24 @@ fn plan_long_path_flag() {
     let p = plan_offer_in(&files, &l, &long_root).expect("plan");
     assert!(p.files.first().expect("f").flags.long_path);
     assert!(!p.auto_ok());
-    // Ровно на границе: 259 единиц нет, 260 да.
+    // Ровно на границе с запасом на суффикс " (k)" при размещении (6 единиц для одиночного файла,
+    // 12 для файла в каталоге верхнего уровня; Рев. 3, F6): 259 единиц нет, 260 да.
     let name = "e".repeat(10);
     let files = offer(&[name.as_str()]);
-    let root259 = PathBuf::from(format!(r"C:\{}", "r".repeat(259 - 3 - 1 - 10)));
+    let root259 = PathBuf::from(format!(r"C:\{}", "r".repeat(259 - 3 - 1 - 10 - 6)));
     let p = plan_offer_in(&files, &l, &root259).expect("plan");
     assert!(!p.files.first().expect("f").flags.long_path);
-    let root260 = PathBuf::from(format!(r"C:\{}", "r".repeat(260 - 3 - 1 - 10)));
+    let root260 = PathBuf::from(format!(r"C:\{}", "r".repeat(260 - 3 - 1 - 10 - 6)));
     let p = plan_offer_in(&files, &l, &root260).expect("plan");
+    assert!(p.files.first().expect("f").flags.long_path);
+    // Файл в каталоге верхнего уровня: запас 12 единиц (оба суффикса ` (999)`).
+    let files = offer(&["d/eeeeeeeeee"]);
+    let used = 3 + (1 + 1) + (1 + 10) + 12;
+    let r259 = PathBuf::from(format!(r"C:\{}", "r".repeat(259 - used)));
+    let p = plan_offer_in(&files, &l, &r259).expect("plan");
+    assert!(!p.files.first().expect("f").flags.long_path);
+    let r260 = PathBuf::from(format!(r"C:\{}", "r".repeat(260 - used)));
+    let p = plan_offer_in(&files, &l, &r260).expect("plan");
     assert!(p.files.first().expect("f").flags.long_path);
 }
 

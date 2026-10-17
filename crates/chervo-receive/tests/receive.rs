@@ -47,7 +47,7 @@ fn default_limits_valid() {
     assert_eq!(d.max_depth, 16);
     assert_eq!(d.max_name_bytes, 255);
     assert_eq!(d.max_path_bytes, 1024);
-    assert_eq!(d.max_total_bytes, 2 * 1024 * 1024 * 1024 * 1024);
+    assert_eq!(d.max_total_bytes, u64::MAX);
 }
 
 #[test]

@@ -1,7 +1,7 @@
 //! Классификация файла по итоговому имени (спецификация 15, решение 14). Один список для
 //! всех ОС. Архивы по решению владельца обычные файлы: отдельного класса и предупреждения нет.
 
-use crate::name::{SafeRelPath, split_ext};
+use crate::name::{SafeRelPath, fold, split_ext};
 
 /// По возрастанию опасности; старший класс побеждает.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -73,7 +73,28 @@ const EXECUTABLE: &[&str] = &[
     "iqy",
     "slk",
     "website",
-    "pyw", // macOS
+    "pyw",
+    // Рев. 3, F2: запускатели и установщики Windows.
+    "appref-ms",
+    "msu",
+    "ppkg",
+    "vsto",
+    "xbap",
+    "deskthemepack",
+    "searchconnector-ms",
+    "diagcfg",
+    "diagpkg",
+    "wsb",
+    "pyz",
+    "pyzw",
+    "dqy",
+    "rqy",
+    "wll",
+    // Рев. 3, F2: macOS и Linux.
+    "fileloc",
+    "inetloc",
+    "flatpak",
+    // macOS
     "app",
     "command",
     "tool",
@@ -112,11 +133,17 @@ const EXECUTABLE: &[&str] = &[
     "php",
 ];
 
-const DISK_IMAGE: &[&str] = &["iso", "img", "vhd", "vhdx", "dmg"];
+const DISK_IMAGE: &[&str] = &["iso", "img", "vhd", "vhdx", "dmg", "sparseimage"];
 
 const ACTIVE_DOCUMENT: &[&str] = &[
     "docm", "dotm", "xlsm", "xltm", "xlsb", "xlam", "pptm", "potm", "ppsm", "ppam", "sldm", "html",
     "htm", "mht", "mhtml", "xhtml",
+    // Рев. 3, F2: активное содержимое в разметке.
+    "svg", "svgz", "xht",
+    "shtml", // старый Office (макросы возможны в любом из них)
+    "doc", "dot", "xls", "xlt", "xla", "ppt", "pot", "pps", "ppa", "wbk",
+    // Access и OneNote.
+    "mdb", "accdb", "accde", "mde", "adp", "ade", "one", "onepkg",
 ];
 
 /// Каталоги-пакеты: всё внутри считается программой.
@@ -127,6 +154,109 @@ const BUNDLE_DIRS: &[&str] = &[
     ".plugin",
     ".kext",
     ".appex",
+    // Рев. 3, F2.
+    ".prefpane",
+    ".saver",
+    ".scptd",
+    ".workflow",
+    ".action",
+    ".mpkg",
+    ".wdgt",
+    ".qlgenerator",
+    ".mdimporter",
+    ".xpc",
+    ".osax",
+];
+
+/// Рев. 3 (решения владельца 2026-10-18): расширения заведомо безопасных типов, которые от
+/// друга с включённым автоприёмом принимаются сами. Всё остальное, включая неизвестные
+/// расширения и файлы без расширения, это вопрос пользователю. Список расширяемый, но
+/// пополнять его можно только типами без исполняемого и активного содержимого.
+/// Нарочно НЕТ: `bin` (класс Executable), `pt pth ckpt pkl pickle` (формат pickle исполняет код
+/// при загрузке), `rtf csv xml json` (двусмысленные), `ts` (TypeScript), `cab`, `psd`.
+const KNOWN_INERT: &[&str] = &[
+    // фото и RAW
+    "jpg",
+    "jpeg",
+    "jpe",
+    "png",
+    "gif",
+    "webp",
+    "bmp",
+    "tif",
+    "tiff",
+    "heic",
+    "heif",
+    "avif",
+    "jxl",
+    "dng",
+    "cr2",
+    "cr3",
+    "crw",
+    "nef",
+    "nrw",
+    "arw",
+    "srf",
+    "sr2",
+    "raf",
+    "orf",
+    "rw2",
+    "pef",
+    "raw",
+    "rwl",
+    "3fr",
+    "erf",
+    "kdc",
+    "mrw",
+    "mef",
+    "dcr",
+    "x3f", // видео
+    "mp4",
+    "m4v",
+    "mov",
+    "avi",
+    "mkv",
+    "webm",
+    "wmv",
+    "flv",
+    "mpg",
+    "mpeg",
+    "mts",
+    "m2ts",
+    "3gp",
+    "mxf",
+    "braw",
+    "r3d",
+    "ogv", // аудио
+    "mp3",
+    "wav",
+    "flac",
+    "m4a",
+    "aac",
+    "ogg",
+    "oga",
+    "opus",
+    "wma",
+    "aif",
+    "aiff",
+    "alac",
+    "mid",
+    "midi", // документы без активного содержимого
+    "pdf",
+    "txt",
+    "md",
+    "srt", // архивы (решение владельца: обычные файлы)
+    "zip",
+    "7z",
+    "rar",
+    "tar",
+    "gz",
+    "tgz",
+    "bz2",
+    "xz",
+    "zst", // файлы моделей
+    "gguf",
+    "safetensors",
 ];
 
 /// Расширения, под которые маскируют программу (`photo.jpg.exe`).
@@ -136,11 +266,36 @@ const DECOYS: &[&str] = &[
     "zip",
 ];
 
-/// Расширение в нижнем регистре; `None`, если его нет или оно не ASCII.
-fn ascii_ext(comp: &str) -> Option<String> {
+/// Расширение после `fold` (Рев. 3, F3): `ſ` даёт `s`, `ı` даёт `i`, знак Кельвина `k`; так
+/// `x.vbſ` попадает в тот же класс, что `x.vbs`. `None`, если расширения нет.
+fn folded_ext(comp: &str) -> Option<String> {
     let (_, ext) = split_ext(comp);
-    let e = ext.strip_prefix('.')?;
-    e.is_ascii().then(|| e.to_ascii_lowercase())
+    Some(fold(ext.strip_prefix('.')?))
+}
+
+/// Есть ли у последнего компонента расширение с не-ASCII символом (после `fold` оно может
+/// совпасть с расширением программы, оболочка ОС этого может не показывать).
+pub(crate) fn has_non_ascii_ext(p: &SafeRelPath) -> bool {
+    p.components().last().is_some_and(|last| {
+        let (_, ext) = split_ext(last);
+        !ext.is_ascii()
+    })
+}
+
+/// Файл заведомо безопасного типа (решения владельца 2026-10-18): класс обычный, расширение
+/// ASCII и входит в список `KNOWN_INERT`. Только такие файлы принимаются без вопроса.
+pub fn is_known_inert(p: &SafeRelPath) -> bool {
+    if classify(p).class != FileClass::Ordinary {
+        return false;
+    }
+    let Some(last) = p.components().last() else {
+        return false;
+    };
+    let (_, ext) = split_ext(last);
+    if !ext.is_ascii() {
+        return false;
+    }
+    folded_ext(last).is_some_and(|e| KNOWN_INERT.contains(&e.as_str()))
 }
 
 pub fn classify(p: &SafeRelPath) -> TypeInfo {
@@ -151,9 +306,9 @@ pub fn classify(p: &SafeRelPath) -> TypeInfo {
             deceptive: false,
         };
     };
-    let ext = ascii_ext(last);
+    let ext = folded_ext(last);
     let in_bundle = dirs.iter().any(|d| {
-        let lower = d.to_ascii_lowercase();
+        let lower = fold(d);
         BUNDLE_DIRS.iter().any(|b| lower.ends_with(b))
     });
     let class = match ext.as_deref() {
@@ -173,7 +328,7 @@ pub fn classify(p: &SafeRelPath) -> TypeInfo {
 fn has_decoy(last: &str) -> bool {
     let (stem, _) = split_ext(last);
     stem.rsplit_once('.').is_some_and(|(_, seg)| {
-        let seg = seg.trim_matches(' ').to_ascii_lowercase();
+        let seg = fold(seg.trim_matches(' '));
         DECOYS.contains(&seg.as_str())
     })
 }

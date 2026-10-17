@@ -385,7 +385,12 @@ fn fuzz_smoke_plan() {
         let plan2 = plan_offer(&second, &l).expect("replan");
         for (a, b) in plan.files.iter().zip(&plan2.files) {
             assert_eq!(a.path, b.path);
-            assert!(!b.flags.changed && !b.flags.renamed_in_offer && !b.flags.suspicious);
+            assert!(!b.flags.changed && !b.flags.renamed_in_offer);
+            // Рев. 3, F3: `suspicious` остаётся только из-за не-ASCII в расширении
+            // (то есть в последнем компоненте), не из-за невидимых символов.
+            assert!(
+                !b.flags.suspicious || b.path.components().last().is_some_and(|c| !c.is_ascii())
+            );
         }
     }
     println!("fuzz_smoke_plan: files={total_files}");
