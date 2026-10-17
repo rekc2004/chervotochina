@@ -9,6 +9,7 @@ members = [
     "crates/chervo-token",
     "crates/chervo-friends",
     "crates/chervo-connect",
+    "crates/chervo-upnp",
     "crates/chervo-transfer",
     "crates/chervo-receive",
     "crates/chervo-core",
@@ -30,6 +31,7 @@ chervo-timesync = { path = "crates/chervo-timesync", version = "0.0.0" }
 chervo-token = { path = "crates/chervo-token", version = "0.0.0" }
 chervo-friends = { path = "crates/chervo-friends", version = "0.0.0" }
 chervo-connect = { path = "crates/chervo-connect", version = "0.0.0" }
+chervo-upnp = { path = "crates/chervo-upnp", version = "0.0.0" }
 chervo-transfer = { path = "crates/chervo-transfer", version = "0.0.0" }
 chervo-receive = { path = "crates/chervo-receive", version = "0.0.0" }
 chervo-core = { path = "crates/chervo-core", version = "0.0.0" }

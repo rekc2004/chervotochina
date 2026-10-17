@@ -439,6 +439,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "chervo-upnp"
+version = "0.0.0"
+dependencies = [
+ "chervo-addr",
+ "socket2",
+]
+
+[[package]]
 name = "cipher"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
