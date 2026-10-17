@@ -422,6 +422,7 @@ dependencies = [
  "chervo-friends",
  "chervo-identity",
  "chervo-transport",
+ "chervo-transport-quinn",
  "getrandom 0.4.3",
  "ring",
  "tokio",
