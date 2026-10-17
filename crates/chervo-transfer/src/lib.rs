@@ -1,67 +1,41 @@
-//! Протокол передачи: типы сообщений и заглушка декодера с границей длины.
+//! Протокол передачи файлов (этап 14, часть X1): кодек кадров с точными границами длины,
+//! раскладка блоков, хэши SHA-256 (ring) и файл состояния получателя.
+//! Спецификация: `docs/specs/stage-14-transfer.md`.
+//!
+//! Имена из сети лежат в `UntrustedName` и нигде не превращаются в пути. Сокетов в крейте нет.
+#![deny(clippy::unwrap_used)]
+#![deny(clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
+#![deny(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    clippy::dbg_macro,
+    clippy::todo
+)]
 
-use std::fmt;
+mod codec;
+mod hash;
+mod layout;
+mod limits;
+mod names;
+mod state;
+mod wire_io;
 
-/// Верхняя граница длины сообщения протокола.
-pub const MAX_MESSAGE_LEN: usize = 64 * 1024;
+#[cfg(test)]
+mod tests;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TransferId(pub [u8; 16]);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BlockHash(pub [u8; 32]);
-
-/// Без Debug: пути файлов не печатаются через derive.
-#[derive(Clone)]
-pub struct FileEntry {
-    pub rel_path: String,
-    pub size: u64,
-    pub root_hash: BlockHash,
-}
-
-/// Без Debug.
-#[derive(Clone)]
-pub struct Offer {
-    pub id: TransferId,
-    pub files: Vec<FileEntry>,
-}
-
-/// Без Debug.
-#[derive(Clone)]
-pub enum Message {
-    Offer(Offer),
-    Accept(TransferId),
-    Reject(TransferId),
-    Resume {
-        id: TransferId,
-        file_index: u32,
-        from_block: u64,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProtocolError {
-    TooLong,
-    NotImplemented,
-}
-
-impl fmt::Display for ProtocolError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let text = match self {
-            Self::TooLong => "message too long",
-            Self::NotImplemented => "not implemented",
-        };
-        f.write_str(text)
-    }
-}
-
-impl std::error::Error for ProtocolError {}
-
-/// Заглушка: длина сверх границы даёт `TooLong`, иначе `NotImplemented`. Никогда не `Ok`.
-pub fn decode_message(bytes: &[u8]) -> Result<Message, ProtocolError> {
-    if bytes.len() > MAX_MESSAGE_LEN {
-        Err(ProtocolError::TooLong)
-    } else {
-        Err(ProtocolError::NotImplemented)
-    }
-}
+pub use codec::{
+    BlockErrCode, CancelReason, FileErrCode, Message, OfferAssembler, ProtocolError, Verdict,
+    decode_message, encode,
+};
+pub use hash::{BlockHash, FileRoot, file_root, leaf_hash};
+pub use layout::{Layout, block_len, check_block_len, check_manifest_layout, layout};
+pub use limits::{
+    MAX_BLOCK, MAX_BLOCKS, MAX_FILE_SIZE, MAX_FILES_PER_OFFER, MAX_INPROGRESS, MAX_MESSAGE_LEN,
+    MAX_NAME_BYTES, MAX_OFFER_BYTES, MAX_OFFER_TOTAL, MAX_STATE_LEN, MIN_BLOCK, PROTO_VERSION,
+    STREAM_TRANSFER_CTL, STREAM_TRANSFER_DATA,
+};
+pub use names::{OfferedFile, TransferId, TransferKey, UntrustedName};
+#[doc(hidden)]
+pub use state::{RecvState, decode_state, encode_state};
+pub use state::{StateError, encode_hashes, parse_hashes, state_dir_name};
+pub use wire_io::{read_exact, read_message};

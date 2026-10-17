@@ -7,12 +7,16 @@ fn decode_message_bounds() {
         decode_message(&too_big),
         Err(ProtocolError::TooLong)
     ));
-    assert!(matches!(
-        decode_message(&[]),
-        Err(ProtocolError::NotImplemented)
-    ));
+    // Пустое тело: нет даже байта типа.
+    assert!(matches!(decode_message(&[]), Err(ProtocolError::Malformed)));
+    // Известный тип с неверной длиной.
     assert!(matches!(
         decode_message(&[1, 2, 3]),
-        Err(ProtocolError::NotImplemented)
+        Err(ProtocolError::Malformed)
+    ));
+    // Неизвестный тип.
+    assert!(matches!(
+        decode_message(&[0xEE, 1, 2, 3]),
+        Err(ProtocolError::UnknownType)
     ));
 }
