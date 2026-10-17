@@ -351,7 +351,10 @@ pub(crate) fn finalize_file(s: &Arc<RecvSession>, file: u32) {
         root,
         temp_for_placement(&s.sdir, file),
     );
-    match s.sh.placement.place(&cf) {
+    // восстановленная с диска передача: служебные данные размещения готовятся лениво, до
+    // первого `place` в этом процессе; ошибка считается ошибкой размещения
+    let placed = s.ensure_prepared().and_then(|()| s.sh.placement.place(&cf));
+    match placed {
         Ok(_) => {
             lock(&s.core).sched.set_placed(file);
             // `Placed` записывается сразу, а не контрольной точкой; `.placing` и хэши убираются

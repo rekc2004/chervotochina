@@ -14,6 +14,7 @@ mod flow;
 mod fuzz;
 mod hash;
 mod hashprog;
+mod hooks;
 mod integrity;
 mod kit;
 mod liveness;

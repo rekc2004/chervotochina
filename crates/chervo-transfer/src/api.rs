@@ -24,7 +24,7 @@ use crate::limits::{
 };
 use crate::links::Links;
 use crate::names::{TransferId, TransferKey, UntrustedName};
-use crate::paths::create_session_dir;
+use crate::paths::{create_session_dir, remove_session};
 use crate::placement::Placement;
 use crate::policy::{AcceptPolicy, OfferView, PolicyVerdict};
 use crate::receiver::{Finish, FirstCtl, RPhase, RecvSession, recv_supervisor};
@@ -592,7 +592,17 @@ async fn accept_flow<L: Links>(
             create_session_dir(&base, &dir)?;
             // имена один раз в отдельный неизменяемый файл; состояние хранит только статусы
             s2.write_names_once()?;
-            s2.persist()
+            // служебные данные размещения (этап 15); ошибка отменяет передачу как `Limits`
+            if s2.ensure_prepared().is_err() {
+                remove_session(&s2.sdir);
+                s2.sh.placement.forget(&s2.key);
+                return Err(std::io::Error::from(std::io::ErrorKind::Other));
+            }
+            let saved = s2.persist();
+            if saved.is_err() {
+                s2.sh.placement.forget(&s2.key);
+            }
+            saved
         })
         .await;
     if !matches!(made, Ok(Ok(()))) {

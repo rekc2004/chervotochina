@@ -700,6 +700,18 @@ pub struct PlaceSpy {
     /// Имитация момента краха: `PLACE_LINK_ONLY` только жёсткая ссылка, временное имя не
     /// удаляется; `PLACE_NOTHING` ничего не делает (крах до ссылки).
     pub mode: std::sync::atomic::AtomicU8,
+    /// Порядок вызовов `prepare` / `place` / `forget`.
+    pub log: Mutex<Vec<PlaceEv>>,
+    /// `prepare` возвращает ошибку.
+    pub prepare_fail: std::sync::atomic::AtomicBool,
+}
+
+/// Вызов `Placement` глазами теста (число файлов в `Prepare`, индекс в `Place`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaceEv {
+    Prepare(usize),
+    Place(u32),
+    Forget,
 }
 
 pub const PLACE_NORMAL: u8 = 0;
@@ -707,7 +719,20 @@ pub const PLACE_LINK_ONLY: u8 = 1;
 pub const PLACE_NOTHING: u8 = 2;
 
 impl Placement for PlaceSpy {
+    fn prepare(&self, _key: &TransferKey, files: &[crate::OfferedFile]) -> Result<(), PlaceError> {
+        self.log.lock().unwrap().push(PlaceEv::Prepare(files.len()));
+        if self.prepare_fail.load(Ordering::SeqCst) {
+            return Err(PlaceError::Refused);
+        }
+        Ok(())
+    }
+
+    fn forget(&self, _key: &TransferKey) {
+        self.log.lock().unwrap().push(PlaceEv::Forget);
+    }
+
     fn place(&self, f: &CompletedFile) -> Result<Placed, PlaceError> {
+        self.log.lock().unwrap().push(PlaceEv::Place(f.index));
         let ok = crate::fsio::disk_root(f.temp_path(), f.size).is_ok_and(|r| r == f.root);
         self.calls.lock().unwrap().push((f.index, ok));
         if self.fail.load(Ordering::SeqCst) {
@@ -766,6 +791,8 @@ impl Peer {
             calls: Mutex::new(Vec::new()),
             fail: std::sync::atomic::AtomicBool::new(false),
             mode: std::sync::atomic::AtomicU8::new(PLACE_NORMAL),
+            log: Mutex::new(Vec::new()),
+            prepare_fail: std::sync::atomic::AtomicBool::new(false),
         });
         let (tr, ev) = Transfers::start_with(
             node.engine.clone(),
@@ -802,6 +829,7 @@ impl Peer {
         self.hook.log.lock().unwrap().clear();
         self.hook.clear();
         self.spy.calls.lock().unwrap().clear();
+        self.spy.log.lock().unwrap().clear();
         let (tr, ev) = Transfers::start_with(
             self.node.engine.clone(),
             inbox,

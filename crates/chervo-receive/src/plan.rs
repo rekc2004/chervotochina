@@ -11,6 +11,7 @@ use chervo_transfer::OfferedFile;
 use crate::classify::{FileClass, TypeInfo, classify};
 use crate::limits::{PathError, ReceiveLimits};
 use crate::name::{NameFlags, SafeRelPath, cut, fold, sanitize_path, split_ext};
+use crate::root::ReceiveRoot;
 
 /// Запас под ` (k)` с `k` до десяти цифр при усечении основы имени.
 const SUFFIX_RESERVE: usize = 14;
@@ -258,11 +259,20 @@ pub fn plan_offer(files: &[OfferedFile], l: &ReceiveLimits) -> Result<OfferPlan,
 }
 
 /// План с проверкой длины пути под папку `root` (на Windows поднимает `long_path`).
-/// `plan_offer_for_root` (этап R2) вызывает эту функцию с корнем приёма.
+/// `plan_offer_for_root` вызывает эту функцию с корнем приёма.
 pub fn plan_offer_in(
     files: &[OfferedFile],
     l: &ReceiveLimits,
     root: &Path,
 ) -> Result<OfferPlan, PathError> {
     build_plan(files, l, Some(root))
+}
+
+/// План для папки приёма: `plan_offer_in` с каноническим корнем `root`.
+pub fn plan_offer_for_root(
+    files: &[OfferedFile],
+    l: &ReceiveLimits,
+    root: &ReceiveRoot,
+) -> Result<OfferPlan, PathError> {
+    plan_offer_in(files, l, root.root())
 }

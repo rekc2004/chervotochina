@@ -394,7 +394,11 @@ dependencies = [
 name = "chervo-receive"
 version = "0.0.0"
 dependencies = [
+ "chervo-friends",
+ "chervo-identity",
  "chervo-transfer",
+ "ring",
+ "rustix",
  "unicode-normalization",
 ]
 

@@ -47,11 +47,16 @@ pub(crate) fn load_all(sh: &Arc<Shared>) -> Vec<Arc<RecvSession>> {
     let mut out = Vec::new();
     for name in names {
         let sdir = session_dir(base, &name);
-        let state = read_state(&sdir)
+        let decoded = read_state(&sdir)
             .ok()
             .and_then(|b| decode_state(&b).ok())
-            .filter(|st| state_dir_name(&st.pair, &st.id) == name)
-            .filter(|st| now.saturating_sub(st.last_progress_unix) <= ttl);
+            .filter(|st| state_dir_name(&st.pair, &st.id) == name);
+        // ключ известен, только если состояние разобрано и согласовано с именем каталога
+        let known = decoded.as_ref().map(|st| TransferKey {
+            pair: st.pair,
+            id: st.id,
+        });
+        let state = decoded.filter(|st| now.saturating_sub(st.last_progress_unix) <= ttl);
         // имена: неизменяемый файл, тот самый, к которому привязано состояние
         let nf = state.as_ref().and_then(|st| {
             read_names(&sdir)
@@ -66,6 +71,9 @@ pub(crate) fn load_all(sh: &Arc<Shared>) -> Vec<Arc<RecvSession>> {
         });
         let (Some(st), Some(nf)) = (state, nf) else {
             remove_session(&sdir);
+            if let Some(k) = known {
+                sh.placement.forget(&k);
+            }
             continue;
         };
         let mut runs = Vec::with_capacity(st.files.len());

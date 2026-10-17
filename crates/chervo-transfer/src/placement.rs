@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use crate::fsio::disk_root;
 use crate::hash::FileRoot;
-use crate::names::{TransferKey, UntrustedName};
+use crate::names::{OfferedFile, TransferKey, UntrustedName};
 use crate::paths::{remove_file_retry, rename_retry};
 use crate::state::state_dir_name;
 
@@ -41,6 +41,20 @@ impl CompletedFile {
             root,
             temp,
         }
+    }
+
+    /// Конструктор для тестов внешних реализаций `Placement` (в рабочем коде файл создаёт
+    /// только писатель).
+    #[doc(hidden)]
+    pub fn new_for_test(
+        key: TransferKey,
+        index: u32,
+        name: UntrustedName,
+        size: u64,
+        root: FileRoot,
+        temp: PathBuf,
+    ) -> Self {
+        Self::new(key, index, name, size, root, temp)
     }
 
     /// Временный файл внутри `partial_dir`. Обязан быть перенесён или скопирован.
@@ -90,6 +104,21 @@ pub trait Placement: Send + Sync + 'static {
     /// перезаписывает; идемпотентно для пары (key, index): если файл уже размещён, вернуть
     /// его место, а не размещать снова.
     fn place(&self, f: &CompletedFile) -> Result<Placed, PlaceError>;
+
+    /// Вызывается в блокирующем потоке один раз за жизнь процесса для передачи, до первого
+    /// `place`: сразу после записи имён при принятии, для восстановленных с диска передач
+    /// лениво перед первым `place`. Ошибка при принятии отменяет передачу (`Limits`), ошибка
+    /// при ленивом вызове считается ошибкой `place`. По умолчанию ничего не делает.
+    fn prepare(&self, key: &TransferKey, files: &[OfferedFile]) -> Result<(), PlaceError> {
+        let _ = (key, files);
+        Ok(())
+    }
+
+    /// Передача окончательно снята (завершена, отменена, не удалась или удалена при запуске):
+    /// можно убрать служебные данные размещения. По умолчанию ничего не делает.
+    fn forget(&self, key: &TransferKey) {
+        let _ = key;
+    }
 }
 
 /// Только для тестов и примера: итоговое имя `chervo-<hex(key)>-<index>` в `dest_dir`.

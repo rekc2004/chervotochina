@@ -178,10 +178,12 @@ pub(crate) fn read_hashes(sdir: &Path, index: u32, max: u64) -> io::Result<Vec<u
 /// Новый `<i>.part`: `create_new`, существующий файл (в том числе жёсткая ссылка на уже
 /// размещённый) никогда не открывается для записи.
 pub(crate) fn create_part_new(sdir: &Path, index: u32) -> io::Result<File> {
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(part_path(sdir, index))
+    let mut o = OpenOptions::new();
+    o.write(true).create_new(true);
+    // Unix: только владелец; бита исполнения у принятого файла не бывает
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    o.open(part_path(sdir, index))
 }
 
 /// Существующий `<i>.part` для записи без создания и без усечения.

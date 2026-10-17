@@ -171,6 +171,10 @@ pub(crate) struct RecvSession {
     /// Состояние изменилось, а записи на диск ещё не было: запись объединяется по таймеру
     /// контрольной точки писателя (не по записи на каждое событие файла).
     dirty: AtomicBool,
+    /// `Placement::prepare` уже вызван в этом процессе для этой передачи.
+    pub(crate) prepared: AtomicBool,
+    /// Один вызов `prepare` за раз (писатели разных файлов могут прийти одновременно).
+    prep_lock: Mutex<()>,
     /// Доля этой передачи в бюджете памяти получения.
     pub(crate) share: Arc<Semaphore>,
     /// Изменилась работа планировщика (новый блок, файл закрыт и тому подобное).
@@ -240,6 +244,8 @@ impl RecvSession {
             io_lock: Mutex::new(()),
             names_sum: Mutex::new([0; 32]),
             dirty: AtomicBool::new(false),
+            prepared: AtomicBool::new(false),
+            prep_lock: Mutex::new(()),
             share,
             wake: Notify::new(),
             retry: Notify::new(),
@@ -289,6 +295,8 @@ impl RecvSession {
             io_lock: Mutex::new(()),
             names_sum: Mutex::new(names_sum),
             dirty: AtomicBool::new(false),
+            prepared: AtomicBool::new(false),
+            prep_lock: Mutex::new(()),
             share,
             wake: Notify::new(),
             retry: Notify::new(),
@@ -472,6 +480,22 @@ impl RecvSession {
             names_sum: *lock(&self.names_sum),
             files,
         }
+    }
+
+    /// `Placement::prepare` один раз за жизнь процесса (блокирующая). При ошибке `prepared`
+    /// остаётся ложным: следующее размещение попробует снова.
+    pub(crate) fn ensure_prepared(&self) -> Result<(), crate::placement::PlaceError> {
+        if self.prepared.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let _g = lock(&self.prep_lock);
+        if self.prepared.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let files = self.offer_view().files;
+        self.sh.placement.prepare(&self.key, &files)?;
+        self.prepared.store(true, Ordering::Release);
+        Ok(())
     }
 
     /// Файл имён предложения, один раз при принятии (блокирующая): имена в неизменяемый файл
@@ -991,12 +1015,14 @@ pub(crate) async fn finish_session<L: Links>(
     s.jobs.idle().await;
     if !keep {
         let dir = s.sdir.clone();
+        let s2 = s.clone();
         let g = s.sh.tracker.guard();
         let _ =
             s.sh.rt
                 .spawn_blocking(move || {
                     let _g = g;
                     remove_session(&dir);
+                    s2.sh.placement.forget(&s2.key);
                 })
                 .await;
     }
