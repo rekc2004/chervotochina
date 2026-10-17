@@ -8,6 +8,7 @@ use std::fmt::Write as _;
 use chervo_addr::{AddrSource, KnownAddr};
 use chervo_friends::{
     AutoAcceptLimits, FriendBook, FriendState, FriendsError, KeyStatus, PendingRole, Permission,
+    TrustConfirmation,
 };
 use chervo_identity::{PairId, SecretStore, create};
 use chervo_token::{InviteDraft, RevocationReason, Token, decode, issue_invite, issue_revocation};
@@ -299,27 +300,55 @@ fn permission_default_ask() {
 }
 
 #[test]
-fn autoaccept_requires_limits() {
+fn autoaccept_requires_trust_confirmation() {
     let (dir, store, mut book) = fresh();
     let a = add_friend(&mut book, &store, "А");
-    for l in [(0u64, 5u32), (5, 0), (0, 0)] {
+    // set_permission никогда не включает автоприём: ни с хорошими, ни с нулевыми лимитами
+    for l in [
+        (0u64, 5u32),
+        (5, 0),
+        (0, 0),
+        (1 << 20, 3),
+        (u64::MAX, u32::MAX),
+    ] {
         let p = Permission::AutoAccept(AutoAcceptLimits {
             max_total_bytes: l.0,
             max_files: l.1,
         });
         assert_eq!(
             book.set_permission(&store, &a.pair, p).err(),
-            Some(FriendsError::InvalidLimits)
+            Some(FriendsError::TrustRequired)
         );
     }
     assert_eq!(book.get(&a.pair).unwrap().permission, Permission::Ask);
-    let good = Permission::AutoAccept(AutoAcceptLimits {
-        max_total_bytes: 1 << 20,
-        max_files: 3,
-    });
-    book.set_permission(&store, &a.pair, good).unwrap();
     let again = FriendBook::open(&dir.file(), &store).unwrap();
-    assert_eq!(again.get(&a.pair).unwrap().permission, good);
+    assert_eq!(again.get(&a.pair).unwrap().permission, Permission::Ask);
+
+    // с подтверждением включается и переживает перезапуск
+    book.enable_auto_accept(&store, &a.pair, TrustConfirmation::user_confirmed_trust())
+        .unwrap();
+    assert!(matches!(
+        book.get(&a.pair).unwrap().permission,
+        Permission::AutoAccept(_)
+    ));
+    let again = FriendBook::open(&dir.file(), &store).unwrap();
+    assert_eq!(
+        again.get(&a.pair).unwrap().permission,
+        book.get(&a.pair).unwrap().permission
+    );
+    assert_eq!(
+        book.enable_auto_accept(
+            &store,
+            &PairId::generate().unwrap(),
+            TrustConfirmation::user_confirmed_trust()
+        )
+        .err(),
+        Some(FriendsError::UnknownPair)
+    );
+    // выключение (Ask) подтверждения не требует
+    book.set_permission(&store, &a.pair, Permission::Ask)
+        .unwrap();
+    assert_eq!(book.get(&a.pair).unwrap().permission, Permission::Ask);
     assert_eq!(
         book.set_permission(&store, &PairId::generate().unwrap(), Permission::Ask)
             .err(),

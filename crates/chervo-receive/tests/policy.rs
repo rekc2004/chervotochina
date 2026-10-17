@@ -365,15 +365,14 @@ fn disk_space_allows_arithmetic() {
 fn real_disk_space_probe() {
     let env = Env::new("preal");
     let got = disk_space(env.root.root());
-    if cfg!(unix) {
-        let s = got.expect("statvfs works on unix");
+    if cfg!(any(unix, windows)) {
+        let s = got.expect("fs4::statvfs works on unix and windows");
         assert!(s.total_bytes > 0 && s.available_bytes <= s.total_bytes);
         println!(
             "real_disk_space_probe: total {} available {}",
             s.total_bytes, s.available_bytes
         );
     } else {
-        // Windows: безопасного способа без `unsafe` нет (спецификация 15, Рев. 3)
         assert_eq!(got, None);
         println!("real_disk_space_probe: unknown on this OS, auto-accept asks");
     }

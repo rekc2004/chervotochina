@@ -25,7 +25,9 @@ use std::time::Duration;
 
 use chervo_addr::{AddrSource, KnownAddr, RouteSources};
 use chervo_connect::{AllowSet, Clock, ConnectConfig, Engine, RouteProbe, SystemClock};
-use chervo_friends::{AutoAcceptLimits, FriendBook, NewFriend, PendingRole, Permission};
+use chervo_friends::{
+    AutoAcceptLimits, FriendBook, NewFriend, PendingRole, Permission, TrustConfirmation,
+};
 use chervo_identity::{IdentityError, ListKeyStore, PairId, PairKey, SecretStore};
 use chervo_receive::{DiskSpace, ReceiveConfig, ReceivePlacement, ReceivePolicy, ReceiveRoot};
 use chervo_transfer::{
@@ -326,7 +328,15 @@ async fn duo(perm: Permission, fcfg: impl FnOnce(&mut ReceiveConfig)) -> Duo {
         .finish_pair(&*sy, &py, new_friend(&kx, &ky, Some(bx.addr)))
         .unwrap();
     if perm != Permission::Ask {
-        by_book.set_permission(&*sy, &py, perm).unwrap();
+        // автоприём включается только с подтверждением доверия (Рев. 4)
+        assert!(matches!(perm, Permission::AutoAccept(_)));
+        assert_eq!(
+            by_book.set_permission(&*sy, &py, perm).err(),
+            Some(chervo_friends::FriendsError::TrustRequired)
+        );
+        by_book
+            .enable_auto_accept(&*sy, &py, TrustConfirmation::user_confirmed_trust())
+            .unwrap();
     }
     let (tmp, recv, outside) = make_dirs();
     let mut cfg = ReceiveConfig::new(recv);

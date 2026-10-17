@@ -16,6 +16,7 @@
 mod book;
 mod error;
 mod plain;
+mod trust;
 mod types;
 pub mod vault;
 
@@ -24,6 +25,7 @@ mod tests;
 
 pub use book::{FriendBook, KeyStatus, MIN_INBAND_UPDATE_INTERVAL_SECS, NewFriend};
 pub use error::FriendsError;
+pub use trust::TrustConfirmation;
 pub use types::{
     AutoAcceptLimits, BookData, Friend, FriendState, PendingEntry, PendingRole, Permission,
 };

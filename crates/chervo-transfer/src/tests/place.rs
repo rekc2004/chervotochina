@@ -383,7 +383,13 @@ async fn always_ask_even_with_auto_accept_permission() {
     let pair = *pair;
     p.node
         .engine
-        .update_book(|book, s| book.set_permission(s, &pair, auto_accept()))
+        .update_book(|book, s| {
+            book.enable_auto_accept(
+                s,
+                &pair,
+                chervo_friends::TrustConfirmation::user_confirmed_trust(),
+            )
+        })
         .unwrap();
     let f = Fake::new(pair, vec![FakeFile::new("a", rand_bytes(1, 100))]);
     let (_tx, mut rx) = f.offer(&conn.peer()).await;

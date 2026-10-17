@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use chervo_addr::{AddrSource, KnownAddr, RouteSources};
 use chervo_connect::{AllowSet, Clock, ConnectConfig, Engine, EngineEvents, RouteProbe};
-use chervo_friends::{FriendBook, NewFriend, PendingRole, Permission};
+use chervo_friends::{FriendBook, NewFriend, PendingRole};
 use chervo_identity::{IdentityError, KxPeer, ListKeyStore, PairId, PairKey, SecretStore, create};
 use chervo_transport::{
     Connection, DuplicatePairError, EventSource, ManagedTransport, PeerAddr, RecvStream,
@@ -1124,12 +1124,4 @@ pub async fn recv_frame(rx: &mut FakeRx, secs: u64) -> Option<Message> {
 
 pub fn ok_or_panic<T>(x: Option<T>) -> T {
     x.expect("expected a value")
-}
-
-/// Права друга для `Permission::AutoAccept` (проверка «всегда спрашивать»).
-pub fn auto_accept() -> Permission {
-    Permission::AutoAccept(chervo_friends::AutoAcceptLimits {
-        max_total_bytes: 1 << 30,
-        max_files: 100,
-    })
 }

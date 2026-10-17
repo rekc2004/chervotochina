@@ -1,11 +1,15 @@
 //! Свободное место на томе папки приёма (Рев. 3, решение владельца 2026-10-18: единственная
-//! защита автоприёма от переполнения диска). Без `unsafe`.
+//! защита автоприёма от переполнения диска). Без `unsafe` в нашем коде: системный вызов делает
+//! крейт `fs4` 1.1.0 (Рев. 4, решение владельца 2026-10-18), одинаково на всех ОС.
 //!
-//! * Unix (Linux, macOS): `statvfs` через безопасный API `rustix` (крейт уже в `Cargo.lock`).
-//! * Windows: безопасного способа нет. В std нет такой функции, а `GetDiskFreeSpaceExW` из
-//!   `windows-sys` это `unsafe fn` (в проекте `unsafe_code = "forbid"`). Поэтому `disk_space`
-//!   даёт `None`, и автоприём на Windows не срабатывает (всегда вопрос) до решения владельца
-//!   (см. спецификацию 15, Рев. 3). Неизвестное место никогда не считается достаточным.
+//! Что берём из `fs4::statvfs` (прочитано в исходнике fs4 1.1.0):
+//! * Windows: `available_space` это «свободно для текущего пользователя»
+//!   (`lpFreeBytesAvailableToCaller` из `GetDiskFreeSpaceExW`, учитывает квоты), не общий
+//!   остаток тома; `total_space` это объём тома (`GetDiskFreeSpaceW`: кластеры * размер кластера).
+//! * Unix: `available_space` это `f_bavail * f_frsize` (доступно непривилегированному
+//!   пользователю), не `f_bfree`; `total_space` это `f_blocks * f_frsize`.
+//!
+//! Неизвестное место никогда не считается достаточным: ошибка системного вызова даёт `None`.
 
 use std::path::Path;
 
@@ -29,22 +33,17 @@ impl DiskSpace {
 }
 
 /// Место на томе, где лежит `path`; `None`, если узнать нельзя.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub fn disk_space(path: &Path) -> Option<DiskSpace> {
-    let s = rustix::fs::statvfs(path).ok()?;
-    let unit = if s.f_frsize != 0 {
-        s.f_frsize
-    } else {
-        s.f_bsize
-    };
+    let s = fs4::statvfs(path).ok()?;
     Some(DiskSpace {
-        total_bytes: s.f_blocks.checked_mul(unit)?,
-        available_bytes: s.f_bavail.checked_mul(unit)?,
+        total_bytes: s.total_space(),
+        available_bytes: s.available_space(),
     })
 }
 
-/// Windows и прочие ОС: безопасного способа без `unsafe` нет.
-#[cfg(not(unix))]
+/// Прочие ОС: способа нет, место неизвестно.
+#[cfg(not(any(unix, windows)))]
 pub fn disk_space(path: &Path) -> Option<DiskSpace> {
     let _ = path;
     None

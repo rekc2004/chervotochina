@@ -41,7 +41,7 @@ impl ReceivePolicy {
         Self::with_space_probe(root, cfg, Arc::new(disk_space))
     }
 
-    /// Свой способ узнать свободное место (тесты; на Windows `disk_space` ничего не знает).
+    /// Свой способ узнать свободное место (тесты).
     #[doc(hidden)]
     pub fn with_space_probe(
         root: ReceiveRoot,

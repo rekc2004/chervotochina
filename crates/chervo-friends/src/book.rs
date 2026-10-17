@@ -41,8 +41,9 @@ use zeroize::Zeroizing;
 
 use crate::plain::name_ok;
 use crate::{
-    BookData, Friend, FriendState, FriendsError, MAX_ADDRS_PER_FRIEND, MAX_FILE_BYTES, MAX_FRIENDS,
-    MAX_PENDING, PendingEntry, PendingRole, Permission, vault,
+    AutoAcceptLimits, BookData, Friend, FriendState, FriendsError, MAX_ADDRS_PER_FRIEND,
+    MAX_FILE_BYTES, MAX_FRIENDS, MAX_PENDING, PendingEntry, PendingRole, Permission,
+    TrustConfirmation, vault,
 };
 
 /// Книга друзей. `Debug` не печатает содержимое.
@@ -468,8 +469,42 @@ impl FriendBook {
         })
     }
 
-    /// По умолчанию всегда `Ask`; `AutoAccept` только явно и с ненулевыми лимитами.
+    /// Задаёт разрешение. По умолчанию всегда `Ask`. `Permission::AutoAccept` здесь всегда
+    /// отказ `TrustRequired`: автоприём включается только через `enable_auto_accept` с
+    /// подтверждением доверия (Рев. 4).
     pub fn set_permission<K: ListKeyStore + ?Sized>(
+        &mut self,
+        keys: &K,
+        pair: &PairId,
+        p: Permission,
+    ) -> Result<(), FriendsError> {
+        if matches!(p, Permission::AutoAccept(_)) {
+            return Err(FriendsError::TrustRequired);
+        }
+        self.store_permission(keys, pair, p)
+    }
+
+    /// Включает автоприём для друга. Единственный путь к `Permission::AutoAccept`: нужно
+    /// `TrustConfirmation` (ответ «да» на вопрос о доверии). Лимитов объёма нет (решение
+    /// владельца); поля `AutoAcceptLimits` остаются из-за формата файла и ненулевых проверок.
+    pub fn enable_auto_accept<K: ListKeyStore + ?Sized>(
+        &mut self,
+        keys: &K,
+        pair: &PairId,
+        confirmation: TrustConfirmation,
+    ) -> Result<(), FriendsError> {
+        let _ = confirmation;
+        self.store_permission(
+            keys,
+            pair,
+            Permission::AutoAccept(AutoAcceptLimits {
+                max_total_bytes: u64::MAX,
+                max_files: u32::MAX,
+            }),
+        )
+    }
+
+    fn store_permission<K: ListKeyStore + ?Sized>(
         &mut self,
         keys: &K,
         pair: &PairId,
