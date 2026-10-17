@@ -7,9 +7,7 @@
 # маршрутизируется; 198.51.100.0/24 и подобные документационные сети слой адресов считает не глобальными,
 # поэтому для публикации адресов нужен «глобальный» префикс).
 #
-# ВНИМАНИЕ: этот скрипт НЕ ЗАПУСКАЛСЯ. Он написан на Windows-машине разработки (там нет netns), проверен
-# только `bash -n`. Все строки ниже, включая ожидаемые вердикты, остаются непроверенными до первого запуска
-# на Linux (например, на мини-ПК владельца). Первый прогон вполне может найти ошибки в самом стенде.
+# Прогнан 2026-10-17 на Linux (Ubuntu 24.04, nftables 1.0.9): white, forward, sym, cgnat, udp, addrchange PASS; prpr NOTRUN.
 #
 # Функции стенда (log, nsx, spk_in, bg_start, bg_stop, cnt, evl, kv, verdict) скопированы из stage9.sh без
 # изменения смысла; префикс ns другой (chv13-), чтобы стенды этапов 9 и 13 не мешали друг другу.
@@ -96,13 +94,13 @@ table inet nat13 {
     type nat hook postrouting priority srcnat;
     oifname "wan" ip saddr $lan $masq
   }
-  chain fwd {
+  chain fwd13 {
     type filter hook forward priority filter; policy drop;
     iifname "lan" oifname "wan" accept
     iifname "wan" ct state established,related accept
     iifname "wan" ct status dnat accept
   }
-  chain inp {
+  chain inp13 {
     type filter hook input priority filter;
     iifname "wan" drop
   }
@@ -392,8 +390,8 @@ row_udp() {
   if [[ -z "$f" ]]; then
     nsx ha nft -f - <<NFT
 table inet chv13blk {
-  chain out { type filter hook output priority -10; policy accept; meta l4proto udp drop }
-  chain inp { type filter hook input priority -10; policy accept; meta l4proto udp drop }
+  chain out { type filter hook output priority -10; policy accept; meta l4proto udp drop; }
+  chain inp13 { type filter hook input priority -10; policy accept; meta l4proto udp drop; }
 }
 NFT
     wait_grep ha '^EVENT unreachable .*reason=UdpBlockedSuspected' 600 || f+="no_udp_blocked_diagnosis($(grep '^EVENT unreachable' "$RD/ha.log" | tail -n 1 || true)) "
