@@ -165,6 +165,7 @@ pub(crate) fn writer_main(s: &Arc<RecvSession>, att: &Arc<Attempt>, rx: &Receive
         let wait = cfg
             .checkpoint_interval
             .saturating_sub(last.elapsed())
+            .max(s.state_write_wait())
             .max(Duration::from_millis(1));
         match rx.recv_timeout(wait) {
             Ok(WCmd::Write {
@@ -195,7 +196,7 @@ pub(crate) fn writer_main(s: &Arc<RecvSession>, att: &Arc<Attempt>, rx: &Receive
             // ждать нечего: срок отсчитывается от первого события
             last = Instant::now();
         } else if (!touched.is_empty() && since >= cfg.checkpoint_bytes)
-            || last.elapsed() >= cfg.checkpoint_interval
+            || (last.elapsed() >= cfg.checkpoint_interval && s.reserve_state_write())
         {
             if let Err(e) = checkpoint(s, &files, &mut touched) {
                 att.finish(End::Pause(pause_reason(&e)));

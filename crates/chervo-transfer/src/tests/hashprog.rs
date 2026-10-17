@@ -454,7 +454,11 @@ async fn hash_progress_rules() {
 
 #[tokio::test]
 async fn hash_progress_across_resume() {
-    let mut rig = Rig::with(|_| {}, |_| {}).await;
+    // Событие `Preparing` получателя ограничено `progress_interval` и не повторяется, пока
+    // `hashed` не растёт (хэширование стоит на заслонке): первый кадр новой попытки, пришедший
+    // раньше чем через интервал после прежнего события, не дал бы события никогда. Нулевой
+    // интервал делает событие на каждый принятый кадр, и тест не зависит от скорости машины.
+    let mut rig = Rig::with(|_| {}, |c| c.progress_interval = Duration::ZERO).await;
     let src = TestDir::new();
     let data = rand_bytes(82, (20 * MIB) as usize);
     let files = vec![write_src(src.path(), "a.bin", &data)];

@@ -22,6 +22,10 @@ fn narrow(c: &mut crate::TransferConfig) {
     c.streams = 2;
     c.per_stream_window = 1;
     c.recv_buffer_budget = 16 << 20;
+    // записи состояния делят один ограничитель (`reserve_state_write`): с долгим интервалом
+    // первую запись `Placed` делает именно размещающий поток, а не контрольная точка писателя
+    // (тест останавливает размещающий поток на этой записи, имитируя крах)
+    c.checkpoint_interval = Duration::from_secs(30);
 }
 
 fn placed_in(bytes: &[u8]) -> bool {

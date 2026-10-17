@@ -162,7 +162,8 @@ pub(crate) struct RecvSession {
     pub(crate) live: Mutex<Liveness>,
     /// Размещённые файлы, чьи остатки (`.placing`, хэши) убираются после записи `Placed`.
     cleanup: Mutex<Vec<u32>>,
-    /// Когда в последний раз состояние записано сразу после размещения.
+    /// Когда в последний раз занято право на запись состояния по сроку: единый ограничитель,
+    /// общий для контрольной точки писателя и записи после размещения (`reserve_state_write`).
     last_sync: Mutex<Option<Instant>>,
     io_lock: Mutex<()>,
     /// Трейлер файла имён (известен после принятия или загрузки с диска).
@@ -507,22 +508,34 @@ impl RecvSession {
         res
     }
 
+    /// Занять право на запись состояния: не чаще раза за `checkpoint_interval` на все
+    /// источники вместе (контрольная точка писателя и запись после размещения). Проверка и
+    /// отметка времени атомарны, поэтому два источника не пишут друг за другом.
+    pub(crate) fn reserve_state_write(&self) -> bool {
+        let mut last = lock(&self.last_sync);
+        let due = last.is_none_or(|t| t.elapsed() >= self.sh.cfg.checkpoint_interval);
+        if due {
+            *last = Some(Instant::now());
+        }
+        due
+    }
+
+    /// Сколько осталось до следующей разрешённой записи состояния.
+    pub(crate) fn state_write_wait(&self) -> std::time::Duration {
+        lock(&self.last_sync).map_or(std::time::Duration::ZERO, |t| {
+            self.sh.cfg.checkpoint_interval.saturating_sub(t.elapsed())
+        })
+    }
+
     /// Файл размещён: его остатки (`.placing`, хэши) убираются после записи `Placed`. Запись
     /// делается сразу, а не контрольной точкой, чтобы окно между размещением и записью было
-    /// минимальным; не чаще раза за `checkpoint_interval` (тысячи мелких файлов не должны
-    /// давать тысячи переписываний состояния; остальное сделает контрольная точка).
+    /// минимальным; не чаще раза за `checkpoint_interval` вместе с контрольной точкой (тысячи
+    /// мелких файлов не должны давать тысячи переписываний состояния; остальное сделает
+    /// контрольная точка, она же уберёт остатки).
     pub(crate) fn placed_now(&self, file: u32) {
         lock(&self.cleanup).push(file);
         self.mark_dirty();
-        let due = {
-            let mut last = lock(&self.last_sync);
-            let due = last.is_none_or(|t| t.elapsed() >= self.sh.cfg.checkpoint_interval);
-            if due {
-                *last = Some(Instant::now());
-            }
-            due
-        };
-        if due {
+        if self.reserve_state_write() {
             let _ = self.persist();
         }
     }
