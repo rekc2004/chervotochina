@@ -1,61 +1,32 @@
-//! Безопасный приём файлов: лимиты и заглушка санитайзера путей.
-//! Результат всегда должен оставаться внутри корня (реализация в этапе 15).
+//! Безопасный приём файлов (этап 15). Часть R1: чистые функции без файловой системы.
+//! Переносимый санитайзер имён, план предложения (коллизии, лимиты), классификация типов
+//! и тексты предупреждений. Спецификация: `docs/specs/stage-15-receive.md`.
+//!
+//! Результат санитайзера всегда остаётся внутри корня: компоненты не бывают `.`, `..`,
+//! пустыми, абсолютными, с буквой диска, обратной косой чертой или управляющими символами.
+#![deny(clippy::unwrap_used)]
+#![deny(clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
+#![deny(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    clippy::dbg_macro,
+    clippy::todo
+)]
 
-use std::fmt;
-use std::path::{Path, PathBuf};
+mod classify;
+mod limits;
+mod name;
+mod plan;
+mod texts;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ReceiveLimits {
-    pub max_files: u32,
-    pub max_depth: u16,
-    pub max_name_bytes: u16,
-    pub max_path_bytes: u16,
-    pub max_total_bytes: u64,
-}
-
-impl Default for ReceiveLimits {
-    fn default() -> Self {
-        Self {
-            max_files: 10_000,
-            max_depth: 16,
-            max_name_bytes: 255,
-            max_path_bytes: 1024,
-            max_total_bytes: 64 * 1024 * 1024 * 1024, // placeholder, revisit in stage 15
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PathError {
-    Empty,
-    TooLong,
-    NotImplemented,
-}
-
-impl fmt::Display for PathError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let text = match self {
-            Self::Empty => "empty path",
-            Self::TooLong => "path too long",
-            Self::NotImplemented => "not implemented",
-        };
-        f.write_str(text)
-    }
-}
-
-impl std::error::Error for PathError {}
-
-/// Заглушка: пусто → `Empty`, длиннее лимита → `TooLong`, иначе `NotImplemented`. Никогда не `Ok`.
-pub fn sanitize_relative_path(
-    _root: &Path,
-    untrusted: &str,
-    limits: &ReceiveLimits,
-) -> Result<PathBuf, PathError> {
-    if untrusted.is_empty() {
-        return Err(PathError::Empty);
-    }
-    if untrusted.len() > usize::from(limits.max_path_bytes) {
-        return Err(PathError::TooLong);
-    }
-    Err(PathError::NotImplemented)
-}
+pub use classify::{FileClass, TypeInfo, classify};
+pub use limits::{PathError, ReceiveLimits};
+pub use name::{
+    NameFlags, SafeRelPath, fold, is_portable_component, portable_component, sanitize_path,
+    sanitize_relative_path,
+};
+pub use plan::{OfferPlan, PlannedFile, plan_offer, plan_offer_in};
+pub use texts::{
+    ACTIVE_DOC_TEXT, DECEPTIVE_TEXT, DISK_IMAGE_TEXT, EXECUTABLE_TEXT, HOSTILE_DECLINED_TEXT,
+    LONG_PATH_TEXT, NAME_CHANGED_TEXT, SHARED_ROOT_TEXT, SUSPICIOUS_NAME_TEXT,
+};
