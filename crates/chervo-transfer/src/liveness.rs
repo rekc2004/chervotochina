@@ -32,6 +32,10 @@ pub(crate) struct Liveness {
     idle: Duration,
     /// Начало текущего отрезка попытки, который ещё не учтён в `idle`.
     mark: Option<Instant>,
+    /// Когда пропало живое соединение (оно закрыто, ждём другое). Время без соединения не
+    /// идёт в срок хэширования: честный ноутбук, ушедший из сети, не должен получить `Stalled`.
+    /// Отправитель, который держит соединение, этим не пользуется: пока оно живо, часы идут.
+    away: Option<Instant>,
 }
 
 /// Сколько обрывов подряд без продвижения ставят передачу на паузу `Stalled`.
@@ -58,6 +62,7 @@ impl Liveness {
             futile: 0,
             idle: Duration::ZERO,
             mark: None,
+            away: None,
         }
     }
 
@@ -67,6 +72,25 @@ impl Liveness {
         self.futile = 0;
         self.idle = Duration::ZERO;
         self.mark = None;
+        self.away = None;
+    }
+
+    /// Живого соединения нет с момента `now` (повторные вызовы ничего не меняют).
+    pub(crate) fn link_lost(&mut self, now: Instant) {
+        self.away.get_or_insert(now);
+    }
+
+    /// Живое соединение снова есть: срок хэширования сдвигается на время без соединения, так
+    /// что и предел по скорости, и молчание считаются только по времени со связью.
+    pub(crate) fn link_back(&mut self, now: Instant) {
+        let Some(t) = self.away.take() else {
+            return;
+        };
+        let gap = now.saturating_duration_since(t);
+        if let Some(w) = &mut self.wait {
+            w.start = plus(w.start, gap);
+            w.grown_at = plus(w.grown_at, gap);
+        }
     }
 
     /// Начало попытки; возвращает счётчик продвижения для `futile_attempt`.

@@ -331,9 +331,8 @@ impl RecvSession {
 
     /// Пределы живости сессии, общие для конца попытки и неудавшегося рукопожатия.
     /// Блокировка `core` берётся и отпускается до `live`.
-    fn over_limits(&self, att: Option<&Attempt>, futile: u32) -> bool {
+    fn over_limits(&self, att: Option<&Attempt>, futile: u32, now: tokio::time::Instant) -> bool {
         let cfg = &self.sh.cfg;
-        let now = tokio::time::Instant::now();
         let (needs_hash, hashed) = {
             let c = lock(&self.core);
             (c.sched.needs_hash(), c.sched.hashed)
@@ -359,22 +358,33 @@ impl RecvSession {
     /// Попытка закончилась. `lost`: связь потеряна (закрыто соединение или поток управления),
     /// а не остановка или пауза по причине диска. `true`: отправитель слишком долго
     /// перезапускает попытки без продвижения, передачу надо ставить на паузу `Stalled`.
-    pub(crate) fn attempt_over(&self, att: &Attempt, seq0: u64, lost: bool) -> bool {
-        let now = tokio::time::Instant::now();
+    /// `now`: момент, когда конец попытки замечен (а не когда закончилась уборка за ней), а
+    /// `gone`: соединение закрыто, и с этого момента времени со связью нет.
+    pub(crate) fn attempt_over(
+        &self,
+        att: &Attempt,
+        seq0: u64,
+        lost: bool,
+        gone: bool,
+        now: tokio::time::Instant,
+    ) -> bool {
         let demand = lock(&self.core).sched.wants_data();
         let futile = {
             let mut lv = lock(&self.live);
             lv.end_attempt(now, demand);
+            if gone {
+                lv.link_lost(now);
+            }
             if lost { lv.futile_attempt(seq0) } else { 0 }
         };
-        lost && self.over_limits(Some(att), futile)
+        lost && self.over_limits(Some(att), futile, now)
     }
 
     /// Рукопожатие возобновления не удалось (поток не открылся, ответа нет): тоже бесплодная
     /// попытка. `true`: пауза `Stalled`.
     pub(crate) fn handshake_over(&self) -> bool {
         let futile = lock(&self.live).stall();
-        self.over_limits(None, futile)
+        self.over_limits(None, futile, tokio::time::Instant::now())
     }
 
     pub(crate) fn take_answer(&self) -> Option<oneshot::Sender<bool>> {
@@ -887,8 +897,11 @@ async fn wait_conn<L: Links>(inner: &Arc<Inner<L>>, s: &Arc<RecvSession>) -> Opt
         if let Some(c) = inner.links.connection(&s.key.pair)
             && !is_closed(&c).await
         {
+            // связь вернулась: время без неё в сроки хэширования не идёт
+            lock(&s.live).link_back(tokio::time::Instant::now());
             return Some(c);
         }
+        lock(&s.live).link_lost(tokio::time::Instant::now());
         tokio::select! {
             _ = gen_rx.changed() => {}
             () = tokio::time::sleep(inner.poll) => {}
@@ -1212,6 +1225,16 @@ async fn run_attempt<L: Links>(
         () = down_w.stopped() => Why::Shutdown,
         () = all_terminal(s) => Why::Complete,
     };
+    // Конец попытки замечен сейчас: уборка за ней (писатель, диск) не должна сдвигать сроки.
+    let ended_at = tokio::time::Instant::now();
+    // Потеря связи: отправитель мог закрыть поток управления или соединение, чтобы начать
+    // попытку заново и обнулить сроки. Сроки и счётчики сессии это учитывают. Время без
+    // живого соединения в сроки хэширования не идёт (см. `Liveness::link_back`).
+    let lost_link = matches!(
+        why,
+        Why::Closed | Why::Attempt(End::Disconnected | End::Pause(PauseReason::Disconnected))
+    );
+    let gone = matches!(why, Why::Closed) || (lost_link && is_closed(&conn).await);
     let mut echoed = true;
     if let Why::Complete = why {
         s.ctl_send(Message::Done { id: s.key.id });
@@ -1239,13 +1262,7 @@ async fn run_attempt<L: Links>(
             let _ = s2.persist();
         });
     }
-    // Потеря связи: отправитель мог закрыть поток управления или соединение, чтобы начать
-    // попытку заново и обнулить сроки. Сроки и счётчики сессии это учитывают.
-    let lost_link = matches!(
-        why,
-        Why::Closed | Why::Attempt(End::Disconnected | End::Pause(PauseReason::Disconnected))
-    );
-    let stalled = s.attempt_over(&att, seq0, lost_link);
+    let stalled = s.attempt_over(&att, seq0, lost_link, gone, ended_at);
     match why {
         Why::Complete => {
             if echoed {

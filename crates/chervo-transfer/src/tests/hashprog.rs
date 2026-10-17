@@ -862,3 +862,97 @@ async fn honest_resume_after_long_outage_is_not_stalled() {
     assert_eq!(placed.len(), 1);
     assert!(placed[0].1 == data);
 }
+
+/// Честный отправитель ещё хэширует, когда связь возвращается после долгого обрыва: время без
+/// связи не идёт ни в предел по скорости, ни в молчание, иначе первый же кадр после
+/// возобновления дал бы `Stalled`.
+#[tokio::test(start_paused = true)]
+async fn honest_partial_hash_after_long_outage_is_not_stalled() {
+    let _fs = failsafe(240);
+    let stall = Duration::from_secs(10);
+    let total = 8 * MIB;
+    let data = rand_bytes(7, total as usize);
+    let files = vec![FakeFile::new("a", data.clone())];
+    let mut r = raw(files, move |c| {
+        c.stall_timeout = stall;
+        c.min_hash_rate = MIB;
+    })
+    .await;
+    r.accept().await;
+    r.progress(MIB).await;
+    let mut seen = Vec::new();
+    r.peer.close();
+    for _ in 0..10 {
+        tick(Duration::from_secs(6)).await;
+        seen.extend(drain(&mut r.p.ev).await);
+    }
+    assert!(
+        seen.iter().any(|e| matches!(
+            e,
+            TransferEvent::Paused {
+                reason: PauseReason::Disconnected,
+                ..
+            }
+        )),
+        "{seen:?}"
+    );
+    let pair = r.key.pair;
+    let conn2 = FakeConn::lonely(pair);
+    r.p.node.t.push_incoming(conn2.clone());
+    let peer2 = conn2.peer();
+    let (mut tx, mut rx) = peer2.accept_bi().await.unwrap();
+    let mut kind = [0u8; 1];
+    assert_eq!(rx.read(&mut kind).await.unwrap(), Some(1));
+    let mut buf = Vec::new();
+    let got = read_message(&mut rx, &mut buf, Duration::from_secs(5)).await;
+    assert!(matches!(got, Ok(Some(Message::Resume { .. }))));
+    send_frame(
+        &mut tx,
+        &Message::ResumeOk {
+            id: r.key.id,
+            file_count: 1,
+            total_size: total,
+        },
+    )
+    .await;
+    r.fake.run(peer2, None);
+    // за время обрыва отправитель захэшировал часть файла и продолжает со скоростью выше
+    // минимальной (2 МиБ/с против 1 МиБ/с)
+    let mut hashed = 3 * MIB;
+    r.tx = tx;
+    r.rx = rx;
+    let mut done = false;
+    for _ in 0..200 {
+        if hashed <= total {
+            r.progress(hashed).await;
+            hashed = if hashed == total {
+                total + 1
+            } else {
+                (hashed + 2 * MIB).min(total)
+            };
+        }
+        tick(Duration::from_secs(1)).await;
+        seen.extend(drain(&mut r.p.ev).await);
+        if seen
+            .iter()
+            .any(|e| matches!(e, TransferEvent::Completed { .. }))
+        {
+            done = true;
+            break;
+        }
+    }
+    assert!(done, "transfer did not complete after the outage: {seen:?}");
+    assert!(
+        !seen.iter().any(|e| matches!(
+            e,
+            TransferEvent::Paused {
+                reason: PauseReason::Stalled,
+                ..
+            }
+        )),
+        "stalled after an honest partial resume: {seen:?}"
+    );
+    let placed = placed_files(&r.p.dest);
+    assert_eq!(placed.len(), 1);
+    assert!(placed[0].1 == data);
+}
