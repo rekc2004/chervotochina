@@ -22,7 +22,8 @@ TITLE[C03]="WA - WB";                           LEARN[C03]="приглашени
 TITLE[C04]="FC - PR (NAT-A FC, NAT-B PR)";      LEARN[C04]="встречная связка; токен X->Y";          THEORY[C04]="EIF пускает Y, не зная Y"
 TITLE[C05]="AR - AR";                           LEARN[C05]="связка; токены в обе стороны";          THEORY[C05]="оба EIM, оба адреса известны"
 TITLE[C06]="PR - PR";                           LEARN[C06]="связка; токены в обе стороны";          THEORY[C06]="оба EIM, одновременное открытие"
-TITLE[C07]="PR - PR без токенов";               LEARN[C07]="только связка";                         THEORY[C07]="никто не знает внешний адрес другого"
+TITLE[C07]="PR - PR без токенов (связка до наблюдателей)"; LEARN[C07]="только связка, затем наблюдатели"; THEORY[C07]="связка шла до наблюдений: внешний адрес в подсказку не попал"
+TITLE[C07H]="PR - PR без токенов (наблюдатели, затем связка)"; LEARN[C07H]="связка после наблюдателей"; THEORY[C07H]="ADDR_INFO по связке несёт подсказку внешнего адреса (24 ч)"
 TITLE[C08]="SYM - WA, WB";                      LEARN[C08]="приглашение; затем WA убит";            THEORY[C08]="EDM виден двум наблюдателям"
 TITLE[C09]="SYM - FC";                          LEARN[C09]="связка; токен Y->X";                    THEORY[C09]="SYM звонит, EIF пускает"
 TITLE[C10]="SYM - AR";                          LEARN[C10]="связка; токен Y->X";                    THEORY[C10]="AR не писал на адрес SYM"
@@ -35,7 +36,7 @@ TITLE[C16]="HD (двойной NAT) - WA";             LEARN[C16]="пригла�
 TITLE[C17]="HD - PR";                           LEARN[C17]="связка; токены в обе стороны";          THEORY[C17]="оба слоя EIM с сохранением порта"
 TITLE[C18]="HR (UPnP) - PR";                    LEARN[C18]="приглашение с пробросным адресом";      THEORY[C18]="проброс порта; после остановки правило снято"
 TITLE[C19]="HA - WA, WB при обрыве UDP на HA";  LEARN[C19]="приглашения";                           THEORY[C19]="два белых друга молчат"
-CONN_IDS=(C01 C02 C03 C04 C05 C06 C07 C08 C09 C10 C11 C12 C13 C14 C15 C16 C17 C18 C19)
+CONN_IDS=(C01 C02 C03 C04 C05 C06 C07 C07H C08 C09 C10 C11 C12 C13 C14 C15 C16 C17 C18 C19)
 declare -A VTITLE=() VTHEORY=()
 VTITLE[V01]="CGNAT - PR";          VTHEORY[V01]="да (EIM с обеих сторон)"
 VTITLE[V02]="CGNAT - CGNAT";       VTHEORY[V02]="зависит от того, что оба CGNAT EIM"
@@ -114,6 +115,19 @@ sec_matrix() {
   done
   echo
   echo "Вердикты: PASS; MISMATCH (исход как ожидали, причина или путь другие: на разбор архитектору); FAIL; INCONCLUSIVE (контроль стенда или срок); NOTRUN (с причиной). Ожидания взяты из спецификации и под результат не правились."
+  sec_guard
+}
+
+# Охрана хоста: счётчики и роли адресов из наборов other_d, other_dn (назначения) и other_s (источники). Адреса из guard16.tsv
+# заменяет санитайзер; адрес вне карты ролей остаётся в тексте, и генератор отказывается писать отчёт.
+sec_guard() {
+  [[ -s "$LD/guard16.tsv" ]] || return 0
+  echo
+  echo "Охрана хоста (rev. 2): ICMP «недоступно» считается отдельно (icmp_unreach на выходе, icmp_unreach_in на входе) и в other, other_in не входит. Роли адресов:"
+  echo
+  echo "| Строка | Узел | icmp_unreach | icmp_unreach_in | other | other_in | Назначения other (роль:порт) | Назначения other, не UDP/TCP | Источники other_in |"
+  echo "|---|---|---|---|---|---|---|---|---|"
+  awk -F'\t' '{ printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5, $6, $7, $8, $9 }' "$LD/guard16.tsv"
 }
 
 sec_notconnected() {
@@ -221,8 +235,9 @@ sec_g7() {
   echo
   echo "| ID | Вердикт | Ожидали | Получили | Время, с | Подробности |"
   echo "|---|---|---|---|---|---|"
-  for id in G7-BASE G7-CALLEE G7-LAPTOP G7-DROP15 C20; do
+  for id in G7-BASE G7-CALLEE G7-LAPTOP G7-DROP15 G7-DROP45 G7-REBIND C20; do
     r="$(srow "$id")"
+    if [[ -z "$r" && "$id" == G7-REBIND ]]; then echo "| $id | NOTRUN | HA nat_view не Conflicting через 60 с после смены адреса NAT-A | - | - | defined by stage 16a (запуск после правок П1) |"; continue; fi
     if [[ -z "$r" ]]; then echo "| $id | не запускалась | - | - | - | - |"; continue; fi
     echo "| $id | $(cell "$(sf "$id" 3)") | $(cell "$(sf "$id" 4)") | $(cell "$(sf "$id" 5)") | $(cell "$(sf "$id" 11)") | $(cell "$(sf "$id" 12)") |"
   done
@@ -346,7 +361,7 @@ generate() { # LOGDIR OUT -> код 0, 4 (отказ)
 
 # ---------------------------------------------------------------- самопроверка
 selftest() {
-  local fx="$ROOT/fixtures16/ok" t out rc fails=0 h
+  local fx="$ROOT/fixtures16/ok" t out rc fails=0 h d
   [[ -d "$fx" ]] || { echo "SELFTEST FAIL: нет $fx" >&2; return 1; }
   t="$(mktemp -d "${TMPDIR:-/tmp}/report16-test.XXXXXX")"
   out="$t/out.md"
@@ -370,6 +385,13 @@ selftest() {
     generate "$d" "$t/neg.md" 2>/dev/null; rc=$?
     if [[ $rc != 4 || -e "$t/neg.md" ]]; then echo "SELFTEST FAIL: отрицательный контроль «$1»: код $rc, файл $([[ -e $t/neg.md ]] && echo есть || echo нет)"; fails=$((fails + 1)); fi
   }
+  # роли вместо адресов в охране хоста: адрес из карты заменён, чужой адрес в наборе other_d отклоняет отчёт
+  grep -Fq 'icmp_unreach_in' "$out" || { echo "SELFTEST FAIL: нет столбцов охраны хоста"; fails=$((fails + 1)); }
+  grep -Fq 'NAT-B:4433' "$out" || { echo "SELFTEST FAIL: адрес в наборе охраны не заменён ролью"; fails=$((fails + 1)); }
+  d="$t/neg-guard"; rm -rf -- "$d"; cp -r -- "$fx" "$d"
+  printf 'C06\tha\t0\t0\t1\t0\t203.0.113.9:4433\t-\t-\n' >> "$d/guard16.tsv"
+  rm -f -- "$t/neg.md"; generate "$d" "$t/neg.md" 2>/dev/null; rc=$?
+  if [[ $rc != 4 || -e "$t/neg.md" ]]; then echo "SELFTEST FAIL: отрицательный контроль «guard»: код $rc"; fails=$((fails + 1)); fi
   neg ipv4 "адрес 203.0.113.9 в тексте"
   neg ipv6 "адрес 2001:db8::7 в тексте"
   neg home "каталог /home/user/x"

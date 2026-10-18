@@ -2,6 +2,7 @@ NATCHECK	ctl	PASS	-	фикстура: все 7 контролей прошли	-
 C01	conn	INCONCLUSIVE	-	приглашение не принято	-	-	-	-	-	-	-
 C03	conn	PASS	yes	yes	-	none	-	none	Lan	4	tokens: none; nat_view_x=Public;
 C06	conn	PASS	yes	yes	-	none	-	none	SimultaneousOpen	31	tokens: ha>hb:ok hb>ha:ok ; nat_view_x=Eim;
+C07H	conn	PASS	yes	yes	none	none	none	none	SimultaneousOpen	45	tokens: none; фикстура;
 C07	conn	PASS	no	no	NeedToken	NeedToken	NeedToken	NeedToken	-	-	tokens: none; nat_view_x=Eim;
 C11	conn	MISMATCH	no	no	SymmetricNat	SymmetricNat	NeedToken	Unknown	-	-	tokens: hb>ha:ok ha>hb:failed(NoAddresses) ; reason Y;
 C13	conn	PASS	yes, then unreachable	yes, then unreachable	BehindCgnat+rv	BehindCgnat+rv	-	none	Direct	12	tokens: none;

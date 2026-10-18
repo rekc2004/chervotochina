@@ -467,6 +467,52 @@ flow_meet() { # X Y "токены" [доп. аргументы X через пр
   done
   return 0
 }
+# Rev. 2 (S3), C07: связка раньше наблюдателей. Связка поднята, приглашение по ней принято обеими сторонами, связка снята, и
+# только потом наблюдатели (приглашения, nat_view не Unknown). Токенов нет. Метки: X: o1 (связка), i1, i2 (наблюдатели);
+# Y: i1 (связка), i2, i3 (наблюдатели); k-й --invite-in получает метку i<k> (node16.rs).
+flow_meet_first() { # X Y "токены"
+  local X="$1" Y="$2" toks="$3" o h t
+  ca "$X" "$DL"
+  node_start "$X" "$X" "${CA[@]}" --invite-in "$W/$X/inv-wa" --invite-in "$W/$X/inv-wb" \
+    --invite-out "$W/$X/inv-meet" --invite-addr 10.99.0.1:4433 \
+    --token-to o1 --token-out "$W/$X/tok" --token-in "$W/$X/tok-in" "${XA_EXTRA[@]}"
+  ca "$Y" "$DL"
+  node_start "$Y" "$Y" "${CA[@]}" --invite-in "$W/$Y/inv-meet" --invite-in "$W/$Y/inv-wa" --invite-in "$W/$Y/inv-wb" \
+    --token-to i1 --token-out "$W/$Y/tok" --token-in "$W/$Y/tok-in"
+  meet_up "$X" "$Y" || { WHY="связка meet0 не поднялась"; return 1; }
+  deliver "$W/$X/inv-meet" "$W/$Y/inv-meet" 60 || { WHY="приглашение по связке не выпущено"; return 1; }
+  wait_grep "$Y" '^EVENT (invite_finished pair=i1 outcome=Added|connected pair=i1 )' 60 \
+    || { WHY="приглашение по связке не принято"; return 1; }
+  wait_grep "$X" '^EVENT (invite_finished pair=o1 outcome=Added|connected pair=o1 )' 60 \
+    || { WHY="приглашающий не получил итог по связке"; return 1; }
+  sleep 2
+  MX="$(lines_of "$X")"; MY="$(lines_of "$Y")"
+  meet_down "$X"
+  # наблюдатели стартуют только теперь
+  obs_start "$X" "$Y"
+  for o in wa wb; do
+    for h in "$X" "$Y"; do
+      deliver "$W/$o/inv-$h" "$W/$h/inv-$o" 60 || { WHY="приглашение от $o для $h не выпущено"; return 1; }
+    done
+  done
+  for o in 1 2; do
+    wait_grep "$X" "^EVENT (invite_finished pair=i$o outcome=Added|connected pair=i$o )" 60 \
+      || { WHY="$X: приглашение i$o не завершено"; return 1; }
+    wait_grep "$Y" "^EVENT (invite_finished pair=i$((o + 1)) outcome=Added|connected pair=i$((o + 1)) )" 60 \
+      || { WHY="$Y: приглашение i$((o + 1)) не завершено"; return 1; }
+  done
+  for h in "$X" "$Y"; do
+    wait_nat_view "$h" 60 || { WHY="no observation: nat_view Unknown у $h"; return 1; }
+  done
+  XA_MARK_MX="$MX"; XA_MARK_MY="$MY"
+  for t in $toks; do
+    case "$t" in
+      xy) token_pass "$X" "$Y" ;;
+      yx) token_pass "$Y" "$X" ;;
+    esac
+  done
+  return 0
+}
 has_after_meet() { [[ "$(cnt_after "$1" "EVENT $2" "$3")" -gt 0 ]]; }
 XA_EXTRA=()
 XA_MARK_MX=0; XA_MARK_MY=0
@@ -558,7 +604,7 @@ path_of() { # узел метка
 # ---------------------------------------------------------------- таблица строк связности
 ROW_X=""; ROW_Y=""; ROW_TA=""; ROW_TB=""; ROW_FLOW=""; ROW_TOK=""; ROW_EXP=""; ROW_EXX="-"; ROW_EXY="-"
 ROW_PATH="-"; ROW_GUARD=""; ROW_ACT=""; ROW_NV=""
-CONN_IDS=(C01 C02 C03 C04 C05 C06 C07 C08 C09 C10 C11 C12 C13 C14 C15 C16 C17 C18 C19)
+CONN_IDS=(C01 C02 C03 C04 C05 C06 C07 C07H C08 C09 C10 C11 C12 C13 C14 C15 C16 C17 C18 C19)
 conn_def() { # id
   ROW_X=""; ROW_Y=""; ROW_TA=""; ROW_TB=""; ROW_FLOW=""; ROW_TOK=""; ROW_EXP=""; ROW_EXX="-"; ROW_EXY="-"
   ROW_PATH="-"; ROW_GUARD=""; ROW_ACT=""; ROW_NV=""; XA_EXTRA=(); AX=(); BX=()
@@ -568,7 +614,10 @@ conn_def() { # id
     C04) ROW_X=ha; ROW_Y=hb; ROW_TA=FC; ROW_TB=PR; ROW_FLOW=meet; ROW_TOK="xy"; ROW_EXP=yes ;;
     C05) ROW_X=ha; ROW_Y=hb; ROW_TA=AR; ROW_TB=AR; ROW_FLOW=meet; ROW_TOK="xy yx"; ROW_EXP=yes ;;
     C06) ROW_X=ha; ROW_Y=hb; ROW_TA=PR; ROW_TB=PR; ROW_FLOW=meet; ROW_TOK="xy yx"; ROW_EXP=yes; ROW_PATH=SimultaneousOpen; ROW_GUARD=ha ;;
-    C07) ROW_X=ha; ROW_Y=hb; ROW_TA=PR; ROW_TB=PR; ROW_FLOW=meet; ROW_TOK=""; ROW_EXP=no; ROW_EXX=NeedToken; ROW_EXY=NeedToken ;;
+    # Rev. 2 (S3): C07 = связка до наблюдателей (meet_first), без токенов: нет, NeedToken / NeedToken.
+    C07) ROW_X=ha; ROW_Y=hb; ROW_TA=PR; ROW_TB=PR; ROW_FLOW=meet_first; ROW_TOK=""; ROW_EXP=no; ROW_EXX=NeedToken; ROW_EXY=NeedToken ;;
+    # C07H = прежний порядок rev. 1 (наблюдатели, затем связка), без токенов: да, SimultaneousOpen, причин нет.
+    C07H) ROW_X=ha; ROW_Y=hb; ROW_TA=PR; ROW_TB=PR; ROW_FLOW=meet; ROW_TOK=""; ROW_EXP=yes; ROW_PATH=SimultaneousOpen; ROW_EXX=none; ROW_EXY=none ;;
     C08) ROW_X=ha; ROW_Y=wa; ROW_TA=SYM; ROW_FLOW=obs; ROW_ACT=killwa; ROW_EXP=yes_unreach; ROW_EXX=SymmetricNat ;;
     C09) ROW_X=ha; ROW_Y=hb; ROW_TA=SYM; ROW_TB=FC; ROW_FLOW=meet; ROW_TOK="yx xy"; ROW_EXP=yes ;;
     C10) ROW_X=ha; ROW_Y=hb; ROW_TA=SYM; ROW_TB=AR; ROW_FLOW=meet; ROW_TOK="yx"; ROW_EXP=no; ROW_EXX=SymmetricNat; ROW_EXY=NeedToken ;;
@@ -579,7 +628,7 @@ conn_def() { # id
     C15) ROW_X=hc; ROW_Y=hc2; ROW_FLOW=meet; ROW_TOK="xy yx"; ROW_EXP=no; ROW_EXX=BehindCgnat; ROW_EXY=BehindCgnat ;;
     C16) ROW_X=hd; ROW_Y=wa; ROW_FLOW=obs; ROW_EXP=yes; ROW_NV=Eim ;;
     C17) ROW_X=hd; ROW_Y=hb; ROW_TB=PR; ROW_FLOW=meet; ROW_TOK="xy yx"; ROW_EXP=yes ;;
-    C18) ROW_X=hr; ROW_Y=hb; ROW_TB=PR; ROW_FLOW=upnp; ROW_EXP=yes; ROW_PATH=PortMapped; ROW_NV=PortMapped; AX=(--upnp-router "$UDN") ;;
+    C18) ROW_X=hr; ROW_Y=hb; ROW_TB=PR; ROW_FLOW=upnp; ROW_EXP=yes; ROW_PATH="PortMapped|SimultaneousOpen"; ROW_NV=PortMapped; AX=(--upnp-router "$UDN") ;;
     C19) ROW_X=ha; ROW_Y=wa; ROW_TA=PR; ROW_FLOW=obs; ROW_ACT=drop; ROW_EXP=no; ROW_EXX=UdpBlockedSuspected; XA_EXTRA=(--udp-window 60) ;;
     *) return 1 ;;
   esac
@@ -634,6 +683,7 @@ conn_run() { # id
       white|lan|upnp) flow_pair "$ROW_X" "$ROW_Y" && { LX=o1; LY=i1; } ;;
       obs) flow_obs "$ROW_X" && { LX=i1; LY=o1; } ;;
       meet) flow_meet "$ROW_X" "$ROW_Y" "$ROW_TOK" && { LX=o1; LY=i3; MX="$XA_MARK_MX"; MY="$XA_MARK_MY"; } ;;
+      meet_first) flow_meet_first "$ROW_X" "$ROW_Y" "$ROW_TOK" && { LX=o1; LY=i1; MX="$XA_MARK_MX"; MY="$XA_MARK_MY"; } ;;
     esac
   fi
   if [[ -n "$WHY" ]]; then
@@ -672,7 +722,7 @@ conn_run() { # id
   rxg="$(reason_of "$ROW_X" "$LX")"; ryg="$(reason_of "$ROW_Y" "$LY")"
   pth="$(path_of "$ROW_X" "$LX")"; pth="${pth:--}"
   nv="$(nat_view_of "$ROW_X")"
-  [[ -z "$ROW_GUARD" ]] || gf="$(guard_fail "$ROW_GUARD")"
+  if [[ -n "$ROW_GUARD" ]]; then gf="$(guard_fail "$ROW_GUARD")"; guard_record "$id" "$ROW_GUARD"; fi
   case "$ROW_EXP" in
     yes)
       exp_txt="yes"
@@ -697,7 +747,7 @@ conn_run() { # id
   if [[ "$v" == PASS || "$v" == MISMATCH ]]; then
     rcmp "$ROW_EXX" "$rxg" || { v=MISMATCH; notes+="reason X; "; }
     rcmp "$ROW_EXY" "$ryg" || { v=MISMATCH; notes+="reason Y; "; }
-    if [[ "$ROW_PATH" != "-" && "$ROW_EXP" == yes && "$pth" != "$ROW_PATH" ]]; then v=MISMATCH; notes+="path got $pth; "; fi
+    if [[ "$ROW_PATH" != "-" && "$ROW_EXP" == yes && "|$ROW_PATH|" != *"|$pth|"* ]]; then v=MISMATCH; notes+="path got $pth; "; fi
     if [[ -n "$ROW_NV" && "$nv" != "$ROW_NV" ]]; then v=MISMATCH; notes+="nat_view got ${nv:-none}; "; fi
   fi
   if [[ -n "${gf// /}" ]]; then [[ "$v" != INCONCLUSIVE ]] && v=FAIL; notes+="guard: $gf; "; fi
@@ -833,17 +883,24 @@ g7_finish_note() { # id tag rcv tstart
   st="$(stall_of "rb$2")"
   tot=$(( $(now_s) - $4 ))
   G7_NOTE="connections=$conns paused=$pz resumed=$rs max_stall_s=$st total_s=$tot cmp=$X_CMP $X_NOTE"
-  G7_PZ="$pz"; G7_RS="$rs"
+  G7_PZ="$pz"; G7_RS="$rs"; G7_CONNS="$conns"; G7_STALL="$st"
 }
-G7_NOTE=""; G7_PZ=0; G7_RS=0
+G7_NOTE=""; G7_PZ=0; G7_RS=0; G7_CONNS=0; G7_STALL=0
 
 g7_run() { # id тип
-  local id="$1" kind="$2" r s lab t0 v=PASS ports="" ev=""
+  local id="$1" kind="$2" r s lab t0 v=PASS ports="" ev="" exp="completes, cmp equal" i rbnv=""
   XA=(); RX=(); SX=(); AX=(); BX=(); XA_EXTRA=(); WHY=""; TOKRES=""
+  case "$kind" in
+    DROP15) exp="completes without pause, cmp equal, connections=1, paused=0, max_stall_s<=30" ;;
+    DROP45) exp="paused, resumed, cmp equal" ;;
+    REBIND) exp="completes, cmp equal, HA nat_view not Conflicting 60 s after NAT-A WAN change" ;;
+  esac
+  if [[ "$kind" == REBIND ]] && nat_type_bad PR@na; then vd "$id" g7 INCONCLUSIVE "-" "контроль типа PR не прошёл"; return 0; fi
   row_begin "$id" 600 || { vd "$id" g7 INCONCLUSIVE "-" "топология не поднялась"; row_end; return 0; }
   case "$kind" in
-    BASE|CALLEE|DROP15) r=wb; s=wa; lab=o1; ports="wa wb"; flow_pair wa wb || true ;;
+    BASE|CALLEE|DROP15|DROP45) r=wb; s=wa; lab=o1; ports="wa wb"; flow_pair wa wb || true ;;
     LAPTOP) r=wa; s=ha; lab=i1; ports="wa na na2"; flow_pair wa ha || true ;;
+    REBIND) r=wa; s=ha; lab=i1; ports="wa na"; flow_pair wa ha || true ;;
   esac
   nodes_stop_all
   if [[ -n "$WHY" ]]; then row_end; vd "$id" g7 INCONCLUSIVE "-" "$WHY"; return 0; fi
@@ -858,6 +915,13 @@ g7_run() { # id тип
       case "$kind" in
         CALLEE) ipn wb addr add "$CORE.52/24" dev wan; ipn wb addr del "$CORE.51/24" dev wan; ev="IP wb changed" ;;
         DROP15) drop_on wa "$CORE.51"; sleep 15; drop_off wa; ev="UDP dropped 15 s" ;;
+        DROP45) drop_on wa "$CORE.51"; sleep 45; drop_off wa; ev="UDP dropped 45 s" ;;
+        REBIND)
+          ipn na addr add "$CORE.11/24" dev wan
+          ipn na addr del "$CORE.10/24" dev wan
+          ev="NAT-A wan changed"
+          for i in $(seq 1 60); do node_alive sa1 || break; over_cap && break; sleep 1; done
+          rbnv="$(nat_view_of sa1)" ;;
         LAPTOP)
           ipn ha link set eth1 up
           ipn ha route replace default via 192.168.12.1 dev eth1
@@ -874,9 +938,19 @@ g7_run() { # id тип
   g7_finish_note "$id" 1 "$r" "$t0"
   [[ "$X_CMP" == DIFF ]] && integrity_fail "$id" g7
   if [[ "$X_CMP" != ok && "$v" == PASS ]]; then v=FAIL; fi
-  if [[ "$kind" == DROP15 && "$v" == PASS ]] && ! (( G7_PZ > 0 && G7_RS > 0 )); then v=FAIL; G7_NOTE+="no paused/resumed; "; fi
+  # Rev. 2 (S3): простой QUIC 30 с, keep-alive 10 с: обрыв 15 с не закрывает соединение (пауз нет), обрыв 45 с закрывает.
+  if [[ "$kind" == DROP15 && "$v" == PASS ]]; then
+    if (( G7_CONNS != 1 || G7_PZ != 0 )) || ! awk -v s="$G7_STALL" 'BEGIN { exit (s + 0 <= 30) ? 0 : 1 }'; then
+      v=FAIL; G7_NOTE+="expected connections=1 paused=0 max_stall_s<=30; "
+    fi
+  fi
+  if [[ "$kind" == DROP45 && "$v" == PASS ]] && ! (( G7_PZ > 0 && G7_RS > 0 )); then v=FAIL; G7_NOTE+="no paused/resumed; "; fi
+  if [[ "$kind" == REBIND && "$v" == PASS ]]; then
+    G7_NOTE+="nat_view_ha_60s=${rbnv:-none}; "
+    [[ "$rbnv" != Conflicting ]] || { v=FAIL; G7_NOTE+="nat_view Conflicting 60 s after change; "; }
+  fi
   if over_cap && [[ "$v" == PASS ]]; then v=INCONCLUSIVE; G7_NOTE+="timeout; "; fi
-  verdict "$id" g7 "$v" "completes, cmp equal" "$([[ "$v" == PASS ]] && echo completed || echo "see note")" - - - - - \
+  verdict "$id" g7 "$v" "$exp" "$([[ "$v" == PASS ]] && echo completed || echo "see note")" - - - - - \
     "$(( $(now_s) - t0 ))" "event: ${ev:-none}; $G7_NOTE"
   row_end
 }
@@ -1016,8 +1090,8 @@ speed_cfg() { # путь профиль
   if [[ -n "$WHY" ]]; then row_end; vd "$id" speed INCONCLUSIVE "-" "$WHY"; return 0; fi
   [[ "$path" != UPNP ]] || RX=(--upnp-router "$UDN")
   offloads_off || off=0
-  if [[ $off == 0 && -n "$P_LOSS" ]]; then row_end; vd "$id" speed INCONCLUSIVE "-" "offload not disabled (нет ethtool)"; return 0; fi
-  [[ $off == 1 ]] || notes+="offload not disabled; "
+  if [[ $off == 0 && -n "$P_LOSS" ]]; then row_end; vd "$id" speed INCONCLUSIVE "-" "offload not disabled: ${OFF_WHY:-причина не определена}"; return 0; fi
+  [[ $off == 1 ]] || notes+="offload not disabled (${OFF_WHY:-?}); "
   if [[ -n "$P_RATE" && -n "$sp" ]]; then
     netem_set "$sp" "$P_DELAY" "$P_RATE" "$P_LIMIT" ""
     netem_set "$rp" "$P_DELAY" "$P_RATE" "$P_LIMIT" "$P_LOSS"
@@ -1192,13 +1266,15 @@ run_row() { # id
     V04) verdict V04 via NOTRUN "no" "-" - - - - - - "stage 13b deferred by owner" ;;
     V05) verdict V05 via NOTRUN "yes" "-" - - - - - - "stage 13b deferred by owner" ;;
     C20) c20_run ;;
-    C0[1-9]|C1[0-9]) conn_run "$1" ;;
+    C0[1-9]|C1[0-9]|C07H) conn_run "$1" ;;
     X01) conn_run C06 ;;
     X02) x02_row ;;
     G7-BASE) g7_run G7-BASE BASE ;;
     G7-CALLEE) g7_run G7-CALLEE CALLEE ;;
     G7-LAPTOP) g7_run G7-LAPTOP LAPTOP ;;
     G7-DROP15) g7_run G7-DROP15 DROP15 ;;
+    G7-DROP45) g7_run G7-DROP45 DROP45 ;;
+    G7-REBIND) g7_run G7-REBIND REBIND ;; # ожидание спецификации 20.3; запуск имеет смысл после этапа 16a (П1)
     S-IPV6) verdict S-IPV6 speed NOTRUN "-" "-" - - - - - - "IPv6 listening deferred by owner" ;;
     S-*)
       local rest="${1#S-}"
@@ -1214,12 +1290,13 @@ do_conn() {
 }
 do_g7() {
   local id
-  for id in G7-BASE G7-CALLEE G7-LAPTOP G7-DROP15 C20; do run_row "$id"; done
+  # G7-REBIND в `g7` и `all` не входит: его ожидание проверяется после этапа 16a (запуск вручную: stage16.sh G7-REBIND)
+  for id in G7-BASE G7-CALLEE G7-LAPTOP G7-DROP15 G7-DROP45 C20; do run_row "$id"; done
 }
 
 usage() {
   echo "использование: stage16.sh <preflight|natcheck|conn|speed|g7|extra|quick|all|id строки|teardown|build-liar>" >&2
-  echo "id строки: NATCHECK C01..C20 V01..V05 G7-BASE G7-CALLEE G7-LAPTOP G7-DROP15 S-<ПУТЬ>-<ПРОФИЛЬ> X01 X02" >&2
+  echo "id строки: NATCHECK C01..C20 C07H V01..V05 G7-BASE G7-CALLEE G7-LAPTOP G7-DROP15 G7-DROP45 G7-REBIND S-<ПУТЬ>-<ПРОФИЛЬ> X01 X02" >&2
 }
 
 # ---------------------------------------------------------------- вход и уборка

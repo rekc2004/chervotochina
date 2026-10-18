@@ -235,15 +235,18 @@ deliver() { # источник назначение секунды
 }
 
 # ---------------------------------------------------------------- охрана хоста (счётчики nft)
-# Копия nft_guard из stage14.sh + счётчик icmp_unreach ПЕРЕД other (ядро отвечает «недоступно» само, это не программа).
+# Копия nft_guard из stage14.sh + счётчики icmp_unreach (выход) и icmp_unreach_in (вход) ПЕРЕД other и other_in (ядро или
+# маршрутизатор отвечает «недоступно» само, это не программа). Rev. 2 (S1): адреса и порты назначений other и источников
+# other_in пишутся в динамические наборы other_d, other_dn (не UDP/TCP: только адрес), other_s; отчёт показывает роли.
 # Проход: dns = probe = other = other_in = 0 и peer > 0.
 nft_guard() { # ns peers4 (через запятую)
-  local ns="$1" p4="$2" P6="" ND6="" M6="" U6=""
+  local ns="$1" p4="$2" P6="" ND6="" M6="" U6="" U6I=""
   if [[ -e /proc/net/if_inet6 ]]; then
     P6='ip6 daddr 2001:db8::1 counter name "probe"'
     ND6='icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } counter name "nd" accept'
     M6='icmpv6 type mld2-listener-report counter name "mcast_kernel" accept'
     U6='icmpv6 type destination-unreachable counter name "icmp_unreach" accept'
+    U6I='icmpv6 type destination-unreachable counter name "icmp_unreach_in" accept'
   fi
   nsx "$ns" nft flush ruleset 2>/dev/null || true
   nsx "$ns" nft -f - <<NFT
@@ -256,8 +259,12 @@ table inet chv16g {
   counter nd { }
   counter mcast_kernel { }
   counter icmp_unreach { }
+  counter icmp_unreach_in { }
   counter other { }
   counter other_in { }
+  set other_d { type ipv4_addr . inet_service; flags dynamic; size 64; }
+  set other_dn { type ipv4_addr; flags dynamic; size 64; }
+  set other_s { type ipv4_addr; flags dynamic; size 64; }
   chain output {
     type filter hook output priority 0; policy accept;
     th dport { 53, 853 } counter name "dns"
@@ -270,6 +277,8 @@ table inet chv16g {
     ip protocol igmp counter name "mcast_kernel" accept
     ip protocol icmp icmp type destination-unreachable counter name "icmp_unreach" accept
     $U6
+    meta nfproto ipv4 meta l4proto { tcp, udp } update @other_d { ip daddr . th dport }
+    meta nfproto ipv4 meta l4proto != tcp meta l4proto != udp update @other_dn { ip daddr }
     counter name "other" accept
   }
   chain input {
@@ -279,6 +288,9 @@ table inet chv16g {
     $ND6
     $M6
     ip protocol igmp counter name "mcast_kernel" accept
+    ip protocol icmp icmp type destination-unreachable counter name "icmp_unreach_in" accept
+    $U6I
+    meta nfproto ipv4 update @other_s { ip saddr }
     counter name "other_in" accept
   }
 }
@@ -301,6 +313,28 @@ guard_fail() { # ns
   echo "$out"
 }
 guard_val() { cnt "$RD/nft-$1.txt" "$2"; }
+
+# Элементы набора охраны одной строкой: "адрес:порт адрес:порт" или "-". Пишется только в журнал guard16.tsv; отчёт заменяет
+# адреса ролями, а адрес вне карты ролей заставляет генератор отказаться писать отчёт.
+guard_set_elems() { # ns набор
+  local e
+  e="$(nsx "$1" nft list set inet chv16g "$2" 2>/dev/null | tr '\n' ' ' | sed -n 's/.*elements = {\([^}]*\)}.*/\1/p' \
+    | sed -E 's/ \. /:/g; s/,/ /g; s/[[:space:]]+/ /g; s/^ //; s/ $//')"
+  printf '%s' "${e:--}"
+}
+# Строка guard16.tsv: id ns icmp_unreach icmp_unreach_in other other_in other_d other_dn other_s. Вызывать после guard_fail.
+guard_record() { # id ns
+  local id="$1" ns="$2" f="$RD/nft-$2.txt" c line="" k
+  mkdir -p -- "$LOGS"; touch "$LOGS/guard16.tsv"
+  line="$id"$'\t'"$ns"
+  for k in icmp_unreach icmp_unreach_in other other_in; do
+    c="$(cnt "$f" "$k")"; line+=$'\t'"${c:-?}"
+  done
+  line+=$'\t'"$(guard_set_elems "$ns" other_d)"$'\t'"$(guard_set_elems "$ns" other_dn)"$'\t'"$(guard_set_elems "$ns" other_s)"
+  awk -F'\t' -v id="$id" '$1 != id' "$LOGS/guard16.tsv" > "$LOGS/guard16.tsv.tmp" || true
+  mv -- "$LOGS/guard16.tsv.tmp" "$LOGS/guard16.tsv"
+  printf '%s\n' "$line" >> "$LOGS/guard16.tsv"
+}
 
 # Обрыв всего UDP между узлом и перечисленными адресами (в обе стороны); одна строка в цепи: `;` перед `}`.
 drop_on() { # ns адреса(через запятую)
@@ -327,17 +361,32 @@ netem_clear() { nsx i tc qdisc del dev "p-$1" root 2>/dev/null || true; }
 tc_stat() { # ns
   nsx i tc -s qdisc show dev "p-$1" 2>/dev/null | awk '/Sent/ { gsub(/[(),]/, ""); print $4, $7; exit }'
 }
-# Отключение offload на всех не-lo интерфейсах всех ns стенда; 0 — ethtool есть и отработал.
+# Отключение offload на всех не-lo интерфейсах всех ns стенда (rev. 2, S2). Каждая опция отдельно: «fixed» и «не поддерживается»
+# не ошибка. Затем ethtool -k внутри ns: tx-udp-segmentation должен быть off на wan, eth0 и портах p-*. 0 — проверено;
+# иначе 1 и причина в OFF_WHY (строки с потерями тогда INCONCLUSIVE: quinn шлёт UDP GSO, netem считает потерю на весь skb).
+OFF_WHY=""
 offloads_off() {
-  local n p ifs ok=0
-  command -v ethtool >/dev/null 2>&1 || return 1
+  local n p ifs ok=0 f out
+  OFF_WHY=""
+  if ! command -v ethtool >/dev/null 2>&1; then OFF_WHY="нет ethtool"; return 1; fi
   for n in "${NSL[@]}"; do
-    ifs="$(ipn "$n" -o link show | awk -F': ' '{print $2}' | sed 's/@.*//' | grep -Ev '^(lo|core0|lan)$' || true)"
+    ifs="$(ipn "$n" -o link show 2>/dev/null | awk -F': ' '{print $2}' | sed 's/@.*//' | grep -Ev '^(lo|core0|lan)$' || true)"
     for p in $ifs; do
       nsx "$n" ethtool -K "$p" gso off tso off gro off >/dev/null 2>&1 && ok=1
+      for f in tx-udp-segmentation rx-udp-gro-forwarding rx-gro-list; do
+        nsx "$n" ethtool -K "$p" "$f" off >/dev/null 2>&1 || true
+      done
     done
   done
-  [[ "$ok" == 1 ]]
+  if [[ "$ok" != 1 ]]; then OFF_WHY="ethtool -K не сработал ни на одном интерфейсе"; return 1; fi
+  for n in "${NSL[@]}"; do
+    ifs="$(ipn "$n" -o link show 2>/dev/null | awk -F': ' '{print $2}' | sed 's/@.*//' | grep -E '^(wan|eth0|p-.+)$' || true)"
+    for p in $ifs; do
+      out="$(nsx "$n" ethtool -k "$p" 2>/dev/null | sed -n 's/^tx-udp-segmentation: *\([a-z]*\).*/\1/p' | head -n1)"
+      if [[ "$out" != off ]]; then OFF_WHY="UDP GSO не отключается ($n/$p: tx-udp-segmentation=${out:-нет в ethtool -k})"; return 1; fi
+    done
+  done
+  return 0
 }
 
 # ---------------------------------------------------------------- прочее
