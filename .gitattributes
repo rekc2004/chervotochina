@@ -1,0 +1,2 @@
+fuzz/corpus/** -text binary
+crates/chervo-receive/tests/fixtures/*.bin -text binary
