@@ -17,7 +17,8 @@
 #   CHV_X02_WIN (300 s, victim observation window), CHV_BURST_GAP (5 s: packets closer than this are one burst),
 #   CHV_BURST_MAX (15 s: longest allowed burst), CHV_FLOOD_SECS (120), CHV_FLOOD_PPS (4000 total, split over the two modes),
 #   CHV_HOLD_CONNS (64), CHV_HOLD_SECS (120), CHV_MSG1_MS (5000: msg1_deadline of the build under test; the code default
-#   is 5 s today, the spec says 3 s - set what the build uses), CHV_INVITE_TTL (900), CHV_CONN_FACTOR (5).
+#   is 5 s today, the spec says 3 s - set what the build uses), CHV_INVITE_TTL (900), CHV_CONN_FACTOR (5),
+#   CHV_ADDRINFO_SETTLE (15 s: X02b waits this long after HA connects to LW so that LW's ADDR_INFO is applied before WB joins).
 #
 # NOT RUN ON LINUX BY THE BUILDER ("not run on Linux by the builder"): on the build machine (Windows) only `bash -n` was
 # run. The conductor runs it on the Linux box. Flows, thresholds marked "assumption" and the flood tool contract are the
@@ -85,6 +86,7 @@ HOLD_SECS="$(num CHV_HOLD_SECS 120)"
 MSG1_MS="$(num CHV_MSG1_MS 5000)"
 INVITE_TTL="$(num CHV_INVITE_TTL 900)"
 CONN_FACTOR="$(num CHV_CONN_FACTOR 5)"
+ADDRINFO_SETTLE="$(num CHV_ADDRINFO_SETTLE 15)"
 VICTIM="$CORE.66"
 CALLEE="$CORE.20"
 
@@ -295,6 +297,16 @@ wait_nat_view() { # label seconds
   done
   return 1
 }
+# The node's last STATE line lists every active friend as friend:L=[addr,addr,...]; true when "addr" (IP:port) is in a list.
+wait_friend_addr() { # label addr seconds
+  local i
+  for i in $(seq 1 "$(( $3 * 2 ))"); do
+    grep '^STATE ' "$(lgf "$1")" 2>/dev/null | tail -n1 | grep -Fq -e "$2," -e "$2]" && return 0
+    over_cap && return 1
+    sleep 0.5
+  done
+  return 1
+}
 TOKRES=""; TOKOK=0
 token_pass2() { # src_label src_dir dst_label dst_dir (token via file, the stand is the "messenger"; only the size is logged)
   local sl="$1" sd="$2" dl="$3" dd="$4" n0 i res err k
@@ -447,8 +459,17 @@ x02c_run() {
   row_end
 }
 
-# X02b: observed-hint lie. LW (build B: ADDR_INFO carries the victim as "your address") is HA's only observer; WB joins HA
-# afterwards, receives HA's token, and when HA is gone redials HA's published addresses (incl. the hint).
+# X02b: observed-hint lie. LW (build B: every ADDR_INFO carries the victim as "your address") is HA's only observer.
+# Why the earlier flow ended "nat_view Unknown": one observer never leaves Unknown (a view needs two agreeing observations,
+# own.rs nat_view), so waiting for a known view could not succeed; and a second honest observer (WB) would make the view
+# Conflicting, which stops the hint (observed_v4 answers only for Unknown/Eim). The lie is published exactly in the window
+# "LW is the only observer". F1: only the live connection supplies observations, and each side computes its own ADDR_INFO
+# update BEFORE applying the peer's observation of the same exchange. So: HA's connection to LW is up and LW's observation
+# is applied (settle), then WB joins; HA's first ADDR_INFO to WB carries the signed update with the hint (the victim); WB's
+# own observation of HA is applied only after that. The precondition is proven from WB's STATE line (the victim address is
+# in WB's list for HA); without it the row is INCONCLUSIVE. Trigger: HA goes away, WB (and LW) redial HA's addresses,
+# hint included. Per H6 the hint may be published once; our dials to the victim must be >= 30 s apart; the verdict is by
+# packets at the victim, as in X02a.
 x02b_run() {
   local pre="" nv=""
   if [[ $HAVE_LIAR_B != 1 ]]; then
@@ -460,30 +481,29 @@ x02b_run() {
   ca lw "$DL"
   node_start_as "$BIN/node17-liar-b" lw lw "${CA[@]}" --invite-out "$W/lw/inv"
   ca ha "$DL"
-  node_start ha ha "${CA[@]}" --invite-in "$W/ha/inv-lw" --invite-in "$W/ha/inv-wb" --token-to i2 --token-out "$W/ha/tok"
+  node_start ha ha "${CA[@]}" --invite-in "$W/ha/inv-lw" --invite-in "$W/ha/inv-wb"
   if ! deliver "$W/lw/inv" "$W/ha/inv-lw" 60; then WHY="invite from LW not issued"
   elif ! wait_grep ha '^EVENT (invite_finished pair=i1 outcome=Added|connected pair=i1 )' 60; then WHY="HA: invite from LW not finished"
-  elif ! wait_nat_view ha 60; then WHY="HA: nat_view Unknown (no observation from LW)"
   fi
   if [[ -z "$WHY" ]]; then
+    # LW's ADDR_INFO (the lie) reaches HA on the live connection; with one observer nat_view stays Unknown (expected)
+    wait_secs "$ADDRINFO_SETTLE"
     nv="$(nat_view_of ha)"
-    # WB only now: it invites HA, connects to HA and becomes a second (honest) observer
+    # WB only now: it invites HA; HA's first ADDR_INFO to WB carries the hint built from LW's observation
     ca wb "$DL"
-    node_start wb wb "${CA[@]}" --invite-out "$W/wb/inv" --token-in "$W/wb/tok-in"
+    node_start wb wb "${CA[@]}" --invite-out "$W/wb/inv"
     if ! deliver "$W/wb/inv" "$W/ha/inv-wb" 60; then WHY="invite from WB not issued"
     elif ! wait_grep ha '^EVENT (invite_finished pair=i2 outcome=Added|connected pair=i2 )' 60; then WHY="HA: invite from WB not finished"
+    elif ! wait_friend_addr wb "$VICTIM:4433" 60; then
+      WHY="the lie did not reach WB: the victim address is not in WB's list for HA (no hint published: LW's observation not applied in time, or nat_view=${nv:-none})"
     fi
-  fi
-  if [[ -z "$WHY" ]]; then
-    token_pass2 ha ha wb wb
-    [[ $TOKOK == 1 ]] || WHY="token HA -> WB not delivered"
   fi
   if [[ -n "$WHY" ]]; then
     row_end
     vd X02b x02 INCONCLUSIVE "-" "$WHY"
     return 0
   fi
-  pre+="nat_view_ha_after_LW=${nv:-none}; nat_view_ha_final=$(nat_view_of ha); "
+  pre+="nat_view_ha_before_WB=${nv:-none}; nat_view_ha_final=$(nat_view_of ha); WB holds the victim address as HA's hint; "
   victim_capture_start
   node_stop ha
   wait_secs "$WIN"

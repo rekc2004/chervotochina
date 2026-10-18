@@ -477,3 +477,36 @@ async fn confirm_and_cancel_errors() {
         Some(InviteOutcome::PeerUnreachable | InviteOutcome::Declined)
     ));
 }
+
+/// Этап 17, S2: приглашённый записывает адрес проверенной гостевой сессии как `Contact` (как и
+/// пригласивший); иначе у него остаются только строгие адреса токена и первый звонок другу
+/// ждёт строгого окна.
+#[tokio::test(start_paused = true)]
+async fn invitee_notes_session_address_as_contact() {
+    let mut d = duo(300);
+    let (sa, sb) = reach_sas(&mut d).await;
+    assert_eq!(sa, sb);
+    d.a.engine.confirm_sas(&d.pa, true, "Борис").unwrap();
+    d.b.engine.confirm_sas(&d.pb, true, "Анна").unwrap();
+    assert_eq!(
+        outcome(wait_event(&mut d.b.events, secs(30), finished).await),
+        Some(InviteOutcome::Added)
+    );
+    let known =
+        d.b.engine
+            .read_book(|b| b.get(&d.pb).unwrap().known_addrs.clone());
+    assert!(
+        known
+            .iter()
+            .any(|k| k.source == chervo_addr::AddrSource::Contact && k.addr == addr(A_ADDR)),
+        "no Contact from the guest session ({} entries)",
+        known.len()
+    );
+    assert!(
+        known
+            .iter()
+            .any(|k| k.source == chervo_addr::AddrSource::Invite && k.addr == addr(A_ADDR)),
+        "token address lost ({} entries)",
+        known.len()
+    );
+}

@@ -41,16 +41,25 @@ pub fn secs(n: u64) -> Duration {
 pub struct MemStore {
     map: Mutex<HashMap<PairId, Zeroizing<Vec<u8>>>>,
     list: Mutex<Option<Zeroizing<Vec<u8>>>>,
+    fail_reads: AtomicBool,
 }
 
 impl MemStore {
     pub fn pair_count(&self) -> usize {
         self.map.lock().unwrap().len()
     }
+
+    /// Чтение ключей пар отвечает `StorageUnavailable` (сбой хранилища ключей).
+    pub fn set_fail_reads(&self, on: bool) {
+        self.fail_reads.store(on, Ordering::SeqCst);
+    }
 }
 
 impl SecretStore for MemStore {
     fn read(&self, pair: &PairId) -> Result<Option<Zeroizing<Vec<u8>>>, IdentityError> {
+        if self.fail_reads.load(Ordering::SeqCst) {
+            return Err(IdentityError::StorageUnavailable);
+        }
         Ok(self
             .map
             .lock()

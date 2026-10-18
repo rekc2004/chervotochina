@@ -717,6 +717,11 @@ where
                         name,
                     } => {
                         let unix = self.clock.now_unix();
+                        // этап 17, S2: адрес проверенной гостевой сессии это `Contact` (как у
+                        // пригласившего); адреса токена строгие (слова пригласившего), и без
+                        // `Contact` первый звонок другу ждал бы строгого окна
+                        let mut addrs = from_invite(&seed.token_addrs, unix);
+                        note_contact(&mut addrs, conn.remote_addr(), unix);
                         self.complete_friend(
                             pair,
                             NewFriend {
@@ -725,7 +730,7 @@ where
                                 friend_x: seed.inviter_x,
                                 our_ed: seed.our_ed,
                                 our_x: seed.our_x,
-                                addrs: from_invite(&seed.token_addrs, unix),
+                                addrs,
                                 now_unix: unix,
                             },
                         );

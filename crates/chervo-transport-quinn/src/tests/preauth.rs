@@ -199,7 +199,7 @@ fn preauth_keys_grouping_and_release() {
 #[test]
 fn s2_defaults() {
     let d = QuinnConfig::default();
-    assert_eq!(d.msg3_deadline, Duration::from_secs(3));
+    assert_eq!(d.msg3_deadline, Duration::from_secs(5));
     assert_eq!(d.max_preauth_per_pair, 4);
 }
 

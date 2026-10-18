@@ -231,6 +231,13 @@ pub(crate) struct State<C> {
     /// Иначе удалённый или заблокированный друг оставался бы в наборе транспорта до следующего
     /// изменения книги.
     pub(crate) publish_retry_at: Option<Instant>,
+    /// S2, L4: набор, последний раз принятый транспортом (общие ссылки на ключи, без повторной
+    /// загрузки). Из него при неудачной публикации сразу убираются пары, переставшие быть
+    /// допущенными.
+    pub(crate) published: Vec<KxPeer>,
+    /// S2, L4: `EngineEvent::Internal` по неудаче публикации уже выдан в текущей серии неудач
+    /// (повтор каждые 5 с его не повторяет); сбрасывается успешной публикацией.
+    pub(crate) publish_internal_reported: bool,
 }
 
 /// Через сколько `tick` повторяет неудавшуюся публикацию набора пар.
@@ -362,10 +369,44 @@ where
         let res = self.publish_once(st);
         // S2, L4: неудача (хранилище ключей, транспорт) помечается, `tick` повторит
         st.publish_retry_at = match res {
-            Ok(()) => None,
-            Err(_) => Some(add_sat(Instant::now(), PUBLISH_RETRY)),
+            Ok(()) => {
+                st.publish_internal_reported = false;
+                None
+            }
+            Err(_) => {
+                // полная публикация не удалась: пары, переставшие быть допущенными, убираются
+                // из набора сразу, без загрузки ключей; полный набор повторит `tick`
+                self.drop_stale_pairs(st);
+                Some(add_sat(Instant::now(), PUBLISH_RETRY))
+            }
         };
         res
+    }
+
+    /// Убрать из набора транспорта и из разрешений пары, переставшие быть допущенными (блок,
+    /// удаление, отзыв), по набору, принятому транспортом в последний раз: ключи не
+    /// загружаются, хранилище не нужно. Неудача транспорта оставляет всё как есть.
+    fn drop_stale_pairs(&self, st: &mut State<T::Conn>) {
+        let kept: Vec<KxPeer> = st
+            .published
+            .iter()
+            .filter(|p| {
+                let pair = p.pair();
+                st.book.is_active(&pair)
+                    || (st.book.get(&pair).is_none() && st.guests.contains_key(&pair))
+            })
+            .cloned()
+            .collect();
+        if kept.len() == st.published.len() {
+            return;
+        }
+        let allowed: HashSet<PairId> = kept.iter().map(KxPeer::pair).collect();
+        let old = self.allow.replace(allowed);
+        if self.transport.set_peers(kept.clone()).is_err() {
+            self.allow.replace(old);
+            return;
+        }
+        st.published = kept;
     }
 
     fn publish_once(&self, st: &mut State<T::Conn>) -> Result<(), ConnectError> {
@@ -384,11 +425,16 @@ where
             }
         }
         let old = self.allow.replace(allowed);
-        if self.transport.set_peers(peers).is_err() {
+        if self.transport.set_peers(peers.clone()).is_err() {
             self.allow.replace(old);
-            self.emit(EngineEvent::Internal);
+            // повтор каждые 5 с не засыпает событиями: одно на серию неудач
+            if !st.publish_internal_reported {
+                st.publish_internal_reported = true;
+                self.emit(EngineEvent::Internal);
+            }
             return Err(ConnectError::Internal);
         }
+        st.published = peers;
         let mut now_bad: HashMap<PairId, KeyStatus> = HashMap::new();
         for (pair, status) in bad {
             if st.key_problems.get(&pair) != Some(&status) {
@@ -1052,6 +1098,8 @@ where
             ext_baseline: false,
             ext_last: None,
             publish_retry_at: None,
+            published: Vec::new(),
+            publish_internal_reported: false,
         };
         let inner = Arc::new(Inner {
             transport,

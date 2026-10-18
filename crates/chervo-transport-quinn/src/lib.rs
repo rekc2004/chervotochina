@@ -107,7 +107,10 @@ pub struct QuinnConfig {
     /// (этап 17, S2, L3). Сверх предела: молчание, как при занятом семафоре.
     pub max_preauth_per_pair: usize,
     /// Срок от отправки `msg2` до `msg3` и EOF; не больше `auth_deadline`. Друг с верным `msg1`,
-    /// молчащий дальше, освобождает место через это время, а не через `auth_deadline`.
+    /// молчащий дальше, освобождает место через это время, а не через `auth_deadline`. По
+    /// умолчанию 5 с (было 3 с): при высоком RTT и потерях таймер PTO QUIC удваивается, и
+    /// честный `msg3` с повторной передачей не укладывается в 3 с; 5 с всё ещё вдвое короче
+    /// `auth_deadline` (10 с).
     pub msg3_deadline: Duration,
     /// Одновременных переборов KK; при использовании ограничивается `[1, max_preauth]`.
     pub max_kk_trials: usize,
@@ -187,7 +190,7 @@ impl Default for QuinnConfig {
             msg1_deadline: Duration::from_secs(5),
             max_preauth_per_key: 2,
             max_preauth_per_pair: 4,
-            msg3_deadline: Duration::from_secs(3),
+            msg3_deadline: Duration::from_secs(5),
             max_kk_trials: 1,
             kk_budget_per_sec: 2000,
             kk_budget_burst: 2000,

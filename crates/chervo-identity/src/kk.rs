@@ -5,6 +5,7 @@
 //! Спецификация: `docs/specs/stage-10b-kx.md`.
 
 use std::fmt;
+use std::sync::Arc;
 
 use zeroize::Zeroizing;
 
@@ -45,9 +46,14 @@ impl fmt::Debug for ChannelBinding {
 }
 
 /// Пара глазами Noise KK: наш ключ обмена и ключ обмена друга.
+///
+/// `Clone` делит секрет (`Arc<PairKx>`), а не копирует его: в памяти один экземпляр, он
+/// обнуляется при уничтожении последней ссылки. Нужен движку, чтобы убрать из набора транспорта
+/// пары, переставшие быть допущенными, не загружая ключи заново (этап 17, S2, L4).
+#[derive(Clone)]
 pub struct KxPeer {
     pair: PairId,
-    pub(crate) ours: PairKx,
+    pub(crate) ours: Arc<PairKx>,
     pub(crate) theirs: KxPublicKey,
 }
 
@@ -56,7 +62,11 @@ impl KxPeer {
     /// остаётся прежним), а делает пару непригодной: `kk_initiate` возвращает
     /// `AuthFailed`, а `kk_respond` пропускает такого кандидата (защита от отражения).
     pub fn new(pair: PairId, ours: PairKx, theirs: KxPublicKey) -> Self {
-        Self { pair, ours, theirs }
+        Self {
+            pair,
+            ours: Arc::new(ours),
+            theirs,
+        }
     }
 
     pub fn pair(&self) -> PairId {

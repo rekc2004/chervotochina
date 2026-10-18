@@ -190,3 +190,62 @@ async fn failed_publish_after_block_is_retried_on_tick() {
     tokio::time::sleep(secs(30)).await;
     assert_eq!(n.t.peers_call_count(), calls);
 }
+
+/// S2, L4 (остаток): публикация после блокировки не удалась из-за хранилища ключей. Заблокированный
+/// друг уходит из набора транспорта и из разрешений сразу, без загрузки ключей; полный набор
+/// публикуется повтором, когда хранилище вернулось. В старом коде набор оставался прежним.
+#[tokio::test(start_paused = true)]
+async fn blocked_friend_dropped_from_transport_while_store_fails() {
+    let mut pre = Pre::new();
+    let x = pre.solo_friend(vec![inv("5.6.7.8:4000")]);
+    let y = pre.solo_friend(vec![inv("6.6.6.6:4000")]);
+    let n = Node::start(pre, ConnectConfig::default());
+    assert!(n.allow.is_allowed(&x) && n.allow.is_allowed(&y));
+    n.store.set_fail_reads(true);
+    let res = n.engine.update_book(|b, s| b.block(s, &x));
+    assert!(matches!(res.unwrap_err(), ConnectError::Friends(_)));
+    // хранилище не отвечает, но заблокированного уже нет ни в наборе, ни в допуске
+    assert_eq!(n.t.last_peers(), vec![y]);
+    assert!(!n.allow.is_allowed(&x));
+    assert!(n.allow.is_allowed(&y));
+    tokio::time::sleep(secs(12)).await;
+    assert_eq!(n.t.last_peers(), vec![y]);
+    // хранилище вернулось: повтор публикует полный набор и прекращается
+    n.store.set_fail_reads(false);
+    tokio::time::sleep(secs(12)).await;
+    assert_eq!(n.t.last_peers(), vec![y]);
+    let calls = n.t.peers_call_count();
+    tokio::time::sleep(secs(30)).await;
+    assert_eq!(n.t.peers_call_count(), calls);
+}
+
+/// S2, L4 (остаток): повтор каждые 5 с не засыпает событиями `Internal`: одно на серию неудач.
+#[tokio::test(start_paused = true)]
+async fn failed_publish_emits_internal_once_per_streak() {
+    let mut pre = Pre::new();
+    let x = pre.solo_friend(vec![inv("5.6.7.8:4000")]);
+    let _y = pre.solo_friend(vec![inv("6.6.6.6:4000")]);
+    let mut n = Node::start(pre, ConnectConfig::default());
+    n.t.dup_error
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        n.engine.update_book(|b, s| b.block(s, &x)).unwrap_err(),
+        ConnectError::Internal
+    );
+    tokio::time::sleep(secs(31)).await;
+    let internals =
+        |evs: Vec<EngineEvent>| evs.iter().filter(|e| **e == EngineEvent::Internal).count();
+    assert_eq!(internals(drain(&mut n.events).await), 1);
+    // серия кончилась успехом; новая серия снова даёт одно событие
+    n.t.dup_error
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    tokio::time::sleep(secs(6)).await;
+    n.t.dup_error
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        n.engine.update_book(|_, _| Ok(())).unwrap_err(),
+        ConnectError::Internal
+    );
+    tokio::time::sleep(secs(31)).await;
+    assert_eq!(internals(drain(&mut n.events).await), 1);
+}
