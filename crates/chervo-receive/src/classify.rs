@@ -276,18 +276,37 @@ const COMPRESSION_ONLY: &[&str] = &["gz", "xz", "bz2", "zst", "lz", "lz4", "z"];
 /// `x.iso.gz` даёт `x.iso`, `x.exe.xz` даёт `x.exe`, `a.tar.gz` даёт `a.tar`, `x.img.zst.gz`
 /// даёт `x.img`. Без внутреннего расширения (`x.gz`) имя остаётся как есть. Каждый шаг
 /// укорачивает имя, поэтому цикл конечен.
-fn effective_name(last: &str) -> &str {
+///
+/// Рев. 6, M1: основа перед снятым суффиксом очищается от хвостовых `.` и пробелов, как это
+/// делает Windows (`x.exe..gz` после распаковки это `x.exe.` то есть `x.exe`). Второе значение
+/// истинно, если такая очистка что-то убрала: имя «замаскировано» и в безопасный тип не входит.
+fn peel_compression(last: &str) -> (&str, bool) {
     let mut cur = last;
+    let mut trimmed = false;
     loop {
         let (stem, ext) = split_ext(cur);
         let Some(e) = ext.strip_prefix('.') else {
-            return cur;
+            return (cur, trimmed);
         };
-        if !COMPRESSION_ONLY.contains(&fold(e).as_str()) || split_ext(stem).1.is_empty() {
-            return cur;
+        if !COMPRESSION_ONLY.contains(&fold(e).as_str()) {
+            return (cur, trimmed);
         }
-        cur = stem;
+        let clean = stem.trim_end_matches(['.', ' ']);
+        trimmed |= clean.len() != stem.len();
+        if split_ext(clean).1.is_empty() {
+            return (cur, trimmed);
+        }
+        cur = clean;
     }
+}
+
+fn effective_name(last: &str) -> &str {
+    peel_compression(last).0
+}
+
+/// Из суффикса сжатия вычищены хвостовые `.` или пробелы основы (Рев. 6, M1).
+fn has_trimmed_stem(last: &str) -> bool {
+    peel_compression(last).1
 }
 
 /// Расширение после `fold` (Рев. 3, F3): `ſ` даёт `s`, `ı` даёт `i`, знак Кельвина `k`; так
@@ -298,12 +317,15 @@ fn folded_ext(comp: &str) -> Option<String> {
     Some(fold(ext.strip_prefix('.')?))
 }
 
-/// Есть ли у последнего компонента расширение с не-ASCII символом (после `fold` оно может
-/// совпасть с расширением программы, оболочка ОС этого может не показывать). У сжатого
-/// одиночного файла проверяется и внутреннее расширение.
-pub(crate) fn has_non_ascii_ext(p: &SafeRelPath) -> bool {
+/// Подозрительное расширение последнего компонента: не-ASCII символ (после `fold` оно может
+/// совпасть с расширением программы, оболочка ОС этого может не показывать) или хвостовые `.`
+/// и пробелы перед суффиксом сжатия (Рев. 6, M1). У сжатого одиночного файла проверяется и
+/// внутреннее расширение.
+pub(crate) fn has_suspicious_ext(p: &SafeRelPath) -> bool {
     p.components().last().is_some_and(|last| {
-        !split_ext(last).1.is_ascii() || !split_ext(effective_name(last)).1.is_ascii()
+        !split_ext(last).1.is_ascii()
+            || !split_ext(effective_name(last)).1.is_ascii()
+            || has_trimmed_stem(last)
     })
 }
 
@@ -318,6 +340,9 @@ pub fn is_known_inert(p: &SafeRelPath) -> bool {
     let Some(last) = p.components().last() else {
         return false;
     };
+    if has_trimmed_stem(last) {
+        return false;
+    }
     let (_, ext) = split_ext(effective_name(last));
     if !ext.is_ascii() {
         return false;

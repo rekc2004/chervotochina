@@ -66,6 +66,8 @@ pub enum RootError {
     Shared,
     /// Unix: `.chervo-partial` доступен другим или принадлежит не нам.
     PartialNotPrivate,
+    /// Рев. 6, L4: папка лежит внутри служебного каталога `.chervo-partial` (или это он сам).
+    InsidePartial,
     Io(io::ErrorKind),
 }
 
@@ -76,6 +78,7 @@ impl fmt::Display for RootError {
             Self::NotDir => "receive folder is not a directory",
             Self::Shared => "receive folder is shared with other users",
             Self::PartialNotPrivate => "service folder of the receive folder is not private",
+            Self::InsidePartial => "receive folder is inside a service folder",
             Self::Io(_) => "receive folder i/o error",
         })
     }
@@ -142,6 +145,16 @@ impl ReceiveRoot {
         let root = fs::canonicalize(&cfg.root)?;
         if !fs::metadata(&root)?.is_dir() {
             return Err(RootError::NotDir);
+        }
+        // Рев. 6, L4: после `canonicalize` (ссылки уже разрешены) ни один компонент пути не
+        // служебный каталог. Проверка до создания чего-либо. Регистр не важен (Windows и macOS
+        // не различают его); на Unix это лишь осторожность.
+        if root.components().any(|c| {
+            c.as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(PARTIAL_NAME)
+        }) {
+            return Err(RootError::InsidePartial);
         }
         let partial = root.join(PARTIAL_NAME);
         ensure_private_dir(&partial)?;

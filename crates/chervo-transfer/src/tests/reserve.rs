@@ -483,3 +483,30 @@ async fn lone_offer_sees_no_reservation() {
     assert!(placed_files(&t.b.dest)[0].1 == data1);
     let _ = t.pa2;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn respond_accept_waits_for_the_decision_lock() {
+    // Рев. 6, L1: `respond(key, true)` берёт ответ под `decide_lock`: пока замок занят
+    // (идёт решение по другому предложению), принятие ждёт, а после освобождения проходит
+    let policy = Space::new(0, Duration::ZERO);
+    let mut t = trio(policy.clone(), default_placement).await;
+    let src = TestDir::new();
+    let (f1, _) = big(&src, "one.bin", 77);
+    let _k1 = t.a1.tr.send(&t.pa1, f1).unwrap();
+    let e = wait_ev(&mut t.b.ev, 30, is_offer()).await;
+    let key = key_of(&e);
+    let tr = &t.b.tr;
+    let finished_while_held = std::thread::scope(|sc| {
+        let guard = crate::shared::lock(&tr.inner().decide_lock);
+        let h = sc.spawn(|| tr.respond(&key, true));
+        std::thread::sleep(Duration::from_millis(400));
+        let early = h.is_finished();
+        drop(guard);
+        let res = h.join().unwrap();
+        assert_eq!(res, Ok(()), "accepted after the lock is released");
+        early
+    });
+    assert!(!finished_while_held, "respond must wait for decide_lock");
+    t.a1.tr.shutdown();
+    t.a2.tr.shutdown();
+}

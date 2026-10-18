@@ -206,7 +206,13 @@ impl<L: Links> Transfers<L> {
         if accept && inner.active_inbound() >= inner.sh.cfg.max_inbound_active {
             return Err(TransferError::Busy);
         }
-        let answer = s.take_answer().ok_or(TransferError::WrongState)?;
+        // Рев. 6, L1: ответ берётся под тем же замком, что и автоприём в `inbox_loop`, чтобы
+        // решение политики по другому предложению видело это принятое предложение в резерве.
+        // Замок не держится через `.await`.
+        let answer = {
+            let _g = lock(&inner.decide_lock);
+            s.take_answer().ok_or(TransferError::WrongState)?
+        };
         answer
             .send(accept)
             .map_err(|_| TransferError::NoSuchTransfer)

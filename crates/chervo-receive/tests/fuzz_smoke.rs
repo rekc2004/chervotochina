@@ -7,8 +7,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path};
 
 use chervo_receive::{
-    ReceiveLimits, fold, is_portable_component, plan_offer, portable_component, sanitize_path,
-    sanitize_relative_path,
+    FileClass, ReceiveLimits, SafeRelPath, classify, fold, is_known_inert, is_portable_component,
+    plan_offer, portable_component, sanitize_path, sanitize_relative_path,
 };
 use chervo_transfer::{OfferedFile, UntrustedName};
 use unicode_normalization::UnicodeNormalization;
@@ -36,7 +36,7 @@ impl Rng {
 }
 
 fn alphabet() -> Vec<char> {
-    let mut a: Vec<char> = "/\\:.. ~0123456789<>\"|?*aAbBcCoOnNuUlLpPtTxXeE_-()"
+    let mut a: Vec<char> = "/\\:.. ~0123456789<>\"|?*aAbBcCoOnNuUlLpPtTxXeE_-()gGzZiImM"
         .chars()
         .collect();
     a.extend([
@@ -152,6 +152,11 @@ const SEEDS: &[&str] = &[
     "a\u{FF0F}b",
     "photo.jpg      .exe",
     "CLOC\u{212A}$",
+    "x.exe..gz",
+    "x.exe .gz",
+    "x.exe. .gz",
+    "x.exe.gz..gz",
+    "x.iso. .xz",
 ];
 
 fn random_input(rng: &mut Rng, alpha: &[char]) -> String {
@@ -387,11 +392,104 @@ fn fuzz_smoke_plan() {
             assert_eq!(a.path, b.path);
             assert!(!b.flags.changed && !b.flags.renamed_in_offer);
             // Рев. 3, F3: `suspicious` остаётся только из-за не-ASCII в расширении
-            // (то есть в последнем компоненте), не из-за невидимых символов.
+            // (то есть в последнем компоненте), не из-за невидимых символов. Рев. 6, M1: или
+            // из-за хвостовых `.` и пробелов перед суффиксом (`x.exe .gz`).
             assert!(
-                !b.flags.suspicious || b.path.components().last().is_some_and(|c| !c.is_ascii())
+                !b.flags.suspicious
+                    || b.path.components().last().is_some_and(|c| {
+                        !c.is_ascii()
+                            || c.rsplit_once('.')
+                                .is_some_and(|(s, _)| s.ends_with(['.', ' ']))
+                    })
             );
         }
     }
     println!("fuzz_smoke_plan: files={total_files}");
+}
+
+/// Суффиксы сжатия, которые распаковщик снимает по одному (независимая копия списка).
+fn is_compression(ext: &str) -> bool {
+    matches!(
+        fold(ext).as_str(),
+        "gz" | "xz" | "bz2" | "zst" | "lz" | "lz4" | "z"
+    )
+}
+
+fn single(name: &str, l: &ReceiveLimits) -> Option<SafeRelPath> {
+    sanitize_path(name, l).ok().map(|(p, _)| p)
+}
+
+/// Рев. 6, M1: имена после снятия каждого суффикса сжатия, где основа очищена от хвостовых
+/// `.` и пробелов, как это делает Windows при создании файла.
+fn windows_peeled_stems(last: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = last.to_owned();
+    for _ in 0..16 {
+        let Some((stem, ext)) = cur.rsplit_once('.') else {
+            break;
+        };
+        if !is_compression(ext) {
+            break;
+        }
+        let clean = stem.trim_end_matches(['.', ' ']);
+        if clean.is_empty() {
+            break;
+        }
+        out.push(clean.to_owned());
+        cur = clean.to_owned();
+    }
+    out
+}
+
+/// Свойство: если после нормализации хвостовых точек и пробелов у какой-либо снятой основы
+/// получается опасный класс, исходное имя никогда не «заведомо безопасное».
+fn check_inert(input: &str, l: &ReceiveLimits) {
+    let Some(p) = single(input, l) else {
+        return;
+    };
+    if !is_known_inert(&p) {
+        return;
+    }
+    let Some(last) = p.components().last() else {
+        return;
+    };
+    for stem in windows_peeled_stems(last) {
+        if let Some(q) = single(&stem, l) {
+            assert_eq!(
+                classify(&q).class,
+                FileClass::Ordinary,
+                "known-inert {input:?} hides risky {stem:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn fuzz_smoke_known_inert_vs_windows_trim() {
+    let n = iterations();
+    println!("fuzz_smoke_known_inert: iterations={n}");
+    let alpha = alphabet();
+    let l = ReceiveLimits::default();
+    let pieces = [
+        "x", "photo", ".exe", ".jpg", ".iso", ".lnk", ".gz", ".xz", ".Z", ".zst", ".", "..", " ",
+        ". ", " .", ".tar",
+    ];
+    let mut rng = Rng(0xA5A5_1234_DEAD_BEEF);
+    let mut inert = 0u64;
+    for _ in 0..n {
+        let input = if rng.below(2) == 0 {
+            let k = 1 + rng.below(7);
+            (0..k)
+                .map(|_| pieces.get(rng.below(pieces.len())).copied().unwrap_or("x"))
+                .collect::<String>()
+        } else {
+            random_input(&mut rng, &alpha)
+        };
+        if single(&input, &l).is_some_and(|p| is_known_inert(&p)) {
+            inert += 1;
+        }
+        check_inert(&input, &l);
+    }
+    println!("fuzz_smoke_known_inert: known-inert={inert} of {n}");
+    assert!(inert > 0);
 }

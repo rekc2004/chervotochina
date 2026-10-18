@@ -43,6 +43,7 @@ fn root_creates_service_dirs_and_hides_paths() {
         RootError::NotDir,
         RootError::Shared,
         RootError::PartialNotPrivate,
+        RootError::InsidePartial,
         RootError::Io(std::io::ErrorKind::NotFound),
     ] {
         let s = format!("{e} {e:?}");
@@ -116,6 +117,49 @@ fn partial_dir_that_is_a_link_refused() {
     assert!(
         fs::read_dir(&outside).expect("read").next().is_none(),
         "nothing created through the link"
+    );
+}
+
+/// Рев. 6, L4: папка внутри служебного каталога `.chervo-partial` (или он сам) не годится как
+/// папка приёма, по умолчанию и как «другая»; ничего не создаётся.
+#[test]
+fn folder_inside_partial_is_refused_l4() {
+    let tmp = Tmp::new("rootp");
+    let (cfg, _dir) = cfg_in(&tmp, "recv");
+    let root = ReceiveRoot::open(&cfg).expect("open");
+    let sub = root.partial_dir().join("deep");
+    fs::create_dir(&sub).expect("sub");
+    let count = |p: &std::path::Path| fs::read_dir(p).expect("read").count();
+    let (n_partial, n_sub) = (count(root.partial_dir()), count(&sub));
+    for p in [
+        root.partial_dir().to_path_buf(),
+        root.partial_dir().join("receive"),
+        sub.clone(),
+    ] {
+        let r = ReceiveRoot::open(&ReceiveConfig::new(p.clone()));
+        assert_eq!(r.unwrap_err(), RootError::InsidePartial, "{p:?}");
+    }
+    assert_eq!(count(root.partial_dir()), n_partial, "nothing created");
+    assert_eq!(count(&sub), n_sub, "nothing created in the subfolder");
+    // ссылка снаружи на каталог внутри служебного тоже отказ (путь канонизируется)
+    let link = tmp.path().join("via-link");
+    if link_dir_or_skip("folder_inside_partial_is_refused_l4", &sub, &link).is_some() {
+        assert_eq!(
+            ReceiveRoot::open(&ReceiveConfig::new(link)).unwrap_err(),
+            RootError::InsidePartial
+        );
+    }
+    // похожее имя и основная папка по-прежнему допустимы
+    let (cfg2, _) = cfg_in(&tmp, "chervo-partial-not");
+    ReceiveRoot::open(&cfg2).expect("similar name is fine");
+    ReceiveRoot::open(&cfg).expect("main root still opens");
+    assert!(
+        !format!(
+            "{} {:?}",
+            RootError::InsidePartial,
+            RootError::InsidePartial
+        )
+        .contains('\\')
     );
 }
 

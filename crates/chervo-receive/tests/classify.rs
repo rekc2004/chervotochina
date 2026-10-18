@@ -426,3 +426,68 @@ fn compressed_single_files_auto_ok_and_flags() {
     assert!(p.files.iter().all(|f| f.flags.suspicious));
     assert!(!p.auto_ok());
 }
+
+/// Рев. 6, M1: хвостовые точки и пробелы перед суффиксом сжатия Windows убирает при создании
+/// файла, поэтому `x.exe..gz` это `x.exe.gz`, то есть `x.exe`.
+#[test]
+fn trailing_dots_and_spaces_before_compression_m1() {
+    use FileClass::*;
+    use chervo_receive::is_known_inert;
+    let plan_of = |n: &str| plan_offer(&offer(&[n]), &ReceiveLimits::default()).expect("plan");
+    let inert = |n: &str| {
+        let (p, _) = sanitize_path(n, &ReceiveLimits::default()).expect("sanitizable");
+        is_known_inert(&p)
+    };
+    for n in [
+        "x.exe..gz",
+        "x.exe...gz",
+        "x.exe.gz..gz",
+        "x.exe .gz",
+        "x.exe. .gz",
+        "x.exe ..gz",
+        "x.exe .gz.gz",
+        "x.EXE..GZ",
+    ] {
+        is(n, Executable, false);
+        assert!(!inert(n), "{n}");
+        let plan = plan_of(n);
+        assert!(
+            plan.files.iter().all(|f| f.flags.suspicious),
+            "{n} suspicious"
+        );
+        assert!(!plan.auto_ok(), "{n} auto_ok");
+        assert!(!auto_ok(&["clean.txt", n]), "{n} mixed");
+    }
+    // безопасный или неизвестный тип с вычищаемым хвостом тоже подозрителен и не автоприём
+    for n in ["x.jpg..gz", "x.jpg .gz", "x..gz", "x.iso. .xz"] {
+        assert!(!inert(n), "{n}");
+        let plan = plan_of(n);
+        assert!(
+            plan.files.iter().all(|f| f.flags.suspicious),
+            "{n} suspicious"
+        );
+        assert!(!plan.auto_ok(), "{n}");
+    }
+    is("x.iso. .xz", DiskImage, false);
+    // приманка и прежние верные случаи
+    is("photo.jpg .exe.gz", Executable, true);
+    is("photo.jpg.exe..gz", Executable, true);
+    for (n, class) in [
+        ("x.exe.gz.gz", Executable),
+        ("x.EXE.GZ", Executable),
+        ("x.exe.Z", Executable),
+        ("x.lnk.gz", Executable),
+        ("x.iso.zst.xz", DiskImage),
+        ("x.tar.gz", Ordinary),
+        ("x.gz", Ordinary),
+        ("x.exe.tgz", Ordinary),
+        ("x.exe.gz.zip", Ordinary),
+    ] {
+        is(n, class, false);
+    }
+    // обычные имена по-прежнему без подозрений
+    for n in ["x.tar.gz", "x.gz", "x.exe.tgz", "x.exe.gz.zip"] {
+        let plan = plan_of(n);
+        assert!(plan.files.iter().all(|f| !f.flags.suspicious), "{n}");
+    }
+}

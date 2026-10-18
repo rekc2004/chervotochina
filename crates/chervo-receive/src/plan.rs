@@ -8,7 +8,7 @@ use std::path::Path;
 
 use chervo_transfer::OfferedFile;
 
-use crate::classify::{FileClass, TypeInfo, classify, has_non_ascii_ext, is_known_inert};
+use crate::classify::{FileClass, TypeInfo, classify, has_suspicious_ext, is_known_inert};
 use crate::limits::{PathError, ReceiveLimits};
 use crate::name::{NameFlags, SafeRelPath, cut, fold, sanitize_path, split_ext};
 use crate::root::ReceiveRoot;
@@ -261,8 +261,8 @@ fn build_plan(
         }
         let path = SafeRelPath::from_parts(comps);
         // Рев. 3, F3: не-ASCII в расширении это подозрительное имя (оболочка ОС может
-        // сопоставить `ſ` с `s`, `ı` с `i`).
-        if has_non_ascii_ext(&path) {
+        // сопоставить `ſ` с `s`, `ı` с `i`). Рев. 6, M1: то же для `x.exe..gz`, `x.exe .gz`.
+        if has_suspicious_ext(&path) {
             flags.suspicious = true;
         }
         let kind = classify(&path);
