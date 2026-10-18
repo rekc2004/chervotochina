@@ -3,9 +3,10 @@
 use std::net::SocketAddr;
 
 use chervo_addr::{
-    AddrSource, CONTACT_REFRESH_SECS, CONTACT_TTL_SECS, Findability, HINT_TTL_SECS, KnownAddr,
-    MAX_CONTACT_ADDRS, NEED_TOKEN_TEXT, NO_PUBLIC_ADDR_TEXT, SHORT_LIVED_TTL_SECS, UpdateAddr,
-    findability, from_invite, merge_update, note_contact, prune, usable,
+    AddrSource, CONTACT_REFRESH_SECS, CONTACT_TTL_SECS, Findability, HINT_TTL_SECS,
+    INVITE_TTL_SECS, KnownAddr, MAX_CONTACT_ADDRS, NEED_TOKEN_TEXT, NO_PUBLIC_ADDR_TEXT,
+    SHORT_LIVED_TTL_SECS, UpdateAddr, findability, from_invite, merge_update, note_contact, prune,
+    usable,
 };
 
 const NOW: u64 = 10_000_000;
@@ -267,13 +268,18 @@ fn prune_ttls() {
         prune(&mut v, t - 5);
         assert_eq!(v.len(), 1);
     }
-    // обычные записи сроков не имеют
+    // обновление адреса без подсказки срока не имеет; `Invite` живёт `INVITE_TTL_SECS` (S2, M1)
     let mut v = vec![
         known("198.51.100.1:1", AddrSource::Invite, 1, false, false),
         known("198.51.100.2:2", AddrSource::AddressUpdate, 1, false, false),
     ];
+    prune(&mut v, INVITE_TTL_SECS);
+    assert_eq!(v.len(), 2, "жив до границы");
+    prune(&mut v, 1 + INVITE_TTL_SECS);
+    assert_eq!(v.len(), 1);
+    assert_eq!(v[0].source, AddrSource::AddressUpdate);
     prune(&mut v, u64::MAX);
-    assert_eq!(v.len(), 2);
+    assert_eq!(v.len(), 1);
     // переполнение last_seen + ttl не паникует
     let mut v = vec![known(
         "[2001:db8::1]:1",

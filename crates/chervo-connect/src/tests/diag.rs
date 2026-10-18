@@ -96,7 +96,7 @@ async fn diag_cgnat_from_route() {
     // молчат все: эвристика «UDP заблокирован» сработала бы, но CGNAT проверяется раньше
     n.t.set_script(|_, _| Action::Fail(TransportError::NoResponse, secs(0)));
     assert_eq!(n.engine.nat_view(), NatView::BehindCgnat);
-    let e = wait_event(&mut n.events, secs(60), unreachable_for(p1))
+    let e = wait_event(&mut n.events, secs(130), unreachable_for(p1))
         .await
         .unwrap();
     let EngineEvent::Unreachable { diagnosis, .. } = e else {
@@ -130,7 +130,7 @@ async fn diag_symmetric() {
     apply_obs(&n, x, "5.6.7.1:4000", "9.9.9.9:1111");
     apply_obs(&n, y, "5.6.7.2:4000", "9.9.9.9:2222");
     assert_eq!(n.engine.nat_view(), NatView::Symmetric);
-    let e = wait_event(&mut n.events, secs(60), unreachable_for(z))
+    let e = wait_event(&mut n.events, secs(130), unreachable_for(z))
         .await
         .unwrap();
     let EngineEvent::Unreachable { diagnosis, .. } = e else {
@@ -147,7 +147,7 @@ async fn diag_udp_blocked_suspected() {
     pre.solo_friend(vec![inv("5.6.7.2:4000")]);
     let mut n = Node::start(pre, ConnectConfig::default());
     n.t.set_script(|_, _| Action::Fail(TransportError::NoResponse, secs(0)));
-    let e = wait_event(&mut n.events, secs(60), |e| {
+    let e = wait_event(&mut n.events, secs(130), |e| {
         matches!(
             e,
             EngineEvent::Unreachable { diagnosis, .. }
@@ -272,7 +272,7 @@ async fn diag_double_nat() {
     wait_until(|| n.engine.mapping_status() == Some(MapStatus::DoubleNat)).await;
     assert_eq!(n.engine.nat_view(), NatView::DoubleNat);
     n.t.set_script(|_, _| Action::Fail(TransportError::NoResponse, secs(0)));
-    let e = wait_event(&mut n.events, secs(60), unreachable_for(p))
+    let e = wait_event(&mut n.events, secs(130), unreachable_for(p))
         .await
         .unwrap();
     let EngineEvent::Unreachable { diagnosis, .. } = e else {

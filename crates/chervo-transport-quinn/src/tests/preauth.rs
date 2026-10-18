@@ -191,3 +191,64 @@ fn preauth_keys_grouping_and_release() {
     let _g = one.try_acquire(ip("192.0.2.9")).unwrap();
     assert!(one.try_acquire(ip("192.0.2.9")).is_none());
 }
+
+// ---------------------------------------------------------------------------------------------
+// Этап 17, S2, L3: срок `msg3` после `msg2`
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn s2_defaults() {
+    let d = QuinnConfig::default();
+    assert_eq!(d.msg3_deadline, Duration::from_secs(3));
+    assert_eq!(d.max_preauth_per_pair, 4);
+}
+
+/// Верный `msg1`, получен `msg2`, дальше тишина: место освобождается по `msg3_deadline`
+/// (старый код держал его до `auth_deadline` 5 с); отказ тот же (код 0, пустая причина).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn silent_after_msg2_closed_at_msg3_deadline() {
+    let k = Keys::new();
+    let c = QuinnConfig {
+        msg3_deadline: Duration::from_millis(600),
+        ..cfg()
+    };
+    let b = bind(c, vec![k.peer_b()]);
+    let ep = raw_endpoint();
+    let mut raw = raw_start(&ep, addr_of(&b), &k.peer_a()).await;
+    let mut m2 = [0u8; chervo_identity::KK_MSG2_LEN];
+    raw.rx.read_exact(&mut m2).await.unwrap();
+    let t0 = Instant::now();
+    assert_eq!(
+        wait_closed(&raw.conn, Duration::from_secs(4)).await,
+        REFUSED
+    );
+    let took = t0.elapsed();
+    assert!(
+        took < Duration::from_millis(2500),
+        "закрыто по auth_deadline, а не по msg3_deadline: {took:?}"
+    );
+    assert_eq!(b.stats().auth_timeout, 1, "{:?}", b.stats());
+    assert_eq!(b.stats().auth_ok, 0, "{:?}", b.stats());
+    // честный звонящий с полным msg3 в срок проходит
+    let (ok, _) = raw_full(&ep, addr_of(&b), &k.peer_a()).await;
+    sleep_ms(1000).await;
+    assert!(ok.close_reason().is_none(), "верный клиент закрыт по сроку");
+}
+
+/// Места пары: предел на пару, другая пара отдельно, возврат при сбросе, карта без пустых записей.
+#[test]
+fn preauth_pairs_cap_and_release() {
+    let pairs = crate::limits::PreauthPairs::new(2);
+    let (p, q) = (
+        chervo_identity::PairId::from_bytes([1; 16]),
+        chervo_identity::PairId::from_bytes([2; 16]),
+    );
+    let a = pairs.try_acquire(p).unwrap();
+    let b = pairs.try_acquire(p).unwrap();
+    assert!(pairs.try_acquire(p).is_none());
+    let c = pairs.try_acquire(q).unwrap();
+    drop(a);
+    let d = pairs.try_acquire(p).unwrap();
+    drop((b, c, d));
+    assert_eq!(pairs.tracked(), 0);
+}

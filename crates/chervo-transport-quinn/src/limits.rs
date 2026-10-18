@@ -7,7 +7,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use chervo_identity::{ChannelBinding, KK_MSG1_LEN, KK_MSG2_LEN, KkResponder, KxPeer, kk_respond};
+use chervo_identity::{
+    ChannelBinding, KK_MSG1_LEN, KK_MSG2_LEN, KkResponder, KxPeer, PairId, kk_respond,
+};
 use tokio::sync::Semaphore;
 use tokio::time::{Instant, sleep, timeout_at};
 
@@ -227,6 +229,70 @@ impl Drop for KeyPermit {
             *n = n.saturating_sub(1);
             if *n == 0 {
                 map.remove(&self.key);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Незавершённые соединения по паре допуска (этап 17, S2, L3)
+// ---------------------------------------------------------------------------------------------
+
+/// Счётчик соединений в работе до конца KK по паре, чей верный стук открыл допуск. Друг с
+/// множеством ключей лимитера (IPv6 /64) иначе занял бы большую часть мест; записи удаляются при
+/// обнулении, поэтому карта не больше `max_preauth` записей.
+pub(crate) struct PreauthPairs {
+    cap: usize,
+    map: Mutex<HashMap<PairId, usize>>,
+}
+
+impl PreauthPairs {
+    pub(crate) fn new(cap: usize) -> Arc<Self> {
+        Arc::new(Self {
+            cap: cap.max(1),
+            map: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// Занять место пары; `None`: у пары уже `cap` незавершённых. Освобождается при сбросе.
+    pub(crate) fn try_acquire(self: &Arc<Self>, pair: PairId) -> Option<PairPermit> {
+        let mut map = self.map.lock().unwrap_or_else(PoisonError::into_inner);
+        let n = map.entry(pair).or_insert(0);
+        if *n >= self.cap {
+            return None;
+        }
+        *n += 1;
+        Some(PairPermit {
+            owner: self.clone(),
+            pair,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tracked(&self) -> usize {
+        self.map
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
+}
+
+pub(crate) struct PairPermit {
+    owner: Arc<PreauthPairs>,
+    pair: PairId,
+}
+
+impl Drop for PairPermit {
+    fn drop(&mut self) {
+        let mut map = self
+            .owner
+            .map
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(n) = map.get_mut(&self.pair) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                map.remove(&self.pair);
             }
         }
     }

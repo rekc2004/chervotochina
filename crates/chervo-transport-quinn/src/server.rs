@@ -10,7 +10,7 @@ use tokio::time::{Instant, timeout_at};
 use crate::Inner;
 use crate::conn::{Fail, RefuseGuard, binding, expect_eof, read_exact_n, refuse};
 use crate::knock::Pin;
-use crate::limits::{Counters, KeyPermit};
+use crate::limits::{Counters, KeyPermit, PairPermit};
 use crate::registry::{Promoted, promote};
 use crate::tls::ephemeral_server_config;
 
@@ -23,11 +23,18 @@ pub(crate) fn admit(inner: &Arc<Inner>, incoming: quinn::Incoming) {
         }
         return;
     }
-    if inner.knock.required && !inner.knock.consume_attempt(incoming.remote_address()) {
-        // подтверждённый `Incoming` без допуска или сверх числа попыток: молчание
-        incoming.ignore();
-        return;
-    }
+    // Допуск только проверяется; попытка списывается ниже, когда место до аутентификации уже
+    // получено (S2, L2): отказанные по лимитам `Incoming` не сжигают попытки честного друга.
+    let admitted_pair = if inner.knock.required {
+        let Some(pair) = inner.knock.peek_admission(incoming.remote_address()) else {
+            // подтверждённый `Incoming` без допуска или сверх числа попыток: молчание
+            incoming.ignore();
+            return;
+        };
+        Some(pair)
+    } else {
+        None
+    };
     let ip = incoming.remote_address().ip();
     // Порядок: проверка лимита без списания, семафор, и только потом списание квоты. Иначе повторы
     // Initial под занятым семафором тратили бы квоту друга (за общим адресом она общая).
@@ -50,6 +57,19 @@ pub(crate) fn admit(inner: &Arc<Inner>, incoming: quinn::Incoming) {
         Counters::bump(&inner.counters.ignored_busy);
         return;
     };
+    // Не больше `max_preauth_per_pair` незавершённых на пару допуска (S2, L3): друг со многими
+    // ключами лимитера не занимает все места. Молчание, как при занятом семафоре.
+    let pair_permit = match admitted_pair {
+        Some(pair) => {
+            let Some(p) = inner.preauth_pairs.try_acquire(pair) else {
+                incoming.ignore();
+                Counters::bump(&inner.counters.ignored_busy);
+                return;
+            };
+            Some(p)
+        }
+        None => None,
+    };
     let Ok(permit) = inner.preauth.clone().try_acquire_owned() else {
         incoming.ignore();
         Counters::bump(&inner.counters.ignored_busy);
@@ -65,6 +85,12 @@ pub(crate) fn admit(inner: &Arc<Inner>, incoming: quinn::Incoming) {
     if !charged {
         incoming.ignore();
         Counters::bump(&inner.counters.ignored_rate);
+        return;
+    }
+    // место получено: теперь списывается попытка допуска (при гонке с другим `Incoming` того же
+    // адреса попытки могло не остаться: молчание)
+    if inner.knock.required && !inner.knock.consume_attempt(incoming.remote_address()) {
+        incoming.ignore();
         return;
     }
     let Ok(server_cfg) = ephemeral_server_config(&inner.cfg) else {
@@ -90,6 +116,7 @@ pub(crate) fn admit(inner: &Arc<Inner>, incoming: quinn::Incoming) {
                 Held {
                     _permit: permit,
                     _key: key_permit,
+                    _pair: pair_permit,
                     _pin: pin,
                 },
             )
@@ -109,6 +136,7 @@ struct Deadlines {
 struct Held {
     _permit: OwnedSemaphorePermit,
     _key: KeyPermit,
+    _pair: Option<PairPermit>,
     _pin: Pin,
 }
 
@@ -225,8 +253,19 @@ async fn callee_handshake(
         .await?;
     guard.tx.write_all(&msg2).await.map_err(|_| Fail::Failed)?;
     guard.tx.finish().map_err(|_| Fail::Failed)?;
-    let msg3: [u8; KK_MSG3_LEN] = read_exact_n(&mut guard.rx).await?;
-    expect_eof(&mut guard.rx).await?;
+    // `msg3` и EOF в короткий срок после `msg2` (S2, L3): молчащий после верного `msg1`
+    // не держит место до `auth_deadline`
+    let msg3_deadline = (Instant::now() + inner.cfg.msg3_deadline).min(deadline);
+    let msg3: [u8; KK_MSG3_LEN] = match timeout_at(msg3_deadline, async {
+        let m = read_exact_n(&mut guard.rx).await?;
+        expect_eof(&mut guard.rx).await?;
+        Ok::<_, Fail>(m)
+    })
+    .await
+    {
+        Ok(r) => r?,
+        Err(_) => return Err(Fail::Timeout),
+    };
     let pair = responder.finish(&msg3).map_err(|_| Fail::Failed)?;
     if !inner.filter.is_allowed(&pair) {
         return Err(Fail::Failed);

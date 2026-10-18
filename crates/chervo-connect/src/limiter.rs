@@ -48,6 +48,9 @@ pub(crate) struct Limiter {
     capacity: usize,
     entries: HashMap<SocketAddr, Entry>,
     ip_log: HashMap<IpAddr, VecDeque<Instant>>,
+    /// Когда на IP в последний раз вошёл в набор адрес со слов друга (любой порт): предел
+    /// `strict_floor` действует на IP, а не на `IP:порт` (этап 17, S2, L1). Сбросы его не трогают.
+    strict_ip: HashMap<IpAddr, Instant>,
 }
 
 /// `base << (fails - 1)`, но не больше `cap`; без переполнения.
@@ -71,6 +74,7 @@ impl Limiter {
             capacity: cfg.limiter_capacity,
             entries: HashMap::new(),
             ip_log: HashMap::new(),
+            strict_ip: HashMap::new(),
         }
     }
 
@@ -84,9 +88,18 @@ impl Limiter {
 
     /// Можно ли сейчас стучать на адрес: срок записи наступил и предел на IP не исчерпан.
     /// `strict` (адрес со слов друга): ещё и не раньше `dial_base` + запас после прошлого
-    /// набора этого адреса, что бы ни делали быстрое окно, `connect_now` и новые обновления.
+    /// набора этого адреса и после прошлого строгого набора любого порта этого IP, что бы ни
+    /// делали быстрое окно, `connect_now` и новые обновления.
     pub(crate) fn allow(&self, addr: SocketAddr, strict: bool, now: Instant) -> bool {
         let addr = normalize(addr);
+        if strict
+            && self
+                .strict_ip
+                .get(&addr.ip())
+                .is_some_and(|t| add_sat(*t, self.strict_floor) > now)
+        {
+            return false;
+        }
         if let Some(e) = self.entries.get(&addr) {
             if e.next > now {
                 return false;
@@ -129,7 +142,33 @@ impl Limiter {
             return false;
         }
         self.charge(&[addr], now);
+        if strict {
+            self.strict_ip.insert(normalize(addr).ip(), now);
+            self.trim_strict_ip(now);
+        }
         true
+    }
+
+    /// Карта строгих IP ограничена: сперва убирается всё, что старше предела, затем самое давнее.
+    fn trim_strict_ip(&mut self, now: Instant) {
+        if self.strict_ip.len() <= self.capacity {
+            return;
+        }
+        let floor = self.strict_floor;
+        self.strict_ip.retain(|_, t| add_sat(*t, floor) > now);
+        while self.strict_ip.len() > self.capacity {
+            let oldest = self
+                .strict_ip
+                .iter()
+                .min_by_key(|(ip, t)| (**t, **ip))
+                .map(|(ip, _)| *ip);
+            match oldest {
+                Some(ip) => {
+                    self.strict_ip.remove(&ip);
+                }
+                None => break,
+            }
+        }
     }
 
     fn touch(&mut self, addr: SocketAddr, now: Instant) {

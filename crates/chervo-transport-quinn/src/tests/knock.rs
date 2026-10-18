@@ -1220,3 +1220,68 @@ fn knock_table_cost() {
         println!("knock_table_cost: {n} | {set_ms:.2} | {rebuild_ms:.2} | {check_us:.3}");
     }
 }
+
+/// S2, L2: `Incoming`, отказанный лимитами до получения места, не тратит попытку допуска.
+/// В старом коде попытка списывалась первой, и повторы Initial при отказе по лимиту сжигали
+/// обе попытки честного друга (`admit_exhausted` > 0).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn refused_incoming_does_not_burn_admit_attempt() {
+    let k = Keys::new();
+    let cfg = QuinnConfig {
+        knock_admit_attempts: 2,
+        per_ip_max: 0, // лимитер отказывает всегда: место не выдаётся
+        auth_deadline: Duration::from_secs(2),
+        ..kc(true)
+    };
+    let b = bind(cfg, vec![k.peer_b()]);
+    let at = Attacker::new();
+    let dest = addr_of(&b);
+    at.send(dest, &friend_knock(&k, now_window()));
+    sleep_ms(100).await;
+    for _ in 0..4 {
+        assert!(!at.initial(dest, Duration::from_millis(1200)).await);
+    }
+    let st = b.stats();
+    assert!(st.ignored_rate >= 3, "refused by the limiter: {st:?}");
+    assert_eq!(st.admit_exhausted, 0, "attempts burnt by refused Incoming");
+    assert_eq!(st.knock_ok, 1);
+}
+
+/// S2, L3: пара допуска держит не больше `max_preauth_per_pair` незавершённых соединений,
+/// сколько бы адресов (ключей лимитера) ни стучало; после освобождения мест пара снова проходит.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn preauth_per_pair_cap_across_addresses() {
+    let k = Keys::new();
+    let cfg = QuinnConfig {
+        max_preauth_per_pair: 2,
+        max_preauth_per_key: 16,
+        knock_admit_attempts: 4,
+        msg1_deadline: Duration::from_millis(1500),
+        ..kc(true)
+    };
+    let b = bind(cfg, vec![k.peer_b()]);
+    let dest = addr_of(&b);
+    let mut held = Vec::new();
+    for i in 0..3 {
+        let at = Attacker::new();
+        at.send(dest, &friend_knock(&k, now_window()));
+        sleep_ms(100).await;
+        let r = tokio::time::timeout(Duration::from_millis(1000), raw_tls(&at.ep, dest)).await;
+        if i < 2 {
+            held.push((at, r.expect("slot").expect("tls")));
+        } else {
+            assert!(
+                r.is_err(),
+                "third unfinished connection of the pair got a slot"
+            );
+        }
+    }
+    assert!(b.stats().ignored_busy >= 1, "{:?}", b.stats());
+    // места освобождаются по сроку до msg1; пара снова принимается
+    sleep_ms(2000).await;
+    let at = Attacker::new();
+    at.send(dest, &friend_knock(&k, now_window()));
+    sleep_ms(100).await;
+    let again = tokio::time::timeout(Duration::from_millis(1500), raw_tls(&at.ep, dest)).await;
+    assert!(again.is_ok(), "pair did not recover after slots were freed");
+}

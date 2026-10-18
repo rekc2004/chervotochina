@@ -383,6 +383,14 @@ impl AdmitTable {
         true
     }
 
+    /// Пара действующего допуска с оставшимися попытками, ничего не списывая.
+    fn peek(&self, addr: SocketAddr, now: Instant) -> Option<PairId> {
+        match self.map.get(&addr) {
+            Some(e) if e.attempts > 0 && e.expires.is_some_and(|t| t > now) => e.pair,
+            _ => None,
+        }
+    }
+
     /// Списать попытку подтверждённого `Incoming`.
     fn consume(&mut self, addr: SocketAddr, now: Instant) -> bool {
         match self.map.get_mut(&addr) {
@@ -548,6 +556,17 @@ impl KnockState {
             addr,
             rx0,
         }
+    }
+
+    /// Пара действующего допуска адреса без списания попытки (этап 17, S2, L2): попытка
+    /// списывается только после получения места до аутентификации (`consume_attempt`).
+    /// `None`: нет допуска или он исчерпан.
+    pub(crate) fn peek_admission(&self, addr: SocketAddr) -> Option<PairId> {
+        let p = lock(&self.admit).peek(canon(addr), Instant::now());
+        if p.is_none() {
+            Counters::bump(&self.counters.admit_exhausted);
+        }
+        p
     }
 
     /// Списать попытку допуска подтверждённого `Incoming`; `false`: нет допуска или он исчерпан.

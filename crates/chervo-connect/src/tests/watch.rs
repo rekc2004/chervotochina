@@ -46,7 +46,7 @@ async fn watch_no_change_no_reknock() {
 #[tokio::test(start_paused = true)]
 async fn watch_change_reknocks_once_and_fast_window() {
     let mut pre = Pre::new();
-    let p = pre.solo_friend(vec![inv("5.6.7.8:4000")]);
+    let p = pre.solo_friend(vec![con("5.6.7.8:4000")]);
     let mut n = Node::start(pre, ConnectConfig::default());
     n.t.set_script(|_, _| Action::Fail(TransportError::TimedOut, secs(0)));
     // быстрое окно запуска прошло, интервалы выросли

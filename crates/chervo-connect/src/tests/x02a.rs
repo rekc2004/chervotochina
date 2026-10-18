@@ -142,22 +142,71 @@ async fn x02a_connect_now_does_not_speed_up_update_addresses() {
     );
 }
 
-/// Контроль: адреса приглашения и контакта сохраняют быстрое окно (семантика этапа 13).
+/// X02c (S2, M1): лгущий пригласивший перечислил в токене адрес жертвы. После дружбы адреса
+/// приглашения со слов пригласившего, и быстрое окно (запуск, «соединить сейчас») их не
+/// ускоряет: серия на жертву не чаще одной в 30 с (в старом коде промежуток 15 с).
 #[tokio::test(start_paused = true)]
-async fn x02a_control_invite_addresses_keep_fast_window() {
-    let (n, _pair, log) = liar_node(vec![
+async fn x02c_invite_addresses_of_established_friend_spaced_30s() {
+    let (n, pair, log) = liar_node(vec![
         known(OWN, AddrSource::Invite, false),
         known(VICTIM, AddrSource::Invite, false),
     ]);
+    for _ in 0..30 {
+        n.engine.connect_now(&pair).unwrap();
+        tokio::time::sleep(secs(3)).await;
+    }
+    tokio::time::sleep(secs(210)).await;
+    let times = victim_times(&log);
+    assert!(
+        times.len() >= 4,
+        "the victim is dialled at all: {}",
+        times.len()
+    );
+    let gap = min_gap(&times).unwrap();
+    assert!(
+        gap >= secs(30),
+        "min spacing {gap:?} over {} dials",
+        times.len()
+    );
+}
+
+/// Контроль: адрес `Contact` (проверенное соединение) сохраняет быстрое окно этапа 13.
+#[tokio::test(start_paused = true)]
+async fn x02a_control_contact_addresses_keep_fast_window() {
+    let (n, _pair, log) = liar_node(vec![known(VICTIM, AddrSource::Contact, false)]);
     tokio::time::sleep(secs(110)).await;
     let times = victim_times(&log);
     let gap = min_gap(&times).unwrap();
     assert!(times.len() >= 5, "fast redials expected: {}", times.len());
     assert!(
         gap < secs(30),
-        "invite addresses keep the 5 s fast period, got {gap:?}"
+        "contact addresses keep the 5 s fast period, got {gap:?}"
     );
     drop(n);
+}
+
+/// Гостевая пара (до дружбы, `guest_plan`): адреса токена нужны для самого первого соединения
+/// и сохраняют быстрое окно; это единственный путь без подтверждения, и он ограничен токеном
+/// живого приглашения, а не книгой друга.
+#[tokio::test(start_paused = true)]
+async fn x02c_guest_token_addresses_keep_fast_window() {
+    let pre = Pre::new();
+    let n = Node::start(pre, ConnectConfig::default());
+    let log: Log = Arc::new(Mutex::new(Vec::new()));
+    let l = log.clone();
+    n.t.set_script(move |_, addrs| {
+        l.lock().unwrap().push((Instant::now(), addrs.to_vec()));
+        Action::Fail(TransportError::TimedOut, secs(0))
+    });
+    let guest = PairId::from_bytes([0x77; 16]);
+    n.engine
+        .add_guest(guest, vec![addr(VICTIM)], Box::new(|| None))
+        .unwrap();
+    tokio::time::sleep(secs(110)).await;
+    let times = victim_times(&log);
+    let gap = min_gap(&times).unwrap();
+    assert!(times.len() >= 5, "fast redials expected: {}", times.len());
+    assert!(gap < secs(30), "guest keeps the fast period, got {gap:?}");
 }
 
 /// Предел устойчив к `reset_pair` (новый номер обновления друга-лжеца) и `reset_all`.
@@ -179,4 +228,44 @@ async fn x02a_limiter_floor_survives_resets() {
     assert!(l.allow(v, true, t0 + secs(33)));
     // не из слов друга: пределом не связан
     assert!(l.allow(v, false, t0 + secs(20)));
+}
+
+/// S2, L1: предел «не чаще раза в 30 с» действует на IP жертвы, а не на `IP:порт`: много портов
+/// одного IP в обновлении не дают серии чаще. Нестрогие (контактные) адреса им не связаны.
+#[tokio::test(start_paused = true)]
+async fn x02c_strict_floor_is_per_ip_not_per_port() {
+    let cfg = ConnectConfig::default();
+    let mut l = Limiter::new(&cfg);
+    let t0 = Instant::now();
+    assert!(l.take(addr("11.0.0.66:4433"), true, t0));
+    for port in 4434..4440u16 {
+        let a = addr(&format!("11.0.0.66:{port}"));
+        assert!(
+            !l.take(a, true, t0 + secs(5)),
+            "port {port} within the floor"
+        );
+        assert!(
+            !l.allow(a, true, t0 + secs(31)),
+            "port {port} within the floor"
+        );
+    }
+    assert!(l.allow(addr("11.0.0.66:4434"), true, t0 + secs(33)));
+    // другой IP и нестрогий адрес того же IP не затронуты
+    assert!(l.allow(addr("11.0.0.67:4433"), true, t0 + secs(5)));
+    assert!(l.allow(addr("11.0.0.66:4999"), false, t0 + secs(5)));
+}
+
+/// Адрес приглашения, который потом подтвердило соединение (запись `Contact` с тем же адресом),
+/// сохраняет быстрое окно: повтор убран из `usable_known`, подтверждение не теряется.
+#[tokio::test(start_paused = true)]
+async fn x02c_invite_address_confirmed_by_contact_keeps_fast_window() {
+    let (n, _pair, log) = liar_node(vec![
+        known(VICTIM, AddrSource::Invite, false),
+        known(VICTIM, AddrSource::Contact, false),
+    ]);
+    tokio::time::sleep(secs(110)).await;
+    let times = victim_times(&log);
+    assert!(times.len() >= 5, "fast redials expected: {}", times.len());
+    assert!(min_gap(&times).unwrap() < secs(30));
+    drop(n);
 }

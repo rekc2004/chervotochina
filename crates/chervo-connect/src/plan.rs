@@ -16,7 +16,7 @@ pub(crate) struct Candidate {
     pub(crate) addr: SocketAddr,
     pub(crate) hint: bool,
     /// Адрес известен только со слов друга (`AddressUpdate`, подсказка): набор не чаще раза
-    /// в `dial_base` (+ запас) в любом режиме, быстрое окно срок не сокращает (этап 17, X02a).
+    /// в `dial_base` (+ запас) в любом режиме, быстрое окно срок не сокращает (этап 17, X02a, S2 M1).
     pub(crate) strict: bool,
 }
 
@@ -86,13 +86,30 @@ pub(crate) fn friend_plan(entries: &[KnownAddr], local: &[SocketAddr]) -> Plan {
     )
 }
 
-/// Слова друга, не подтверждённые соединением и не полученные от пользователя вне линии.
+/// Как `friend_plan`, но адреса, подтверждённые нашим соединением (`confirmed_addrs`), не
+/// строгие, даже если запись в порядке набора принадлежит более раннему источнику (приглашение,
+/// обновление): повтор адреса в `usable_known` убран, и подтверждение иначе терялось бы.
+pub(crate) fn friend_plan_confirmed(
+    entries: &[KnownAddr],
+    confirmed: &[SocketAddr],
+    local: &[SocketAddr],
+) -> Plan {
+    let mut plan = friend_plan(entries, local);
+    for c in &mut plan.cands {
+        if !c.hint && confirmed.contains(&c.addr) {
+            c.strict = false;
+        }
+    }
+    plan
+}
+
+/// Слова друга, не подтверждённые нашим соединением. Быстрое окно (5 с) остаётся только у
+/// `Contact`: адрес, с которого друг уже подключался по проверенному соединению. Адреса
+/// приглашения тоже со слов пригласившего (этап 17, S2, M1: лгущий пригласивший вписывает в
+/// токен адреса жертв), поэтому у друга с состоявшейся дружбой они строгие. Гостевая пара до
+/// дружбы идёт через `guest_plan`: там адреса токена нужны для самого первого соединения.
 fn is_strict(k: &KnownAddr) -> bool {
-    k.hint
-        || matches!(
-            k.source,
-            AddrSource::AddressUpdate | AddrSource::ObservedByFriend
-        )
+    k.hint || k.source != AddrSource::Contact
 }
 
 /// Кандидаты гостевой пары приглашённого: только адреса токена.

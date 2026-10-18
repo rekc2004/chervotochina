@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# Stage 17 stand (netns, nftables): rows X02a, X02b (lying friend), DOS1, DOS2, DOS3 (pre-auth DoS)
+# Stage 17 stand (netns, nftables): rows X02a, X02b, X02c (lying friend / lying inviter), DOS1, DOS2, DOS3 (pre-auth DoS)
 # per docs/specs/stage-17-security.md, sec. 2 decision 10 and sec. 4 part B5. Reuses tools/netns/lib16.sh.
 #
 # Usage (root, Linux box):
-#   sudo CHV_NODE16=... [CHV_NODE17_LIAR_A=...] [CHV_NODE17_LIAR_B=...] [CHV_KNOCKFLOOD=...] bash tools/netns/stage17.sh <command>
-# Commands: preflight | X02a | X02b | DOS1 | DOS2 | DOS3 | x02 | dos | all | teardown | build-liar a|b
+#   sudo CHV_NODE16=... [CHV_NODE17_LIAR_A=...] [CHV_NODE17_LIAR_B=...] [CHV_NODE17_LIAR_C=...] [CHV_KNOCKFLOOD=...] bash tools/netns/stage17.sh <command>
+# Commands: preflight | X02a | X02b | X02c | DOS1 | DOS2 | DOS3 | x02 | dos | all | teardown | build-liar a|b|c
 #   build-liar runs as a normal user (needs cargo), everything else as root.
 # Binaries come only from the environment (root has no cargo): regular file, not a symlink, owner root or SUDO_UID,
 # no group/other write (file and parent directory); copied to STATE/bin and run only from there with `env -i`.
 #   CHV_NODE16        honest node16 example (chervo-transfer) - required
 #   CHV_NODE17_LIAR_A node16 built by `build-liar a` (X02a: signed address update lists the victim)
 #   CHV_NODE17_LIAR_B node16 built by `build-liar b` (X02b: observed address in ADDR_INFO is the victim)
+#   CHV_NODE17_LIAR_C node16 built by `build-liar c` (X02c: the invite token lists the victim next to the inviter's own address)
 #   CHV_KNOCKFLOOD    sender for DOS1-DOS3 (see "KNOCKFLOOD CONTRACT" below)
 # Variables: CHV_LOGS (default tools/netns/logs/stage17), CHV_STATE, CHV_KEEP=1, CHV_NICE (10),
 #   CHV_X02_WIN (300 s, victim observation window), CHV_BURST_GAP (5 s: packets closer than this are one burst),
@@ -61,7 +62,7 @@ HSTSV="$LOGS/hostsafe17.tsv"
 CMD="${1:-}"
 ARG2="${2:-}"
 STARTED=0
-HAVE_LIAR_A=0; HAVE_LIAR_B=0; HAVE_KF=0
+HAVE_LIAR_A=0; HAVE_LIAR_B=0; HAVE_LIAR_C=0; HAVE_KF=0
 ROW_ID=""
 DL=900
 CLK_TCK=100
@@ -136,6 +137,8 @@ bins_import() {
   if [[ $rc == 0 ]]; then HAVE_LIAR_A=1; elif [[ $rc == 2 ]]; then exit 3; fi
   bin_import CHV_NODE17_LIAR_B node17-liar-b 0; rc=$?
   if [[ $rc == 0 ]]; then HAVE_LIAR_B=1; elif [[ $rc == 2 ]]; then exit 3; fi
+  bin_import CHV_NODE17_LIAR_C node17-liar-c 0; rc=$?
+  if [[ $rc == 0 ]]; then HAVE_LIAR_C=1; elif [[ $rc == 2 ]]; then exit 3; fi
   bin_import CHV_KNOCKFLOOD knockflood 0; rc=$?
   if [[ $rc == 0 ]]; then HAVE_KF=1; KF="$BIN/knockflood"; elif [[ $rc == 2 ]]; then exit 3; fi
   return 0
@@ -410,6 +413,40 @@ x02a_run() {
   row_end
 }
 
+# X02c (stage 17 fix round 2, M1): lying inviter. LW (build C: the invite token lists the victim next to LW's own address)
+# invites HA; HA becomes LW's friend (the book keeps the token addresses as Invite entries) and then LW goes away. The
+# victim counts packets for WIN seconds; the capture starts only after the friendship exists (the guest phase legitimately
+# dials the token addresses). Same verdict as X02a: bursts >= 30 s apart, <= 11.
+x02c_run() {
+  local pre=""
+  if [[ $HAVE_LIAR_C != 1 ]]; then
+    vd X02c x02 NOTRUN "-" "CHV_NODE17_LIAR_C not set (run: bash tools/netns/stage17.sh build-liar c)"
+    return 0
+  fi
+  WHY=""; TOKRES=""; TOKOK=0
+  row_begin X02c $(( WIN + 360 )) || { vd X02c x02 INCONCLUSIVE "-" "topology did not come up"; row_end; return 0; }
+  ca lw "$DL"
+  node_start_as "$BIN/node17-liar-c" lw lw "${CA[@]}" --invite-out "$W/lw/inv"
+  ca ha "$DL"
+  node_start ha ha "${CA[@]}" --invite-in "$W/ha/inv"
+  if ! deliver "$W/lw/inv" "$W/ha/inv" 60; then WHY="invite not issued"
+  elif ! wait_grep ha '^EVENT (invite_finished pair=i1 outcome=Added|connected pair=i1 )' 60; then WHY="HA: invite not finished"
+  elif ! wait_grep lw '^EVENT connected pair=o1 ' 60; then WHY="LW: not connected after invite"
+  fi
+  if [[ -n "$WHY" ]]; then
+    row_end
+    vd X02c x02 INCONCLUSIVE "-" "$WHY"
+    return 0
+  fi
+  pre+="HA is a friend of LW via the lying invite; "
+  # trigger: LW goes away, HA redials the Invite entries (LW and the victim); the victim counts packets
+  victim_capture_start
+  node_stop lw
+  wait_secs "$WIN"
+  x02_verdict X02c "$pre"
+  row_end
+}
+
 # X02b: observed-hint lie. LW (build B: ADDR_INFO carries the victim as "your address") is HA's only observer; WB joins HA
 # afterwards, receives HA's token, and when HA is gone redials HA's published addresses (incl. the hint).
 x02b_run() {
@@ -624,11 +661,13 @@ dos3_run() {
 #  a) crates/chervo-token/src/addr_update.rs  `match e.addr.ip() {`  - the single place where the update builder takes the
 #     own address of the signer; the port stays the signer's own (4433 in this stand, equal to the victim's port).
 #  b) crates/chervo-token/src/addr_flow.rs    the two `encode_addr_info(<observed>, ours)` calls (initiator and answerer).
-do_build_liar() { # a|b
+#  c) crates/chervo-connect/src/invite.rs     `let expires_at = unix.saturating_add(ttl_secs);` in create_invite - the single
+#     place where the token address list is final; one statement is inserted before it that appends the victim (port 4433).
+do_build_liar() { # a|b|c
   [[ "$(id -u)" != 0 ]] || die "build-liar runs as a normal user, not root"
   command -v cargo >/dev/null 2>&1 || die "no cargo"
   local v="${1:-}" d f n n2 e1 e2 tag
-  [[ "$v" == a || "$v" == b ]] || die "usage: stage17.sh build-liar a|b"
+  [[ "$v" == a || "$v" == b || "$v" == c ]] || die "usage: stage17.sh build-liar a|b|c"
   d="$(mktemp -d /tmp/chervo-liar17.XXXXXX)"; chmod 700 -- "$d"
   cp -r "$REPO/crates" "$REPO/Cargo.toml" "$REPO/Cargo.lock" "$REPO/rust-toolchain.toml" "$d/"
   if [[ "$v" == a ]]; then
@@ -640,6 +679,15 @@ do_build_liar() { # a|b
     fi
     sed -i "s|match e.addr.ip() {|match std::net::IpAddr::V4(std::net::Ipv4Addr::new(11, 0, 0, 66)) {|" "$f"
     tag=a
+  elif [[ "$v" == c ]]; then
+    f="$d/crates/chervo-connect/src/invite.rs"
+    e1='let expires_at = unix.saturating_add(ttl_secs);'
+    n="$(grep -cF -- "$e1" "$f" || true)"
+    if [[ "$n" != 1 ]]; then
+      rm -rf -- "$d"; echo "NOTRUN: patch expression found $n times (need 1): the code changed, X02c is not built" >&2; exit 3
+    fi
+    sed -i 's|let expires_at = unix.saturating_add(ttl_secs);|let mut addrs = addrs; addrs.push("'"$VICTIM"':4433".parse().expect("liar")); let expires_at = unix.saturating_add(ttl_secs);|' "$f"
+    tag=c
   else
     f="$d/crates/chervo-token/src/addr_flow.rs"
     e1='let frame = encode_addr_info(normalize(conn.remote_addr()), ours)?;'
@@ -676,7 +724,7 @@ do_preflight() {
   [[ $ok == 1 ]] || exit 3
   free="$(df -Pk "$STATE" | awk 'NR == 2 { print int($4 / 1024) }')"
   echo "PREFLIGHT: root ok; ip nft tcpdump ok; nft in ns ok; free in STATE: ${free:-?} MiB"
-  echo "PREFLIGHT: binaries: node16 ok; liar_a=$HAVE_LIAR_A liar_b=$HAVE_LIAR_B knockflood=$HAVE_KF"
+  echo "PREFLIGHT: binaries: node16 ok; liar_a=$HAVE_LIAR_A liar_b=$HAVE_LIAR_B liar_c=$HAVE_LIAR_C knockflood=$HAVE_KF"
   mkdir -p -- "$LOGS"
   {
     echo "date=$(date +%F)"
@@ -692,6 +740,7 @@ run_row() {
   case "$1" in
     X02a) x02a_run ;;
     X02b) x02b_run ;;
+    X02c) x02c_run ;;
     DOS1) dos1_run ;;
     DOS2) dos2_run ;;
     DOS3) dos3_run ;;
@@ -700,7 +749,7 @@ run_row() {
 }
 
 usage() {
-  echo "usage: stage17.sh <preflight|X02a|X02b|DOS1|DOS2|DOS3|x02|dos|all|teardown|build-liar a|b>" >&2
+  echo "usage: stage17.sh <preflight|X02a|X02b|X02c|DOS1|DOS2|DOS3|x02|dos|all|teardown|build-liar a|b|c>" >&2
 }
 
 cleanup() {
@@ -731,11 +780,11 @@ main() {
   hostsafe_begin
   case "$CMD" in
     preflight) do_preflight ;;
-    x02) run_row X02a; run_row X02b ;;
+    x02) run_row X02a; run_row X02b; run_row X02c ;;
     dos) run_row DOS1; run_row DOS2; run_row DOS3 ;;
     all)
       do_preflight
-      run_row X02a; run_row X02b
+      run_row X02a; run_row X02b; run_row X02c
       run_row DOS1; run_row DOS2; run_row DOS3
       echo "--- $SUMMARY"; cat -- "$SUMMARY" ;;
     *)

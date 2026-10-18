@@ -12,7 +12,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use chervo_addr::{AddrClass, MapStatus, NatView, OwnAddrs, PublishSet, classify, normalize};
+use chervo_addr::{
+    AddrClass, MapStatus, NatView, OwnAddrs, PublishSet, classify, confirmed_addrs, normalize,
+};
 use chervo_friends::{FriendBook, FriendsError, KeyStatus};
 use chervo_identity::{KxPeer, ListKeyStore, PairId, SecretStore};
 use chervo_token::{InviteError, Sas, SignedAddrUpdate, TokenError};
@@ -30,7 +32,7 @@ use crate::gateway::Gateway;
 use crate::inbox::IncomingStream;
 use crate::invite::Invite;
 use crate::limiter::{Limiter, add_sat};
-use crate::plan::{Candidate, PathKind, friend_plan, guest_plan, path_kind, select};
+use crate::plan::{Candidate, PathKind, friend_plan_confirmed, guest_plan, path_kind, select};
 
 const EVENTS_CAPACITY: usize = 256;
 
@@ -225,7 +227,14 @@ pub(crate) struct State<C> {
     pub(crate) ext_baseline: bool,
     /// F2: когда объявление было в последний раз.
     pub(crate) ext_last: Option<Instant>,
+    /// S2, L4: последняя публикация не удалась; не раньше этого момента `tick` повторяет её.
+    /// Иначе удалённый или заблокированный друг оставался бы в наборе транспорта до следующего
+    /// изменения книги.
+    pub(crate) publish_retry_at: Option<Instant>,
 }
+
+/// Через сколько `tick` повторяет неудавшуюся публикацию набора пар.
+const PUBLISH_RETRY: Duration = Duration::from_secs(5);
 
 pub(crate) struct Inner<T: ManagedTransport, S> {
     pub(crate) transport: Arc<T>,
@@ -350,6 +359,16 @@ where
     /// приглашений, которые ещё не стали друзьями. При `DuplicatePairError` прежний набор
     /// разрешений восстанавливается, транспорт сохраняет прежний набор пар.
     pub(crate) fn publish(&self, st: &mut State<T::Conn>) -> Result<(), ConnectError> {
+        let res = self.publish_once(st);
+        // S2, L4: неудача (хранилище ключей, транспорт) помечается, `tick` повторит
+        st.publish_retry_at = match res {
+            Ok(()) => None,
+            Err(_) => Some(add_sat(Instant::now(), PUBLISH_RETRY)),
+        };
+        res
+    }
+
+    fn publish_once(&self, st: &mut State<T::Conn>) -> Result<(), ConnectError> {
         let (mut peers, bad) = st
             .book
             .kx_peers(&*self.store)
@@ -615,7 +634,14 @@ where
             }
             let plan = match st.guests.get(&pair) {
                 Some(g) if st.book.get(&pair).is_none() => guest_plan(&g.token_addrs, local),
-                _ => friend_plan(&st.book.usable_known(&pair, unix), local),
+                _ => {
+                    let confirmed = st
+                        .book
+                        .get(&pair)
+                        .map(|f| confirmed_addrs(&f.known_addrs, unix))
+                        .unwrap_or_default();
+                    friend_plan_confirmed(&st.book.usable_known(&pair, unix), &confirmed, local)
+                }
             };
             if plan.cands.is_empty() {
                 continue;
@@ -785,6 +811,9 @@ where
         let announce;
         {
             let mut st = self.lock();
+            if st.publish_retry_at.is_some_and(|t| t <= now) {
+                let _ = self.publish(&mut st);
+            }
             self.fast_window_ends(&mut st, &local, now, unix, &mut events);
             self.retry_deferred(&mut st, now, unix);
             // F2: до `collect_sends`, чтобы ADDR_INFO ушёл этим же тактом
@@ -1022,6 +1051,7 @@ where
             ext_announced: None,
             ext_baseline: false,
             ext_last: None,
+            publish_retry_at: None,
         };
         let inner = Arc::new(Inner {
             transport,

@@ -16,6 +16,11 @@ pub const MAX_CONTACT_ADDRS: usize = 4;
 /// ПРЕДВАРИТЕЛЬНО: решение владельца по сроку не окончательное, см. docs/OWNER_DECISIONS.md,
 /// «16а Q1». Менять только эту константу.
 pub const PRIVATE_TTL_SECS: u64 = 86_400;
+/// Срок жизни записи `Invite` (этап 17, S2, M1). Запись создаётся при установлении дружбы, то
+/// есть сразу после первого успешного соединения; адреса токена приглашения это слова
+/// пригласившего и вечными быть не должны. Дальше друг достижим по `Contact` и обновлениям
+/// адреса. 30 суток.
+pub const INVITE_TTL_SECS: u64 = 30 * 86_400;
 /// Сколько адресов берётся из приглашения.
 const MAX_INVITE_KEEP: usize = 8;
 
@@ -142,6 +147,7 @@ fn dead(k: &KnownAddr, now_unix: u64) -> bool {
         || (k.hint && expired(k.last_seen_unix, HINT_TTL_SECS, now_unix))
         || (k.source == AddrSource::Contact
             && expired(k.last_seen_unix, CONTACT_TTL_SECS, now_unix))
+        || (k.source == AddrSource::Invite && expired(k.last_seen_unix, INVITE_TTL_SECS, now_unix))
         || (expired(k.last_seen_unix, PRIVATE_TTL_SECS, now_unix)
             && classify(normalize(k.addr).ip()) == AddrClass::Private)
 }
@@ -193,6 +199,18 @@ pub fn usable_entries(addrs: &[KnownAddr], now_unix: u64) -> Vec<KnownAddr> {
         }
     }
     out
+}
+
+/// Живые адреса, подтверждённые нашим соединением (`Contact`, не подсказка), нормализованные.
+/// `usable_entries` убирает повтор адреса и оставляет запись более раннего источника
+/// (`AddressUpdate`, `Invite`), а подтверждение соединением этим теряется: слою соединения
+/// оно нужно для быстрого окна (этап 17, S2, M1).
+pub fn confirmed_addrs(addrs: &[KnownAddr], now_unix: u64) -> Vec<SocketAddr> {
+    addrs
+        .iter()
+        .filter(|k| k.source == AddrSource::Contact && !k.hint && !dead(k, now_unix))
+        .map(|k| normalize(k.addr))
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -158,3 +158,35 @@ async fn key_problem_reported_key_not_created() {
             .any(|e| matches!(e, EngineEvent::KeyProblem { .. }))
     );
 }
+
+/// S2, L4: публикация после блокировки друга не удалась (ошибка транспорта): заблокированный
+/// друг не должен оставаться в наборе транспорта до следующего изменения книги, `tick`
+/// повторяет публикацию. В старом коде набор оставался прежним навсегда.
+#[tokio::test(start_paused = true)]
+async fn failed_publish_after_block_is_retried_on_tick() {
+    let mut pre = Pre::new();
+    let x = pre.solo_friend(vec![inv("5.6.7.8:4000")]);
+    let y = pre.solo_friend(vec![inv("6.6.6.6:4000")]);
+    let n = Node::start(pre, ConnectConfig::default());
+    n.t.dup_error
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let res = n.engine.update_book(|b, s| b.block(s, &x));
+    assert_eq!(res.unwrap_err(), ConnectError::Internal);
+    // транспорт и допуск ещё прежние: публикация не удалась
+    assert!(n.t.last_peers().contains(&x));
+    assert!(n.allow.is_allowed(&x));
+    // пока ошибка держится, повторы не помогают, но и не ломают прежний набор
+    tokio::time::sleep(secs(12)).await;
+    assert!(n.t.last_peers().contains(&x));
+    // ошибка прошла: следующий повтор убирает заблокированного друга
+    n.t.dup_error
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    tokio::time::sleep(secs(12)).await;
+    assert_eq!(n.t.last_peers(), vec![y]);
+    assert!(!n.allow.is_allowed(&x));
+    assert!(n.allow.is_allowed(&y));
+    // повторов больше нет
+    let calls = n.t.peers_call_count();
+    tokio::time::sleep(secs(30)).await;
+    assert_eq!(n.t.peers_call_count(), calls);
+}

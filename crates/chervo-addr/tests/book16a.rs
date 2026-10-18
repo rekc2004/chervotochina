@@ -3,8 +3,8 @@
 use std::net::SocketAddr;
 
 use chervo_addr::{
-    AddrSource, Findability, KnownAddr, PRIVATE_TTL_SECS, UpdateAddr, findability, merge_update,
-    prune, usable,
+    AddrSource, Findability, INVITE_TTL_SECS, KnownAddr, PRIVATE_TTL_SECS, UpdateAddr, findability,
+    merge_update, prune, usable,
 };
 
 const NOW: u64 = 10_000_000;
@@ -157,4 +157,45 @@ fn findability_ignores_private_ttl() {
     );
     // свой постоянный адрес: Ok независимо от записей
     assert_eq!(findability(true, &private, NOW), Findability::Ok);
+}
+
+// ------------------------------------------------------------------ этап 17, S2, M1
+
+#[test]
+fn invite_entry_expires_after_ttl_even_if_global_and_not_short_lived() {
+    let t = NOW - INVITE_TTL_SECS;
+    let mut v = vec![
+        known("8.8.8.8:4000", AddrSource::Invite, t + 1, false),
+        known("8.8.4.4:4000", AddrSource::Invite, t, false),
+        known("9.9.9.9:4000", AddrSource::AddressUpdate, t, false),
+    ];
+    // чуть меньше срока: жива; ровно срок: нет (старый код хранил Invite вечно)
+    assert_eq!(usable(&v, NOW).len(), 2);
+    assert!(!usable(&v, NOW).contains(&sa("8.8.4.4:4000")));
+    prune(&mut v, NOW);
+    assert_eq!(addrs_of(&v), vec![sa("8.8.8.8:4000"), sa("9.9.9.9:4000")]);
+    // постоянный адрес из устаревшего приглашения больше не делает друга находимым
+    let old = vec![known("8.8.4.4:4000", AddrSource::Invite, t, false)];
+    assert_eq!(findability(false, &old, NOW), Findability::NeedToken);
+}
+
+#[test]
+fn confirmed_addrs_only_live_contact_without_hint() {
+    use chervo_addr::{CONTACT_TTL_SECS, confirmed_addrs};
+    let v = vec![
+        known("8.8.8.8:4000", AddrSource::Invite, NOW, false),
+        known("8.8.8.8:4000", AddrSource::Contact, NOW, false),
+        known("8.8.4.4:4000", AddrSource::Contact, NOW, true),
+        known(
+            "9.9.9.9:4000",
+            AddrSource::Contact,
+            NOW - CONTACT_TTL_SECS,
+            false,
+        ),
+        known("[::ffff:7.7.7.7]:4000", AddrSource::Contact, NOW, false),
+    ];
+    assert_eq!(
+        confirmed_addrs(&v, NOW),
+        vec![sa("8.8.8.8:4000"), sa("7.7.7.7:4000")]
+    );
 }

@@ -49,7 +49,7 @@ pub use fuzz_entry::{fuzz_knock_admits, fuzz_knock_ready};
 pub use knock::window_at;
 
 use knock::{KnockSocket, KnockState};
-use limits::{Counters, IpLimiter, KkGate, PreauthKeys};
+use limits::{Counters, IpLimiter, KkGate, PreauthKeys, PreauthPairs};
 use registry::Registry;
 
 pub const ALPN: &[u8] = b"chervo/1";
@@ -102,6 +102,13 @@ pub struct QuinnConfig {
     /// Незавершённых (до конца KK) соединений на один ключ лимитера (IPv4 целиком, IPv6 по
     /// /64); не меньше 1. Сверх предела: молчание, как при занятом семафоре.
     pub max_preauth_per_key: usize,
+    /// Незавершённых (до конца KK) соединений на одну пару допуска (пару, чей верный стук открыл
+    /// допуск адреса); не меньше 1. Друг со многими ключами лимитера не занимает все места
+    /// (этап 17, S2, L3). Сверх предела: молчание, как при занятом семафоре.
+    pub max_preauth_per_pair: usize,
+    /// Срок от отправки `msg2` до `msg3` и EOF; не больше `auth_deadline`. Друг с верным `msg1`,
+    /// молчащий дальше, освобождает место через это время, а не через `auth_deadline`.
+    pub msg3_deadline: Duration,
     /// Одновременных переборов KK; при использовании ограничивается `[1, max_preauth]`.
     pub max_kk_trials: usize,
     /// Кандидатов в секунду (глобально).
@@ -179,6 +186,8 @@ impl Default for QuinnConfig {
             max_preauth: 32,
             msg1_deadline: Duration::from_secs(5),
             max_preauth_per_key: 2,
+            max_preauth_per_pair: 4,
+            msg3_deadline: Duration::from_secs(3),
             max_kk_trials: 1,
             kk_budget_per_sec: 2000,
             kk_budget_burst: 2000,
@@ -286,6 +295,8 @@ pub(crate) struct Inner {
     pub(crate) preauth: Arc<Semaphore>,
     /// Незавершённые соединения по ключу лимитера (`max_preauth_per_key`).
     pub(crate) preauth_keys: Arc<PreauthKeys>,
+    /// Незавершённые соединения по паре допуска (`max_preauth_per_pair`).
+    pub(crate) preauth_pairs: Arc<PreauthPairs>,
     /// Один замок на всю смену набора пар: ворота, ключи стука и реестр меняются под ним
     /// вместе, параллельные `set_peers` не перемешиваются.
     pub(crate) peers_update: Mutex<()>,
@@ -407,6 +418,7 @@ impl QuinnTransport {
             )),
             preauth: Arc::new(Semaphore::new(cfg.max_preauth.max(1))),
             preauth_keys: PreauthKeys::new(cfg.max_preauth_per_key),
+            preauth_pairs: PreauthPairs::new(cfg.max_preauth_per_pair),
             peers_update: Mutex::new(()),
             #[cfg(test)]
             set_peers_hook: Mutex::new(None),

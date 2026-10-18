@@ -673,6 +673,11 @@ pub fn inv(a: &str) -> KnownAddr {
     known(a, AddrSource::Invite, false)
 }
 
+/// Адрес `Contact` (подтверждён соединением): только он сохраняет быстрое окно (S2, M1).
+pub fn con(a: &str) -> KnownAddr {
+    known(a, AddrSource::Contact, false)
+}
+
 /// Книга и хранилище до запуска движка.
 pub struct Pre {
     pub dir: TestDir,
