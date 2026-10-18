@@ -57,6 +57,27 @@ fn fuzz_iters() -> u64 {
         .unwrap_or(default)
 }
 
+/// Зерно ГПСЧ цели (этап 17, B3). Без `CHERVO_FUZZ_SEED` ровно `default`, как раньше. С ней
+/// у каждой цели своё зерно (splitmix64 от `seed ^ default`), так что длинные прогоны идут по
+/// новым последовательностям. Пустое значение считается незаданным; неразборное (не `u64`)
+/// вызывает панику, чтобы прогон не пошёл молча по старому зерну.
+fn fuzz_seed(default: u64) -> u64 {
+    let Ok(raw) = std::env::var("CHERVO_FUZZ_SEED") else {
+        return default;
+    };
+    if raw.trim().is_empty() {
+        return default;
+    }
+    let seed: u64 = raw
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("CHERVO_FUZZ_SEED must be a u64, got {raw:?}"));
+    let mut z = (seed ^ default).wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
 const TOKENS: [&[u8]; 16] = [
     b"<!",
     b"&",
@@ -268,7 +289,7 @@ fn http_samples() -> Vec<Vec<u8>> {
 #[test]
 fn fuzz_smoke_scan() {
     let n = fuzz_iters();
-    let mut rng = XorShift::new(0x1234_5678_9ABC_DEF0);
+    let mut rng = XorShift::new(fuzz_seed(0x1234_5678_9ABC_DEF0));
     let samples = [
         desc_sample(),
         soap_samples().remove(2),
@@ -331,7 +352,7 @@ fn fuzz_smoke_scan() {
 #[test]
 fn fuzz_smoke_desc() {
     let n = fuzz_iters();
-    let mut rng = XorShift::new(0x0DE5_C0DE_1234_5678);
+    let mut rng = XorShift::new(fuzz_seed(0x0DE5_C0DE_1234_5678));
     let sample = desc_sample();
     let t = target();
     let mut ok = 0u64;
@@ -366,7 +387,7 @@ fn fuzz_smoke_desc() {
 #[test]
 fn fuzz_smoke_soap() {
     let n = fuzz_iters();
-    let mut rng = XorShift::new(0x50A9_0000_DEAD_BEEF);
+    let mut rng = XorShift::new(fuzz_seed(0x50A9_0000_DEAD_BEEF));
     let samples = soap_samples();
     let mut ok = 0u64;
     for _ in 0..n {
@@ -402,7 +423,7 @@ fn fuzz_smoke_soap() {
 #[test]
 fn fuzz_smoke_ssdp() {
     let n = fuzz_iters();
-    let mut rng = XorShift::new(0x5555_0000_AAAA_1111);
+    let mut rng = XorShift::new(fuzz_seed(0x5555_0000_AAAA_1111));
     let sample = ssdp_sample();
     let src = SocketAddrV4::new(SRC, 1900);
     let mut ok = 0u64;
@@ -443,7 +464,7 @@ fn fuzz_smoke_ssdp() {
 #[test]
 fn fuzz_smoke_http() {
     let n = fuzz_iters();
-    let mut rng = XorShift::new(0xB0DE_0000_7777_3333);
+    let mut rng = XorShift::new(fuzz_seed(0xB0DE_0000_7777_3333));
     let samples = http_samples();
     let mut ok = 0u64;
     for _ in 0..n {

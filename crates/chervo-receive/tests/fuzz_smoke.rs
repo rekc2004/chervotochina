@@ -254,6 +254,27 @@ fn iterations() -> u64 {
         .unwrap_or(20_000)
 }
 
+/// Зерно ГПСЧ цели (этап 17, B3). Без `CHERVO_FUZZ_SEED` ровно `default`, как раньше. С ней
+/// у каждой цели своё зерно (splitmix64 от `seed ^ default`), так что длинные прогоны идут по
+/// новым последовательностям. Пустое значение считается незаданным; неразборное (не `u64`)
+/// вызывает панику, чтобы прогон не пошёл молча по старому зерну.
+fn fuzz_seed(default: u64) -> u64 {
+    let Ok(raw) = std::env::var("CHERVO_FUZZ_SEED") else {
+        return default;
+    };
+    if raw.trim().is_empty() {
+        return default;
+    }
+    let seed: u64 = raw
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("CHERVO_FUZZ_SEED must be a u64, got {raw:?}"));
+    let mut z = (seed ^ default).wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
 #[test]
 fn fuzz_smoke_sanitizer() {
     let n = iterations();
@@ -270,7 +291,7 @@ fn fuzz_smoke_sanitizer() {
         max_depth: 5,
         ..ReceiveLimits::default()
     };
-    let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+    let mut rng = Rng(fuzz_seed(0x9E37_79B9_7F4A_7C15));
     let mut ok = 0u64;
     for i in 0..n {
         let input = random_input(&mut rng, &alpha);
@@ -321,7 +342,7 @@ fn fuzz_smoke_plan() {
         "report",
         "Report (2)",
     ];
-    let mut rng = Rng(0xD1B5_4A32_D192_ED03);
+    let mut rng = Rng(fuzz_seed(0xD1B5_4A32_D192_ED03));
     let mut total_files = 0usize;
     for _ in 0..n {
         let count = 1 + rng.below(64);
@@ -474,7 +495,7 @@ fn fuzz_smoke_known_inert_vs_windows_trim() {
         "x", "photo", ".exe", ".jpg", ".iso", ".lnk", ".gz", ".xz", ".Z", ".zst", ".", "..", " ",
         ". ", " .", ".tar",
     ];
-    let mut rng = Rng(0xA5A5_1234_DEAD_BEEF);
+    let mut rng = Rng(fuzz_seed(0xA5A5_1234_DEAD_BEEF));
     let mut inert = 0u64;
     for _ in 0..n {
         let input = if rng.below(2) == 0 {

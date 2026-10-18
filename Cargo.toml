@@ -15,6 +15,8 @@ members = [
     "crates/chervo-core",
     "crates/chervo-cli",
 ]
+# libFuzzer crate: own workspace and Cargo.lock, nightly only (stage 17, B4)
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.0.0"

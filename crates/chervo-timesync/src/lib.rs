@@ -51,7 +51,9 @@ const MAX_RESPONSE_LEN: usize = 1024;
 /// Один «секунда» в формате 16.16.
 const ONE_SECOND_16_16: u32 = 0x1_0000;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `Debug` без имён серверов (свой NTP-сервер может быть задан адресом) и без таймаутов:
+/// этап 17, T15(в).
+#[derive(Clone, PartialEq, Eq)]
 pub struct SyncConfig {
     pub servers: Vec<String>,
     /// Ожидание ответа одного сервера.
@@ -62,6 +64,15 @@ pub struct SyncConfig {
     pub max_spread: Duration,
     /// Предел модуля поправки.
     pub max_abs_offset: Duration,
+}
+
+impl fmt::Debug for SyncConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SyncConfig")
+            .field("servers", &self.servers.len())
+            .field("min_valid", &self.min_valid)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for SyncConfig {
@@ -77,13 +88,24 @@ impl Default for SyncConfig {
 }
 
 /// Результат: поправка к системному времени, мс (истинное время = системное + поправка).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `Debug` без поправки: вместе со временем события она характеризует устройство (этап 17,
+/// T15(в)). Значение читают из поля `offset_ms`, а не из печати.
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct ClockOffset {
     pub offset_ms: i64,
     /// Сколько серверов дали допустимый ответ.
     pub valid: u8,
     /// Сколько серверов опрошено.
     pub queried: u8,
+}
+
+impl fmt::Debug for ClockOffset {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClockOffset")
+            .field("valid", &self.valid)
+            .field("queried", &self.queried)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

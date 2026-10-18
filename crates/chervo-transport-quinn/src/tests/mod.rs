@@ -9,6 +9,7 @@
 
 mod attacks;
 mod flood;
+mod fuzz;
 mod gate;
 mod kit;
 mod knock;

@@ -276,6 +276,27 @@ pub fn fuzz_iters() -> u64 {
         .unwrap_or(default)
 }
 
+/// Зерно ГПСЧ цели (этап 17, B3). Без `CHERVO_FUZZ_SEED` ровно `default`, как раньше. С ней
+/// у каждой цели своё зерно (splitmix64 от `seed ^ default`), так что длинные прогоны идут по
+/// новым последовательностям. Пустое значение считается незаданным; неразборное (не `u64`)
+/// вызывает панику, чтобы прогон не пошёл молча по старому зерну.
+pub fn fuzz_seed(default: u64) -> u64 {
+    let Ok(raw) = std::env::var("CHERVO_FUZZ_SEED") else {
+        return default;
+    };
+    if raw.trim().is_empty() {
+        return default;
+    }
+    let seed: u64 = raw
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("CHERVO_FUZZ_SEED must be a u64, got {raw:?}"));
+    let mut z = (seed ^ default).wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
 /// Одна случайная мутация: переворот бита, вставка, удаление, обрезка.
 pub fn mutate(rng: &mut XorShift, src: &[u8]) -> Vec<u8> {
     let mut v = src.to_vec();

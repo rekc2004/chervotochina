@@ -37,7 +37,7 @@ fn check_canonical(input: &str, token: &Token) {
 #[test]
 fn fuzz_smoke_decode() {
     let n = fuzz_iters();
-    let mut rng = XorShift::new(0x1234_5678_9ABC_DEF0);
+    let mut rng = XorShift::new(fuzz_seed(0x1234_5678_9ABC_DEF0));
     let a = key();
     let (_p, invite) = issue_invite(&draft(900), &a).unwrap();
     let revocation = issue_revocation(&a, RevocationReason::Rekey, 77).unwrap();
@@ -103,7 +103,7 @@ fn fuzz_smoke_decode() {
 #[test]
 fn fuzz_smoke_m1() {
     let n = fuzz_iters();
-    let mut rng = XorShift::new(0xDEAD_BEEF_0BAD_F00D);
+    let mut rng = XorShift::new(fuzz_seed(0xDEAD_BEEF_0BAD_F00D));
     let mut h = honest();
     h.pending.begin_session(1_000_100).unwrap();
     let mut valid = h.m1.to_vec();
@@ -138,7 +138,7 @@ fn fuzz_smoke_m1() {
 #[test]
 fn fuzz_smoke_m2() {
     let n = fuzz_iters();
-    let mut rng = XorShift::new(0x0F0F_1234_5678_9ABC);
+    let mut rng = XorShift::new(fuzz_seed(0x0F0F_1234_5678_9ABC));
     let mut h = honest();
     h.pending.begin_session(1_000_100).unwrap();
     let (m2, _sas, _keys) = h.pending.on_m1(&h.m1, 1_000_100).unwrap();
@@ -167,7 +167,7 @@ fn fuzz_smoke_m2() {
 #[test]
 fn fuzz_smoke_revocation() {
     let n = fuzz_iters();
-    let mut rng = XorShift::new(0xA5A5_5A5A_C3C3_3C3C);
+    let mut rng = XorShift::new(fuzz_seed(0xA5A5_5A5A_C3C3_3C3C));
     let k = key();
     let good = text_bytes(&issue_revocation(&k, RevocationReason::Removed, 9).unwrap());
     let mut ok = 0u64;
@@ -225,7 +225,7 @@ fn fuzz_set() -> chervo_addr::PublishSet {
 #[test]
 fn fuzz_smoke_addr_update() {
     let n = fuzz_iters();
-    let mut rng = XorShift::new(0x5EED_ADD2_0123_4567);
+    let mut rng = XorShift::new(fuzz_seed(0x5EED_ADD2_0123_4567));
     let (a, b) = (key(), key());
     let (pa, pb) = (a.public_key(), b.public_key());
     let good = issue_addr_update(&a, &pb, 42, &fuzz_set())
@@ -294,7 +294,7 @@ fn fuzz_smoke_addr_update() {
 fn fuzz_smoke_addr_info() {
     use chervo_token::addr_flow::{decode_addr_info, encode_addr_info};
     let n = fuzz_iters();
-    let mut rng = XorShift::new(0xADD2_F00D_BEEF_0042);
+    let mut rng = XorShift::new(fuzz_seed(0xADD2_F00D_BEEF_0042));
     let (a, b) = (key(), key());
     let upd = issue_addr_update(&a, &b.public_key(), 7, &fuzz_set()).unwrap();
     let frames = [

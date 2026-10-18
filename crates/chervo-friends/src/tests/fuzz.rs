@@ -11,7 +11,7 @@ use crate::vault::{open, seal};
 #[test]
 fn fuzz_smoke_vault_plain() {
     let n = fuzz_iters();
-    let mut rng = XorShift::new(0x9E37_79B9_7F4A_7C15);
+    let mut rng = XorShift::new(fuzz_seed(0x9E37_79B9_7F4A_7C15));
     let sample = sample();
     let valid = encode(&sample).unwrap().to_vec();
     // v2: то же без `Retired` и без `epoch`

@@ -53,6 +53,27 @@ fn fuzz_iters() -> u64 {
         .unwrap_or(default)
 }
 
+/// Зерно ГПСЧ цели (этап 17, B3). Без `CHERVO_FUZZ_SEED` ровно `default`, как раньше. С ней
+/// у каждой цели своё зерно (splitmix64 от `seed ^ default`), так что длинные прогоны идут по
+/// новым последовательностям. Пустое значение считается незаданным; неразборное (не `u64`)
+/// вызывает панику, чтобы прогон не пошёл молча по старому зерну.
+fn fuzz_seed(default: u64) -> u64 {
+    let Ok(raw) = std::env::var("CHERVO_FUZZ_SEED") else {
+        return default;
+    };
+    if raw.trim().is_empty() {
+        return default;
+    }
+    let seed: u64 = raw
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("CHERVO_FUZZ_SEED must be a u64, got {raw:?}"));
+    let mut z = (seed ^ default).wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
 /// Одна случайная мутация: переворот бита, вставка, удаление, обрезка, замена байта.
 fn mutate(rng: &mut XorShift, src: &[u8]) -> Vec<u8> {
     let mut v = src.to_vec();
@@ -174,7 +195,7 @@ fn corpus(rng: &mut XorShift) -> Vec<Vec<u8>> {
 #[tokio::test]
 async fn fuzz_smoke_codec() {
     let n = fuzz_iters();
-    let mut rng = XorShift::new(0x0123_4567_89AB_CDEF);
+    let mut rng = XorShift::new(fuzz_seed(0x0123_4567_89AB_CDEF));
     let seeds = corpus(&mut rng);
     let mut buf = Vec::new();
     let (mut ok_body, mut ok_stream) = (0u64, 0u64);
@@ -266,7 +287,7 @@ fn random_files(rng: &mut XorShift) -> Vec<OfferedFile> {
 #[tokio::test]
 async fn fuzz_smoke_offer_assembly() {
     let n = fuzz_iters();
-    let mut rng = XorShift::new(0xDEAD_BEEF_0BAD_F00D);
+    let mut rng = XorShift::new(fuzz_seed(0xDEAD_BEEF_0BAD_F00D));
     let (mut finished, mut rejected) = (0u64, 0u64);
     for i in 0..n {
         let files = random_files(&mut rng);
@@ -403,7 +424,7 @@ fn reseal(mut b: Vec<u8>) -> Vec<u8> {
 #[test]
 fn fuzz_smoke_state() {
     let n = fuzz_iters();
-    let mut rng = XorShift::new(0x005E_ED0F_57A7_E000_u64);
+    let mut rng = XorShift::new(fuzz_seed(0x005E_ED0F_57A7_E000_u64));
     let mut accepted = 0u64;
     for i in 0..n {
         let s = random_state(&mut rng);
@@ -447,7 +468,7 @@ fn fuzz_smoke_state() {
 #[test]
 fn fuzz_smoke_names() {
     let n = fuzz_iters();
-    let mut rng = XorShift::new(0x00A3_E5F0_0D5E_ED01_u64);
+    let mut rng = XorShift::new(fuzz_seed(0x00A3_E5F0_0D5E_ED01_u64));
     let mut accepted = 0u64;
     for i in 0..n {
         let count = 1 + rng.below(6);

@@ -321,3 +321,6 @@ pub(crate) fn sweep(dir: &Path, partial: &Path) {
         }
     }
 }
+
+#[cfg(test)]
+mod fuzz_tests;

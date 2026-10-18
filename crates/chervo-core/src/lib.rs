@@ -3,6 +3,8 @@
 
 use std::path::PathBuf;
 
+mod harden;
+
 pub use chervo_addr;
 pub use chervo_connect;
 pub use chervo_friends;
@@ -12,15 +14,26 @@ pub use chervo_token;
 pub use chervo_transfer;
 pub use chervo_transport;
 
+pub use harden::{HardenReport, harden_process};
+
 use chervo_receive::ReceiveLimits;
 use chervo_transport::Transport;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `Debug` без пути `data_dir`: путь содержит имя пользователя (этап 17, B3).
+#[derive(Clone, PartialEq, Eq)]
 pub struct NodeConfig {
     pub data_dir: PathBuf,
     pub receive_limits: ReceiveLimits,
+}
+
+impl std::fmt::Debug for NodeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeConfig")
+            .field("receive_limits", &self.receive_limits)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

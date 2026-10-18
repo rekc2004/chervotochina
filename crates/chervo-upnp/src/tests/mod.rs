@@ -14,6 +14,7 @@ mod fake_igd;
 mod fuzz;
 mod http;
 mod igd;
+mod redaction;
 mod scan;
 mod soap;
 mod src_guard;
