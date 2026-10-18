@@ -131,18 +131,21 @@ pub fn decode(text: &str) -> Result<Token, TokenError> {
 }
 
 /// Только для тестов: каноническая запись произвольных байт как приглашение.
+#[cfg(any(test, feature = "fuzzing"))]
 #[doc(hidden)]
 pub fn encode_invite_bytes(bytes: &[u8]) -> String {
     format!("{INVITE_PREFIX}{}", base32::encode(bytes))
 }
 
 /// Только для тестов: каноническая запись произвольных байт как отзыв.
+#[cfg(any(test, feature = "fuzzing"))]
 #[doc(hidden)]
 pub fn encode_revocation_bytes(bytes: &[u8]) -> String {
     format!("{REVOCATION_PREFIX}{}", base32::encode(bytes))
 }
 
 /// Только для тестов: каноническая запись произвольных байт как токен обновления адреса.
+#[cfg(any(test, feature = "fuzzing"))]
 #[doc(hidden)]
 pub fn encode_addr_update_bytes(bytes: &[u8]) -> String {
     format!("{ADDR_UPDATE_PREFIX}{}", base32::encode(bytes))

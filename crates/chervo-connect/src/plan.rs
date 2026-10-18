@@ -15,6 +15,9 @@ pub(crate) const MAX_DIAL_ADDRS: usize = 8;
 pub(crate) struct Candidate {
     pub(crate) addr: SocketAddr,
     pub(crate) hint: bool,
+    /// Адрес известен только со слов друга (`AddressUpdate`, подсказка): набор не чаще раза
+    /// в `dial_base` (+ запас) в любом режиме, быстрое окно срок не сокращает (этап 17, X02a).
+    pub(crate) strict: bool,
 }
 
 /// Упорядоченные кандидаты до применения ограничителя.
@@ -55,17 +58,19 @@ fn family_ok(addr: &SocketAddr, local: &[SocketAddr]) -> bool {
     local.iter().any(|l| l.is_ipv4() == addr.is_ipv4())
 }
 
-fn build(raw: impl Iterator<Item = (SocketAddr, bool)>, local: &[SocketAddr]) -> Plan {
+fn build(raw: impl Iterator<Item = (SocketAddr, bool, bool)>, local: &[SocketAddr]) -> Plan {
     let mut cands: Vec<Candidate> = Vec::new();
-    for (addr, hint) in raw {
+    for (addr, hint, strict) in raw {
         let addr = normalize(addr);
         if !dialable(&addr) || !family_ok(&addr, local) {
             continue;
         }
-        if cands.iter().any(|c| c.addr == addr) {
+        if let Some(c) = cands.iter_mut().find(|c| c.addr == addr) {
+            // тот же адрес из более доверенного источника (приглашение, контакт) снимает предел
+            c.strict &= strict;
             continue;
         }
-        cands.push(Candidate { addr, hint });
+        cands.push(Candidate { addr, hint, strict });
     }
     // устойчивая сортировка: сначала локальная сеть, дальше порядок книги
     cands.sort_by_key(|c| !is_lan(&c.addr));
@@ -75,12 +80,24 @@ fn build(raw: impl Iterator<Item = (SocketAddr, bool)>, local: &[SocketAddr]) ->
 /// Кандидаты друга: записи `usable_known` (порядок книги: обновление без подсказки,
 /// приглашение, контакт, подсказки), семейство по `local`, сначала LAN.
 pub(crate) fn friend_plan(entries: &[KnownAddr], local: &[SocketAddr]) -> Plan {
-    build(entries.iter().map(|k| (k.addr, k.hint)), local)
+    build(
+        entries.iter().map(|k| (k.addr, k.hint, is_strict(k))),
+        local,
+    )
+}
+
+/// Слова друга, не подтверждённые соединением и не полученные от пользователя вне линии.
+fn is_strict(k: &KnownAddr) -> bool {
+    k.hint
+        || matches!(
+            k.source,
+            AddrSource::AddressUpdate | AddrSource::ObservedByFriend
+        )
 }
 
 /// Кандидаты гостевой пары приглашённого: только адреса токена.
 pub(crate) fn guest_plan(token_addrs: &[SocketAddr], local: &[SocketAddr]) -> Plan {
-    build(token_addrs.iter().map(|a| (*a, false)), local)
+    build(token_addrs.iter().map(|a| (*a, false, false)), local)
 }
 
 /// Только IPv6 в книге, а транспорт IPv6 не слушает: причина `NoIpv6`.
@@ -98,7 +115,7 @@ pub(crate) fn select(plan: &Plan, limiter: &mut Limiter, now: Instant) -> Vec<Ca
         if out.len() >= MAX_DIAL_ADDRS {
             break;
         }
-        if limiter.take(c.addr, c.hint, now) {
+        if limiter.take(c.addr, c.strict, now) {
             out.push(*c);
         }
     }

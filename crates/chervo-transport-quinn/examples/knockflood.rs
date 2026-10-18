@@ -269,7 +269,7 @@ fn label_pair(book_dir: &Path, label: &str) -> Option<PairId> {
 fn load_friend(book_dir: &Path, label: &str) -> Res<KxPeer> {
     let pair = label_pair(book_dir, label).ok_or_else(|| "label: не найдена в книге".to_owned())?;
     let store = FileStore::new(book_dir.join("keys"));
-    let book = FriendBook::open(&book_dir.join("friends.chfl"), &store)
+    let book = FriendBook::open_unanchored(&book_dir.join("friends.chfl"), &store)
         .map_err(|e| format!("книга: {e}"))?;
     let (peers, _bad) = book
         .kx_peers(&store)
@@ -524,7 +524,7 @@ impl chervo_identity::ListKeyStore for MemStore {
     }
 }
 
-/// Пустая книга друзей, живущая только в процессе: путь нужен `FriendBook::open`/сохранению,
+/// Пустая книга друзей, живущая только в процессе: путь нужен `FriendBook::open_unanchored`/сохранению,
 /// но вне книги держателю приглашения ничего не нужно хранить навсегда.
 fn scratch_book_path() -> PathBuf {
     let nanos = SystemTime::now()
@@ -550,7 +550,8 @@ async fn run_invite_hold(args: &[String]) -> Res<()> {
 
     let store = Arc::new(MemStore::default());
     let book_path = scratch_book_path();
-    let book = FriendBook::open(&book_path, &*store).map_err(|e| format!("книга: {e}"))?;
+    let book =
+        FriendBook::open_unanchored(&book_path, &*store).map_err(|e| format!("книга: {e}"))?;
     let allow = AllowSet::new();
     let filter: Arc<dyn PeerFilter> = allow.clone();
     let transport = QuinnTransport::bind(

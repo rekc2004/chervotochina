@@ -183,7 +183,7 @@ fn start_side(
     placement: Arc<dyn Placement>,
 ) -> Side {
     let book = book.unwrap_or_else(|| {
-        FriendBook::open(&bookdir.path().join("friends.chfl"), &*store).unwrap()
+        FriendBook::open_unanchored(&bookdir.path().join("friends.chfl"), &*store).unwrap()
     });
     let clock: Arc<dyn Clock> = Arc::new(SystemClock::new());
     let probe: Arc<dyn RouteProbe> = Arc::new(Probe);
@@ -323,8 +323,8 @@ fn make_dirs() -> (Tmp, PathBuf, PathBuf) {
 async fn duo(perm: Permission, fcfg: impl FnOnce(&mut ReceiveConfig)) -> Duo {
     let (sx, sy) = (Arc::new(MemStore::default()), Arc::new(MemStore::default()));
     let (dx, dy) = (Arc::new(Tmp::new("bx")), Arc::new(Tmp::new("by")));
-    let mut bx_book = FriendBook::open(&dx.path().join("friends.chfl"), &*sx).unwrap();
-    let mut by_book = FriendBook::open(&dy.path().join("friends.chfl"), &*sy).unwrap();
+    let mut bx_book = FriendBook::open_unanchored(&dx.path().join("friends.chfl"), &*sx).unwrap();
+    let mut by_book = FriendBook::open_unanchored(&dy.path().join("friends.chfl"), &*sy).unwrap();
     let (bx, by) = (bind(0), bind(0));
     let (px, kx) = bx_book
         .begin_pair(&*sx, PendingRole::Inviter, u64::MAX)
@@ -1091,8 +1091,8 @@ async fn net_receiver_restart_idempotent_placement() {
     // свой стенд: размещение получателя заменено оболочкой
     let (sx, sy) = (Arc::new(MemStore::default()), Arc::new(MemStore::default()));
     let (dx, dy) = (Arc::new(Tmp::new("bx")), Arc::new(Tmp::new("by")));
-    let mut bx_book = FriendBook::open(&dx.path().join("friends.chfl"), &*sx).unwrap();
-    let mut by_book = FriendBook::open(&dy.path().join("friends.chfl"), &*sy).unwrap();
+    let mut bx_book = FriendBook::open_unanchored(&dx.path().join("friends.chfl"), &*sx).unwrap();
+    let mut by_book = FriendBook::open_unanchored(&dy.path().join("friends.chfl"), &*sy).unwrap();
     let (bx, by) = (bind(0), bind(0));
     let (px, kx) = bx_book
         .begin_pair(&*sx, PendingRole::Inviter, u64::MAX)

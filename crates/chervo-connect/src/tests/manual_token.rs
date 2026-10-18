@@ -129,7 +129,7 @@ async fn manual_token_seq_persisted_before_return() {
     assert!(!text.is_empty());
     let s = seq_out(&d.a, &d.pa);
     // заново открытая книга с диска уже содержит номер выпущенного токена
-    let reopened = FriendBook::open(&d.a_book, &*d.a.store).unwrap();
+    let reopened = FriendBook::open_unanchored(&d.a_book, &*d.a.store).unwrap();
     assert_eq!(reopened.get(&d.pa).unwrap().addr_seq_out, s);
 }
 

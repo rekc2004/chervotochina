@@ -47,6 +47,7 @@ pub use texts::{
 // ---------------------------------------------------------------------------------------------
 
 /// Только для фаззинга: разбор описания устройства IGD произвольными байтами (`desc.rs`).
+#[cfg(any(test, feature = "fuzzing"))]
 #[doc(hidden)]
 pub fn fuzz_desc(bytes: &[u8]) {
     if let Ok(t) = url::parse_location(
@@ -58,12 +59,14 @@ pub fn fuzz_desc(bytes: &[u8]) {
 }
 
 /// Только для фаззинга: разбор HTTP-ответа произвольными байтами (`http.rs`).
+#[cfg(any(test, feature = "fuzzing"))]
 #[doc(hidden)]
 pub fn fuzz_http(bytes: &[u8]) {
     let _ = http::parse_response(bytes);
 }
 
 /// Только для фаззинга: разбор SSDP-ответа произвольными байтами (`ssdp.rs`).
+#[cfg(any(test, feature = "fuzzing"))]
 #[doc(hidden)]
 pub fn fuzz_ssdp(bytes: &[u8]) {
     use std::net::{Ipv4Addr, SocketAddrV4};
@@ -76,6 +79,7 @@ pub fn fuzz_ssdp(bytes: &[u8]) {
 }
 
 /// Только для фаззинга: разбор тел SOAP произвольными байтами (`soap.rs`).
+#[cfg(any(test, feature = "fuzzing"))]
 #[doc(hidden)]
 pub fn fuzz_soap(bytes: &[u8]) {
     let _ = soap::parse_external_ip(bytes);
@@ -85,6 +89,7 @@ pub fn fuzz_soap(bytes: &[u8]) {
 }
 
 /// Только для фаззинга: разбор `LOCATION`/порта произвольным текстом (`url.rs`).
+#[cfg(any(test, feature = "fuzzing"))]
 #[doc(hidden)]
 pub fn fuzz_url(bytes: &[u8]) {
     if let Ok(s) = std::str::from_utf8(bytes) {

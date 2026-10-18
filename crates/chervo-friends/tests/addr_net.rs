@@ -61,7 +61,7 @@ impl Party {
     fn with(cfg: QuinnConfig) -> Self {
         let dir = TestDir::new();
         let store = MemStore::default();
-        let book = FriendBook::open(&dir.file(), &store).unwrap();
+        let book = FriendBook::open_unanchored(&dir.file(), &store).unwrap();
         let t =
             QuinnTransport::bind("127.0.0.1:0".parse().unwrap(), cfg, Arc::new(AllowAll)).unwrap();
         let addr = SocketAddr::new("127.0.0.1".parse().unwrap(), t.local_addrs()[0].port());
@@ -234,7 +234,7 @@ async fn addr_info_end_to_end_quinn() {
         .note_contact(&a.store, &pa, conn_a.remote_addr(), now)
         .unwrap();
     assert!(a.book.usable_addrs(&pa, now).contains(&b.addr));
-    let reopened = FriendBook::open(&a.dir.file(), &a.store).unwrap();
+    let reopened = FriendBook::open_unanchored(&a.dir.file(), &a.store).unwrap();
     assert_eq!(reopened.get(&pa).unwrap().last_addr_seq, ub.seq());
     assert!(reopened.usable_addrs(&pa, now).contains(&b.addr));
     // соединение после обмена живо: второй обмен без обновлений

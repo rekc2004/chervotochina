@@ -63,7 +63,7 @@ impl Party {
     fn with(cfg: QuinnConfig) -> Self {
         let dir = TestDir::new();
         let store = MemStore::default();
-        let book = FriendBook::open(&dir.file(), &store).unwrap();
+        let book = FriendBook::open_unanchored(&dir.file(), &store).unwrap();
         let t =
             QuinnTransport::bind("127.0.0.1:0".parse().unwrap(), cfg, Arc::new(AllowAll)).unwrap();
         let addr = SocketAddr::new("127.0.0.1".parse().unwrap(), t.local_addrs()[0].port());
@@ -400,7 +400,7 @@ async fn invite_reject_creates_nothing() {
         }
         // и на диске
         assert!(
-            FriendBook::open(&a._dir.file(), &a.store)
+            FriendBook::open_unanchored(&a._dir.file(), &a.store)
                 .unwrap()
                 .friends()
                 .is_empty()

@@ -16,12 +16,11 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use chervo_identity::{IdentityError, KNOCK_LEN, KnockKeys, KxPeer, PairId, create, load};
+use chervo_identity::{KNOCK_LEN, KnockKeys, KxPeer, PairId};
 use chervo_transport::PeerFilter;
 use quinn::udp::{RecvMeta, Transmit};
-use quinn::{AsyncUdpSocket, Runtime, UdpPoller};
+use quinn::{AsyncUdpSocket, UdpPoller};
 use tokio::sync::broadcast;
-use zeroize::Zeroizing;
 
 use crate::limits::Counters;
 use crate::{KNOCK_ACCEPT_SPAN, KNOCK_HINT_SPAN, KNOCK_WINDOW_SECS, QuinnConfig, TransportEvent};
@@ -533,8 +532,8 @@ impl KnockState {
         ring.table.clear();
     }
 
-    /// Только тесты: пары, чьи ключи стука сейчас в таблице (по порядку набора).
-    #[cfg(test)]
+    /// Только тесты и фаззинг: пары, чьи ключи стука сейчас в таблице (по порядку набора).
+    #[cfg(any(test, feature = "fuzzing"))]
     pub(crate) fn key_pairs(&self) -> Vec<PairId> {
         lock(&self.ring).keys.iter().map(|(p, _)| *p).collect()
     }
@@ -878,98 +877,4 @@ impl AsyncUdpSocket for KnockSocket {
     fn may_fragment(&self) -> bool {
         self.inner.may_fragment()
     }
-}
-
-// ---------------------------------------------------------------------------------------------
-// Этап 17, B6/C04: точка входа для фаззинга (libFuzzer в `fuzz/`, вне рабочего пространства).
-// Поведение не меняется: обёртка вызывает тот же `try_knock`/`consume_attempt`, что и свой
-// fuzz-смоук (`src/tests/fuzz.rs`). Состояние строится лениво и один раз на процесс; сбой при
-// его постройке (сокет, ключи) считается «не допущено», а не паникой — здесь `unwrap`/`panic`
-// запрещены охраной крейта.
-// ---------------------------------------------------------------------------------------------
-
-struct FuzzAllowAll;
-
-impl PeerFilter for FuzzAllowAll {
-    fn is_allowed(&self, _pair: &PairId) -> bool {
-        true
-    }
-}
-
-/// Память: только для одноразового ключа друга этой точки входа.
-#[derive(Default)]
-struct FuzzMemStore(Mutex<HashMap<PairId, Vec<u8>>>);
-
-impl chervo_identity::SecretStore for FuzzMemStore {
-    fn read(&self, pair: &PairId) -> Result<Option<Zeroizing<Vec<u8>>>, IdentityError> {
-        Ok(lock(&self.0).get(pair).cloned().map(Zeroizing::new))
-    }
-
-    fn write(&self, pair: &PairId, blob: &[u8]) -> Result<(), IdentityError> {
-        lock(&self.0).insert(*pair, blob.to_vec());
-        Ok(())
-    }
-
-    fn delete(&self, pair: &PairId) -> Result<(), IdentityError> {
-        lock(&self.0).remove(pair);
-        Ok(())
-    }
-}
-
-fn fuzz_fixture() -> Option<Arc<KnockState>> {
-    let cfg = QuinnConfig {
-        knock_required: true,
-        ..QuinnConfig::default()
-    };
-    let counters = Arc::new(Counters::default());
-    let (events, _rx) = broadcast::channel(8);
-    let std_sock = std::net::UdpSocket::bind("127.0.0.1:0").ok()?;
-    std_sock.set_nonblocking(true).ok()?;
-    let raw = quinn::TokioRuntime.wrap_udp_socket(std_sock).ok()?;
-    let state = KnockState::new(&cfg, counters, Arc::new(FuzzAllowAll), events, raw);
-    // одноразовая пара: наша сторона допускается, собеседника у этого фиктивного друга нет
-    let pid = PairId::generate().ok()?;
-    let store = FuzzMemStore::default();
-    let ours = create(&store, &pid).ok()?;
-    let public = ours.public_key();
-    let ours = load(&store, &pid, &public).ok()?;
-    let theirs = ours.kx_public();
-    let peer = KxPeer::new(pid, ours.into_kx(), theirs);
-    state.set_peers(&[peer]);
-    Some(state)
-}
-
-fn fuzz_state() -> Option<&'static Arc<KnockState>> {
-    static STATE: std::sync::OnceLock<Option<Arc<KnockState>>> = std::sync::OnceLock::new();
-    // обёртка гнезда нуждается в активном исполнителе tokio только на постройке
-    static RT: std::sync::OnceLock<Option<tokio::runtime::Runtime>> = std::sync::OnceLock::new();
-    let rt = RT.get_or_init(|| {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .ok()
-    });
-    let state = STATE.get_or_init(|| match rt {
-        Some(rt) => {
-            let _guard = rt.enter();
-            fuzz_fixture()
-        }
-        None => None,
-    });
-    state.as_ref()
-}
-
-/// `true`: датаграмма `data` допустила бы адрес (оно не должно происходить ни для какого
-/// `data`, кроме настоящего стука текущего ключа этой точки входа, который наружу не выходит).
-#[doc(hidden)]
-pub fn fuzz_knock_admits(data: &[u8]) -> bool {
-    let Some(state) = fuzz_state() else {
-        return false;
-    };
-    let addr: SocketAddr = match "127.0.0.1:1".parse() {
-        Ok(a) => a,
-        Err(_) => return false,
-    };
-    let _ = state.try_knock(addr, data);
-    state.consume_attempt(addr)
 }

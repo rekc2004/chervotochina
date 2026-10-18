@@ -27,6 +27,9 @@ pub enum FriendsError {
     NotActive,
     /// Список старше последнего изменения безопасности (якорь в хранилище ОС).
     RolledBack,
+    /// Другой экземпляр программы уже изменил безопасность (запись в хранилище ОС новее
+    /// нашего файла): изменение не сохранено, список нужно открыть заново.
+    StaleInstance,
 }
 
 impl fmt::Display for FriendsError {
@@ -54,6 +57,7 @@ impl fmt::Display for FriendsError {
             Self::RateLimited => "address update rate limited",
             Self::NotActive => "friend is not active",
             Self::RolledBack => "friends list is older than the last security change",
+            Self::StaleInstance => "friends list was changed by another instance",
         };
         f.write_str(text)
     }

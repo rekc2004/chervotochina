@@ -20,5 +20,9 @@ chervo-friends.workspace = true
 chervo-connect.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 
+[features]
+# Точки входа для libFuzzer (`fuzz/`, вне рабочего пространства), не для продукта (S1 L6).
+fuzzing = []
+
 [lints]
 workspace = true

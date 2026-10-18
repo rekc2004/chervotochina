@@ -15,6 +15,7 @@ fn plan_of(ip: &str, ports: std::ops::Range<u16>) -> Plan {
             .map(|p| Candidate {
                 addr: addr(&format!("{ip}:{p}")),
                 hint: false,
+                strict: false,
             })
             .collect(),
     }

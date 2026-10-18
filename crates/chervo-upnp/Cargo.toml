@@ -9,5 +9,9 @@ publish.workspace = true
 chervo-addr.workspace = true
 socket2 = { version = "=0.6.5", default-features = false }
 
+[features]
+# Точки входа для libFuzzer (`fuzz/`, вне рабочего пространства), не для продукта (S1 L6).
+fuzzing = []
+
 [lints]
 workspace = true

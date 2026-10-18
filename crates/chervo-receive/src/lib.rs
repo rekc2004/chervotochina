@@ -32,6 +32,7 @@ mod trust;
 pub use accept::{AcceptIntoError, accept_into};
 pub use classify::{FileClass, TypeInfo, classify, is_known_inert};
 /// Этап 17, B6/C04: только для фаззинга (`fuzz/`, вне рабочего пространства).
+#[cfg(any(test, feature = "fuzzing"))]
 #[doc(hidden)]
 pub use journal::{decode_dirs, parse_placed};
 pub use limits::{PathError, ReceiveLimits};
@@ -39,6 +40,7 @@ pub use name::{
     NameFlags, SafeRelPath, fold, is_portable_component, portable_component, sanitize_path,
     sanitize_relative_path,
 };
+#[cfg(any(test, feature = "fuzzing"))]
 #[doc(hidden)]
 pub use place::TestPoint;
 pub use place::{ChooseRootError, ReceivePlacement};

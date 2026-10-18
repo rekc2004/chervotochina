@@ -37,6 +37,8 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// Точки, в которых тест вмешивается в размещение (только для тестов крейта и его потребителей).
 #[doc(hidden)]
+// без свойства `fuzzing` хук не устанавливается, поля читает только он (S1 L6)
+#[cfg_attr(not(any(test, feature = "fuzzing")), allow(dead_code))]
 pub enum TestPoint<'a> {
     /// Перед записью метки происхождения; `Err` считается ошибкой метки (она игнорируется).
     BeforeMark,
@@ -237,6 +239,7 @@ impl ReceivePlacement {
     }
 
     /// Свой способ узнать свободное место при выборе другой папки (тесты).
+    #[cfg(any(test, feature = "fuzzing"))]
     #[doc(hidden)]
     pub fn with_space_probe(mut self, probe: Arc<SpaceProbe>) -> Self {
         self.probe = probe;
@@ -304,12 +307,14 @@ impl ReceivePlacement {
     }
 
     /// Подмена точек размещения для тестов.
+    #[cfg(any(test, feature = "fuzzing"))]
     #[doc(hidden)]
     pub fn set_test_hook(&self, h: Arc<TestHook>) {
         *lock(&self.hook) = Some(h);
     }
 
     /// Сколько раз файл целиком перечитывался при повторе размещения.
+    #[cfg(any(test, feature = "fuzzing"))]
     #[doc(hidden)]
     pub fn full_reads(&self) -> u64 {
         self.full_reads.load(Ordering::SeqCst)

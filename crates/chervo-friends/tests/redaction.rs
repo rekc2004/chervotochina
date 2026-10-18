@@ -42,6 +42,7 @@ fn all_errors() -> Vec<FriendsError> {
         RateLimited,
         NotActive,
         RolledBack,
+        StaleInstance,
     ]
 }
 
@@ -52,7 +53,7 @@ const ADDR: &str = "203.0.113.7:4455";
 fn friends_types_hide_names_addrs_keys_and_revocation() {
     let dir = TestDir::new();
     let store = MemStore::default();
-    let mut book = FriendBook::open(&dir.file(), &store).unwrap();
+    let mut book = FriendBook::open_unanchored(&dir.file(), &store).unwrap();
 
     // друг с именем и адресом
     let (pair, key) = book

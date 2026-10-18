@@ -45,6 +45,7 @@ impl CompletedFile {
 
     /// Конструктор для тестов внешних реализаций `Placement` (в рабочем коде файл создаёт
     /// только писатель).
+    #[cfg(any(test, feature = "fuzzing"))]
     #[doc(hidden)]
     pub fn new_for_test(
         key: TransferKey,

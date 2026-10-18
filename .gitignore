@@ -4,3 +4,4 @@ __pycache__/
 .env
 *.local.json
 .claude/worktrees/
+tools/fuzz/logs/

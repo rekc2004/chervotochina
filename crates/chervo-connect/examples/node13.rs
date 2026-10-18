@@ -200,7 +200,7 @@ async fn main() -> ExitCode {
         return ExitCode::from(2);
     }
     let store = Arc::new(MemStore::default());
-    let book = match FriendBook::open(&args.book_dir.join("friends.chfl"), &*store) {
+    let book = match FriendBook::open_unanchored(&args.book_dir.join("friends.chfl"), &*store) {
         Ok(b) => b,
         Err(_) => {
             eprintln!("node13: book");

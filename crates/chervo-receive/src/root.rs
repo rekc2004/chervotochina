@@ -29,7 +29,8 @@ pub struct ReceiveConfig {
     /// «принять?». Объёма предложения как предела нет. По умолчанию 10; 0 отключает запас
     /// (остаётся проверка, что предложение вообще помещается).
     pub min_free_percent: u8,
-    /// Разрешить папку, доступную другим пользователям (Unix). По умолчанию нет.
+    /// Разрешить папку, доступную другим пользователям (Unix) или лежащую вне профиля
+    /// пользователя (Windows, `RootError::OutsideProfile`). По умолчанию нет.
     pub allow_shared_root: bool,
     /// Windows: поток `Zone.Identifier` (ZoneId=3) у каждого принятого файла.
     pub mark_of_the_web: bool,
@@ -68,6 +69,11 @@ pub enum RootError {
     PartialNotPrivate,
     /// Рев. 6, L4: папка лежит внутри служебного каталога `.chervo-partial` (или это он сам).
     InsidePartial,
+    /// Windows (S1 M1, решение владельца 2026-10-18): папка вне профиля пользователя
+    /// (`%USERPROFILE%`), права на неё могут быть шире, чем у профиля. Интерфейс предупреждает и
+    /// требует явного «других пользователей на этом ПК нет»; после этого `allow_shared_root =
+    /// true`. ACL не ставятся.
+    OutsideProfile,
     Io(io::ErrorKind),
 }
 
@@ -79,6 +85,7 @@ impl fmt::Display for RootError {
             Self::Shared => "receive folder is shared with other users",
             Self::PartialNotPrivate => "service folder of the receive folder is not private",
             Self::InsidePartial => "receive folder is inside a service folder",
+            Self::OutsideProfile => "receive folder is outside the user profile",
             Self::Io(_) => "receive folder i/o error",
         })
     }
@@ -156,6 +163,14 @@ impl ReceiveRoot {
         }) {
             return Err(RootError::InsidePartial);
         }
+        // S1 M1 (Windows): вне профиля пользователя только с явным согласием; до создания чего-либо
+        #[cfg(windows)]
+        if !cfg.allow_shared_root {
+            check_profile(
+                &root,
+                std::env::var_os("USERPROFILE").as_deref().map(Path::new),
+            )?;
+        }
         let partial = root.join(PARTIAL_NAME);
         ensure_private_dir(&partial)?;
         let journals = partial.join(JOURNAL_NAME);
@@ -221,4 +236,78 @@ fn check_private_unix(root: &Path, partial: &Path, journals: &Path) -> Result<()
         }
     }
     Ok(())
+}
+
+/// Windows (S1 M1): корень (уже канонический) должен лежать внутри профиля пользователя
+/// `profile` (значение `%USERPROFILE%`, канонизируется здесь). Профиль не задан, не абсолютный
+/// или не канонизируется: считается, что корень вне профиля (предупреждение безопаснее).
+/// Сравнение по компонентам пути без учёта регистра. Платформо-независима ради тестов.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn check_profile(root: &Path, profile: Option<&Path>) -> Result<(), RootError> {
+    let profile = profile
+        .filter(|p| p.is_absolute())
+        .and_then(|p| fs::canonicalize(p).ok())
+        .ok_or(RootError::OutsideProfile)?;
+    if is_inside(root, &profile) {
+        Ok(())
+    } else {
+        Err(RootError::OutsideProfile)
+    }
+}
+
+/// `path` совпадает с `base` или лежит внутри него (по компонентам, регистр не важен).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn is_inside(path: &Path, base: &Path) -> bool {
+    let key = |c: std::path::Component<'_>| c.as_os_str().to_string_lossy().to_lowercase();
+    let base: Vec<String> = base.components().map(key).collect();
+    let path: Vec<String> = path.components().map(key).collect();
+    !base.is_empty() && path.len() >= base.len() && path.iter().zip(&base).all(|(a, b)| a == b)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inside_means_component_prefix_ignoring_case() {
+        let base = Path::new("/users/alex");
+        assert!(is_inside(Path::new("/users/alex"), base));
+        assert!(is_inside(Path::new("/users/alex/docs/in"), base));
+        assert!(is_inside(Path::new("/USERS/Alex/Docs"), base));
+        // общий префикс строки без границы компонента не считается
+        assert!(!is_inside(Path::new("/users/alexander"), base));
+        assert!(!is_inside(Path::new("/users"), base));
+        assert!(!is_inside(Path::new("/data/alex"), base));
+        assert!(!is_inside(Path::new("/users/alex"), Path::new("")));
+    }
+
+    #[test]
+    fn profile_check_needs_a_real_absolute_profile() {
+        let dir = std::env::temp_dir();
+        let inner = dir.join("chervo-root-profile-check");
+        std::fs::create_dir_all(&inner).unwrap();
+        let root = fs::canonicalize(&inner).unwrap();
+        let profile = fs::canonicalize(&dir).unwrap();
+        assert_eq!(check_profile(&root, Some(&dir)), Ok(()));
+        assert_eq!(check_profile(&profile, Some(&dir)), Ok(()));
+        // корень вне «профиля»: родитель профиля
+        if let Some(parent) = profile.parent() {
+            assert_eq!(
+                check_profile(parent, Some(&dir)),
+                Err(RootError::OutsideProfile)
+            );
+        }
+        // профиль не задан / не абсолютный / не существует: предупреждение
+        assert_eq!(check_profile(&root, None), Err(RootError::OutsideProfile));
+        assert_eq!(
+            check_profile(&root, Some(Path::new("relative"))),
+            Err(RootError::OutsideProfile)
+        );
+        assert_eq!(
+            check_profile(&root, Some(&dir.join("chervo-no-such-profile-dir"))),
+            Err(RootError::OutsideProfile)
+        );
+        let _ = std::fs::remove_dir(&inner);
+    }
 }

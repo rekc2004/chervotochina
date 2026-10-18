@@ -23,6 +23,7 @@ fn all_connect_errors() -> Vec<ConnectError> {
     vec![
         Friends(FriendsError::Io),
         Friends(FriendsError::RolledBack),
+        Friends(FriendsError::StaleInstance),
         Token(TokenError::BadSignature),
         Invite(InviteError::Used),
         NoAddresses,

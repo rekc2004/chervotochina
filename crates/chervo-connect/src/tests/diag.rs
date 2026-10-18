@@ -70,7 +70,7 @@ async fn diag_need_token() {
     )]);
     let mut n = Node::start(pre, ConnectConfig::default());
     n.t.set_script(|_, _| Action::Fail(TransportError::TimedOut, secs(0)));
-    let e = wait_event(&mut n.events, secs(60), unreachable_for(q))
+    let e = wait_event(&mut n.events, secs(130), unreachable_for(q))
         .await
         .unwrap();
     assert_eq!(

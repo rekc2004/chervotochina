@@ -27,9 +27,17 @@ struct Entry {
     fails: u32,
     next: Instant,
     last_use: Instant,
+    /// Когда адрес в последний раз вошёл в набор (`take`). Сбросы и быстрое окно его не трогают.
+    last_take: Option<Instant>,
 }
 
+/// Запас к `dial_base` для адресов со слов друга: транспорт запускает адрес `i` набора через
+/// `i * connect_stagger` (до 8 адресов по 250 мс), и серия у адресата не должна сблизиться
+/// с прошлой из-за сдвига номера адреса в наборе.
+const STRICT_MARGIN: Duration = Duration::from_secs(2);
+
 pub(crate) struct Limiter {
+    strict_floor: Duration,
     base: Duration,
     cap: Duration,
     hint_base: Duration,
@@ -52,6 +60,7 @@ pub(crate) fn backoff(base: Duration, cap: Duration, fails: u32) -> Duration {
 impl Limiter {
     pub(crate) fn new(cfg: &ConnectConfig) -> Self {
         Self {
+            strict_floor: cfg.dial_base.saturating_add(STRICT_MARGIN),
             base: cfg.dial_base,
             cap: cfg.dial_cap,
             hint_base: cfg.hint_base,
@@ -74,12 +83,20 @@ impl Limiter {
     }
 
     /// Можно ли сейчас стучать на адрес: срок записи наступил и предел на IP не исчерпан.
-    pub(crate) fn allow(&self, addr: SocketAddr, _hint: bool, now: Instant) -> bool {
+    /// `strict` (адрес со слов друга): ещё и не раньше `dial_base` + запас после прошлого
+    /// набора этого адреса, что бы ни делали быстрое окно, `connect_now` и новые обновления.
+    pub(crate) fn allow(&self, addr: SocketAddr, strict: bool, now: Instant) -> bool {
         let addr = normalize(addr);
-        if let Some(e) = self.entries.get(&addr)
-            && e.next > now
-        {
-            return false;
+        if let Some(e) = self.entries.get(&addr) {
+            if e.next > now {
+                return false;
+            }
+            if strict
+                && e.last_take
+                    .is_some_and(|t| add_sat(t, self.strict_floor) > now)
+            {
+                return false;
+            }
         }
         let used = self.recent(&addr.ip(), now);
         u32::try_from(used).is_ok_and(|u| u < self.per_ip_dials)
@@ -99,13 +116,16 @@ impl Limiter {
             }
             log.push_back(now);
             self.touch(a, now);
+            if let Some(e) = self.entries.get_mut(&a) {
+                e.last_take = Some(now);
+            }
         }
         self.trim_ip_log(now);
     }
 
     /// `allow` и сразу `charge`: единственный путь адреса в набор номера.
-    pub(crate) fn take(&mut self, addr: SocketAddr, hint: bool, now: Instant) -> bool {
-        if !self.allow(addr, hint, now) {
+    pub(crate) fn take(&mut self, addr: SocketAddr, strict: bool, now: Instant) -> bool {
+        if !self.allow(addr, strict, now) {
             return false;
         }
         self.charge(&[addr], now);
@@ -123,6 +143,7 @@ impl Limiter {
                 fails: 0,
                 next: now,
                 last_use: now,
+                last_take: None,
             },
         );
         self.evict_entries();

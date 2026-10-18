@@ -67,6 +67,7 @@ pub use placement::{
     CompletedFile, GeneratedNames, PlaceError, PlaceMethod, Placed, Placement, place_no_clobber,
 };
 pub use policy::{AcceptPolicy, AskAlways, InboundReservation, OfferView, PolicyVerdict};
+#[cfg(any(test, feature = "fuzzing"))]
 #[doc(hidden)]
 pub use state::{RecvState, decode_names, decode_state, encode_state};
 pub use state::{StateError, encode_hashes, parse_hashes, state_dir_name};

@@ -696,7 +696,7 @@ impl Pre {
     pub fn new() -> Self {
         let dir = TestDir::new();
         let store = Arc::new(MemStore::default());
-        let book = FriendBook::open(&dir.file(), &*store).unwrap();
+        let book = FriendBook::open_unanchored(&dir.file(), &*store).unwrap();
         Self { dir, store, book }
     }
 

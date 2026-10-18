@@ -99,6 +99,7 @@ impl fmt::Debug for RecvState {
 impl RecvState {
     /// Прогресс файла сброшен: файл снова ждёт (манифест будет запрошен заново).
     /// `false`: такого файла нет или он не в процессе.
+    #[cfg(test)]
     pub fn clear_progress(&mut self, index: usize) -> bool {
         match self.files.get_mut(index) {
             Some(f) if matches!(f.status, FileStatus::InProgress(_)) => {

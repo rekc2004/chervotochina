@@ -215,7 +215,8 @@ impl Node {
         book: Option<FriendBook>,
         cfg: ConnectConfig,
     ) -> Node {
-        let book = book.unwrap_or_else(|| FriendBook::open(&dir.file(), &*store).unwrap());
+        let book =
+            book.unwrap_or_else(|| FriendBook::open_unanchored(&dir.file(), &*store).unwrap());
         let probe = Probe::new();
         let clock: Arc<dyn Clock> = Arc::new(SystemClock::new());
         let p: Arc<dyn RouteProbe> = probe.clone();
@@ -258,7 +259,7 @@ struct Pre {
 fn pre() -> Pre {
     let store = Arc::new(MemStore::default());
     let dir = TestDir::new();
-    let book = FriendBook::open(&dir.file(), &*store).unwrap();
+    let book = FriendBook::open_unanchored(&dir.file(), &*store).unwrap();
     Pre { store, dir, book }
 }
 
@@ -469,7 +470,7 @@ async fn engine_invite_declined_nothing_saved() {
         }
         // и на диске ничего нет
         assert!(
-            FriendBook::open(&a.dir.file(), &*a.store)
+            FriendBook::open_unanchored(&a.dir.file(), &*a.store)
                 .unwrap()
                 .friends()
                 .is_empty()

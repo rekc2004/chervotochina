@@ -21,3 +21,5 @@ Nothing left unreachable from this list (BRIEF/spec 17 decision 7, C04).
 The nightly pin is in `rust-toolchain.toml` and is not verified. `libfuzzer-sys = "0.4"` resolves on the first run
 (the conductor commits the resulting `fuzz/Cargo.lock`). Corpus (`fuzz/corpus/<target>/`, synthetic only, total <= 5 MiB) is
 committed after `cargo fuzz cmin`; `run17.sh` works from a mktemp copy and never writes into the repo.
+
+Stage 17 fix round 1 (S1 L6, M3): the entry points above exist only with the crate feature `fuzzing` (or in the crate's own unit tests); `fuzz/Cargo.toml` enables it for token, transfer, receive, upnp and transport-quinn, product builds never do. `knock_check` first asserts `fuzz_knock_ready()` (two distinct pair keys, one key in the table, positive control: a real knock of the other side admits) so a vacuous run is a crash. `libfuzzer-sys` is still unpinned (S1 L5): see the TODO in `Cargo.toml`.

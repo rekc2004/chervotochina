@@ -49,7 +49,7 @@ fn add_with_addr(book: &mut FriendBook, store: &MemStore, name: &str) -> Added {
 fn crash_after_retired_save_deletes_key_on_open() {
     let dir = TestDir::new();
     let store = FlakyDeleteStore::default();
-    let mut book = FriendBook::open(&dir.file(), &store).unwrap();
+    let mut book = FriendBook::open_unanchored(&dir.file(), &store).unwrap();
     let a = add_friend(&mut book, &store.inner, "А");
     assert!(store.inner.has(&a.pair));
     // запись `Retired` сохранена, удаление ключа падает: «сбой после шага 2»
@@ -69,13 +69,13 @@ fn crash_after_retired_save_deletes_key_on_open() {
     // «перезапуск»: запись `Retired` с ключом -> `open` удаляет ключ
     store.fail_delete.store(false, Ordering::SeqCst);
     drop(book);
-    let again = FriendBook::open(&dir.file(), &store).unwrap();
+    let again = FriendBook::open_unanchored(&dir.file(), &store).unwrap();
     assert!(!store.inner.has(&a.pair), "ключ не удалён при открытии");
     assert_eq!(again.get(&a.pair).unwrap().state, FriendState::Retired);
     assert_eq!(again.retired(), saved, "текст отзыва пережил перезапуск");
     // открытие повторно: идемпотентно
     drop(again);
-    let third = FriendBook::open(&dir.file(), &store).unwrap();
+    let third = FriendBook::open_unanchored(&dir.file(), &store).unwrap();
     assert_eq!(third.retired(), saved);
 }
 
@@ -83,7 +83,7 @@ fn crash_after_retired_save_deletes_key_on_open() {
 fn retry_after_failed_key_delete_returns_same_text() {
     let dir = TestDir::new();
     let store = FlakyDeleteStore::default();
-    let mut book = FriendBook::open(&dir.file(), &store).unwrap();
+    let mut book = FriendBook::open_unanchored(&dir.file(), &store).unwrap();
     let a = add_friend(&mut book, &store.inner, "А");
     store.fail_delete.store(true, Ordering::SeqCst);
     assert!(book.rekey(&store, &a.pair, 66).is_err());
@@ -101,7 +101,7 @@ fn retired_not_in_kx_peers_nor_dialed() {
     let (dir, store, mut book) = {
         let dir = TestDir::new();
         let store = MemStore::default();
-        let book = FriendBook::open(&dir.file(), &store).unwrap();
+        let book = FriendBook::open_unanchored(&dir.file(), &store).unwrap();
         (dir, store, book)
     };
     let keep = add_with_addr(&mut book, &store, "Остаётся");
@@ -142,7 +142,7 @@ fn retired_not_in_kx_peers_nor_dialed() {
     assert_eq!(book.apply_revocation(&store, &text).unwrap(), None);
     assert_eq!(book.get(&gone.pair).unwrap().state, FriendState::Retired);
     // то же после перезапуска
-    let again = FriendBook::open(&dir.file(), &store).unwrap();
+    let again = FriendBook::open_unanchored(&dir.file(), &store).unwrap();
     assert_eq!(again.kx_peers(&store).unwrap().0.len(), 1);
     assert!(again.usable_addrs(&gone.pair, now).is_empty());
     assert_eq!(again.usable_addrs(&keep.pair, now).len(), 1);
@@ -152,7 +152,7 @@ fn retired_not_in_kx_peers_nor_dialed() {
 fn forget_retired_clears() {
     let dir = TestDir::new();
     let store = MemStore::default();
-    let mut book = FriendBook::open(&dir.file(), &store).unwrap();
+    let mut book = FriendBook::open_unanchored(&dir.file(), &store).unwrap();
     let a = add_friend(&mut book, &store, "А");
     let b = add_friend(&mut book, &store, "Б");
     // только `Retired`: активный друг и неизвестная пара отклоняются
@@ -174,7 +174,7 @@ fn forget_retired_clears() {
         "забыть отзыв это не изменение безопасности"
     );
     assert!(store.has(&b.pair));
-    let again = FriendBook::open(&dir.file(), &store).unwrap();
+    let again = FriendBook::open_unanchored(&dir.file(), &store).unwrap();
     assert!(again.retired().is_empty() && again.friends().len() == 1);
     assert_eq!(
         book.forget_retired(&store, &a.pair).err(),
@@ -186,7 +186,7 @@ fn forget_retired_clears() {
 fn forget_retired_deletes_leftover_key() {
     let dir = TestDir::new();
     let store = FlakyDeleteStore::default();
-    let mut book = FriendBook::open(&dir.file(), &store).unwrap();
+    let mut book = FriendBook::open_unanchored(&dir.file(), &store).unwrap();
     let a = add_friend(&mut book, &store.inner, "А");
     store.fail_delete.store(true, Ordering::SeqCst);
     assert!(book.remove(&store, &a.pair, 1).is_err());

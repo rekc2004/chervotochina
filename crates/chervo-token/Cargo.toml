@@ -13,5 +13,13 @@ blake2.workspace = true
 getrandom.workspace = true
 zeroize.workspace = true
 
+# Свои тесты и примеры используют точки входа за свойством `fuzzing` (S1 L6): в продуктовой сборке их нет.
+[dev-dependencies]
+chervo-token = { path = ".", features = ["fuzzing"] }
+
+[features]
+# Тестовые и фаззинг-точки входа, не для продукта (S1 L6); fuzz/Cargo.toml включает его.
+fuzzing = []
+
 [lints]
 workspace = true

@@ -44,6 +44,7 @@ fn root_creates_service_dirs_and_hides_paths() {
         RootError::Shared,
         RootError::PartialNotPrivate,
         RootError::InsidePartial,
+        RootError::OutsideProfile,
         RootError::Io(std::io::ErrorKind::NotFound),
     ] {
         let s = format!("{e} {e:?}");
@@ -203,4 +204,29 @@ fn partial_not_private_refused() {
     cfg.allow_shared_root = false;
     fs::set_permissions(&partial, fs::Permissions::from_mode(0o700)).expect("chmod");
     ReceiveRoot::open(&cfg).expect("private is fine");
+}
+
+/// Windows (S1 M1): корень вне профиля пользователя отвергается, пока интерфейс не получил
+/// явного «других пользователей на этом ПК нет» (`allow_shared_root`); до отказа ничего не
+/// создаётся. Внутри профиля (временный каталог тестов) папка принимается без вопросов.
+/// С согласием в системной папке не открываем: там пришлось бы создавать каталоги.
+#[cfg(windows)]
+#[test]
+fn root_outside_profile_needs_explicit_confirmation() {
+    let windir = PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot"));
+    assert!(windir.is_absolute() && windir.is_dir());
+    let cfg = ReceiveConfig::new(windir.clone());
+    assert!(!cfg.allow_shared_root);
+    assert_eq!(
+        ReceiveRoot::open(&cfg).unwrap_err(),
+        RootError::OutsideProfile
+    );
+    assert!(
+        !windir.join(".chervo-partial").exists(),
+        "ничего не создано"
+    );
+    // внутри профиля без согласия
+    let tmp = Tmp::new("rootprof");
+    let (cfg_in_profile, _dir) = cfg_in(&tmp, "recv");
+    ReceiveRoot::open(&cfg_in_profile).expect("inside the profile");
 }

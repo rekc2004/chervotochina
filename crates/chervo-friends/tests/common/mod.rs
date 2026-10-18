@@ -187,7 +187,7 @@ impl SecretStore for ProbeStore {
     }
 
     fn write(&self, pair: &PairId, blob: &[u8]) -> Result<(), IdentityError> {
-        let n = FriendBook::open(&self.path, &self.inner)
+        let n = FriendBook::open_unanchored(&self.path, &self.inner)
             .map(|b| b.pending().len())
             .unwrap_or(usize::MAX);
         self.pending_seen.lock().unwrap().push(n);

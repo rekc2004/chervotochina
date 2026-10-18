@@ -276,7 +276,7 @@ fn start_node(
         QuinnTransport::bind(SocketAddr::from(([127, 0, 0, 1], 0)), qcfg, filter).unwrap(),
     );
     let addr = SocketAddr::from(([127, 0, 0, 1], t.local_addrs()[0].port()));
-    let book = FriendBook::open(&dir.path().join("friends.chfl"), &*store).unwrap();
+    let book = FriendBook::open_unanchored(&dir.path().join("friends.chfl"), &*store).unwrap();
     let clock: Arc<dyn Clock> = Arc::new(SystemClock::new());
     let probe: Arc<dyn RouteProbe> = Arc::new(Probe);
     let (engine, events) = Engine::start(

@@ -33,7 +33,7 @@ fn reopen(dir: &TestDir, store: &MemStore, ep: &Arc<MemEpoch>) -> Result<FriendB
 fn epoch_grows_only_on_security_changes() {
     let (dir, store, ep, mut book) = anchored();
     assert_eq!((book.epoch(), ep.get()), (0, None));
-    // незавершённая пара, имя и права не относятся к безопасности
+    // незавершённая пара и имя не относятся к безопасности (права: S1 L1, тест ниже)
     let (pair, key) = book
         .begin_pair(&store, PendingRole::Inviter, u64::MAX)
         .unwrap();
@@ -45,8 +45,6 @@ fn epoch_grows_only_on_security_changes() {
         .unwrap();
     assert_eq!((book.epoch(), ep.get()), (1, Some(1)), "новый друг");
     book.rename(&store, &pair, "Аня").unwrap();
-    book.set_permission(&store, &pair, chervo_friends::Permission::Ask)
-        .unwrap();
     assert_eq!((book.epoch(), ep.get()), (1, Some(1)));
     book.block(&store, &pair).unwrap();
     assert_eq!((book.epoch(), ep.get()), (2, Some(2)));
@@ -90,7 +88,7 @@ fn rollback_detected() {
     assert_eq!(std::fs::read(dir.file()).unwrap(), old);
     assert_eq!(ep.get(), Some(2));
     // книга без якоря откат не видит (так и задумано: защита только с якорем)
-    let plain = FriendBook::open(&dir.file(), &store).unwrap();
+    let plain = FriendBook::open_unanchored(&dir.file(), &store).unwrap();
     assert!(plain.is_active(&a.pair));
 }
 
@@ -263,7 +261,7 @@ fn addr_update_does_not_bump_epoch() {
     let (dir_a, store_a, ep, mut a) = anchored();
     let dir_b = TestDir::new();
     let store_b = MemStore::default();
-    let mut b = FriendBook::open(&dir_b.file(), &store_b).unwrap();
+    let mut b = FriendBook::open_unanchored(&dir_b.file(), &store_b).unwrap();
     let (pa, ka) = a
         .begin_pair(&store_a, PendingRole::Inviter, u64::MAX)
         .unwrap();
@@ -307,4 +305,60 @@ fn addr_update_does_not_bump_epoch() {
     // только устаревшие адреса, отказ в соединении, не обход блокировки)
     std::fs::write(dir_a.file(), &before).unwrap();
     assert!(reopen(&dir_a, &store_a, &ep).is_ok());
+}
+
+#[test]
+fn permission_changes_bump_epoch_and_restored_old_file_is_detected() {
+    let (dir, store, ep, mut book) = anchored();
+    let a = add_friend(&mut book, &store, "А");
+    assert_eq!((book.epoch(), ep.get()), (1, Some(1)));
+    let old = std::fs::read(dir.file()).unwrap(); // копия: разрешение Ask, счётчик 1
+    book.enable_auto_accept(
+        &store,
+        &a.pair,
+        chervo_friends::TrustConfirmation::user_confirmed_trust(),
+    )
+    .unwrap();
+    assert_eq!((book.epoch(), ep.get()), (2, Some(2)), "автоприём");
+    book.set_permission(&store, &a.pair, chervo_friends::Permission::Ask)
+        .unwrap();
+    assert_eq!((book.epoch(), ep.get()), (3, Some(3)), "смена разрешения");
+    book.enable_auto_accept(
+        &store,
+        &a.pair,
+        chervo_friends::TrustConfirmation::user_confirmed_trust(),
+    )
+    .unwrap();
+    // восстановили копию, снятую до включения автоприёма: откат виден
+    std::fs::write(dir.file(), &old).unwrap();
+    assert_eq!(
+        reopen(&dir, &store, &ep).err(),
+        Some(FriendsError::RolledBack)
+    );
+}
+
+#[test]
+fn plain_commit_refuses_when_store_is_newer_than_file() {
+    // второй экземпляр с устаревшими данными: запись в хранилище ОС уже новее
+    let (dir, store, ep, mut book) = anchored();
+    let a = add_friend(&mut book, &store, "А");
+    let before = std::fs::read(dir.file()).unwrap();
+    ep.set(Some(book.epoch() + 1));
+    assert_eq!(
+        book.rename(&store, &a.pair, "Новое").err(),
+        Some(FriendsError::StaleInstance)
+    );
+    assert_eq!(book.get(&a.pair).unwrap().name, "А", "память не изменена");
+    assert_eq!(std::fs::read(dir.file()).unwrap(), before, "файл не тронут");
+    assert_eq!(ep.get(), Some(book.epoch() + 1), "якорь не тронут");
+    // книга без устаревания работает как прежде
+    ep.set(Some(book.epoch()));
+    book.rename(&store, &a.pair, "Новое").unwrap();
+    assert_eq!(book.get(&a.pair).unwrap().name, "Новое");
+    // без якоря (тесты и примеры) проверки нет
+    let dir2 = TestDir::new();
+    let store2 = MemStore::default();
+    let mut plain = FriendBook::open_unanchored(&dir2.file(), &store2).unwrap();
+    let b = add_friend(&mut plain, &store2, "Б");
+    plain.rename(&store2, &b.pair, "Б2").unwrap();
 }

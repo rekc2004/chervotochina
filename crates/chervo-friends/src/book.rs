@@ -28,9 +28,11 @@
 //!
 //! `open_anchored` сверяет счётчик изменений безопасности файла (`BookData::epoch`) с записью в
 //! хранилище ОС: файл старше (`RolledBack`) принимается только явным `accept_older`. Счётчик
-//! растёт при блокировке, разблокировке, удалении, смене ключа, принятом отзыве и новом друге;
-//! порядок записи: файл, затем хранилище. Обновления адреса счётчик не трогают. `open` без
-//! якоря защиты от отката не даёт.
+//! растёт при блокировке, разблокировке, удалении, смене ключа, принятом отзыве, новом друге и
+//! смене разрешения (в том числе автоприёма); порядок записи: файл, затем хранилище.
+//! Обновления адреса счётчик не трогают. Любое сохранение с якорем отказывает
+//! (`StaleInstance`), если запись в хранилище новее файла в памяти (второй экземпляр).
+//! `open_unanchored` (только тесты и примеры) защиты от отката не даёт.
 //!
 //! После любого изменения книги (блокировка, удаление, отзыв, смена ключа) вызывающий делает
 //! `set_peers(kx_peers + гостевые пары)`: живые соединения исключённых пар рвутся.
@@ -192,19 +194,25 @@ fn read_file(path: &Path) -> Result<Option<Zeroizing<Vec<u8>>>, FriendsError> {
 }
 
 impl FriendBook {
+    /// Без якоря: защиты от отката файла нет. Только для тестов и примеров (tests/examples
+    /// only); продукт открывает книгу через `open_anchored` (охрана: тест
+    /// `product_src_never_calls_unanchored` в `chervo-core`).
+    ///
     /// Файла нет: пустая книга (ключ читается, если он есть). Файл есть, ключа нет:
     /// `ListKeyMissing`, файл не трогается. Ключи пар друзей `Retired` удаляются (идемпотентно).
-    /// Без якоря: защиты от отката файла нет (см. `open_anchored`).
-    pub fn open<S: ListKeyStore + SecretStore + ?Sized>(
+    #[doc(hidden)]
+    pub fn open_unanchored<S: ListKeyStore + SecretStore + ?Sized>(
         path: &Path,
         store: &S,
     ) -> Result<Self, FriendsError> {
         Self::open_inner(path, store, None, false)
     }
 
-    /// Как `open`, плюс сверка счётчика изменений файла с `anchor`: файл старше записи в
-    /// хранилище (или записи нет, а в файле счётчик больше нуля): `RolledBack`; файл новее:
-    /// запись молча исправляется (сбой между двумя записями).
+    /// Открыть книгу (путь продукта): файла нет: пустая книга (ключ читается, если он есть);
+    /// файл есть, ключа нет: `ListKeyMissing`, файл не трогается; ключи пар друзей `Retired`
+    /// удаляются (идемпотентно). Плюс сверка счётчика изменений файла с `anchor`: файл старше
+    /// записи в хранилище (или записи нет, а в файле счётчик больше нуля): `RolledBack`; файл
+    /// новее: запись молча исправляется (сбой между двумя записями).
     pub fn open_anchored<S: ListKeyStore + SecretStore + ?Sized>(
         path: &Path,
         store: &S,
@@ -269,8 +277,12 @@ impl FriendBook {
         })
     }
 
+    /// Без якоря; только для тестов и примеров (tests/examples only), продукт использует
+    /// `start_over_anchored`.
+    ///
     /// Явно: переименовать нечитаемый файл в `"<path>.unreadable-<now>"` и начать пустую книгу.
-    pub fn start_over<K: ListKeyStore + ?Sized>(
+    #[doc(hidden)]
+    pub fn start_over_unanchored<K: ListKeyStore + ?Sized>(
         path: &Path,
         keys: &K,
         now_unix: u64,
@@ -278,7 +290,8 @@ impl FriendBook {
         Self::start_over_inner(path, keys, None, now_unix)
     }
 
-    /// Как `start_over`, с якорем: счётчик новой книги равен записи в хранилище ОС.
+    /// Явно: переименовать нечитаемый файл в `"<path>.unreadable-<now>"` и начать пустую книгу
+    /// с якорем: счётчик новой книги равен записи в хранилище ОС.
     pub fn start_over_anchored<K: ListKeyStore + ?Sized>(
         path: &Path,
         keys: &K,
@@ -440,11 +453,20 @@ impl FriendBook {
     }
 
     /// Применить изменение и сохранить; при любой ошибке состояние в памяти откатывается.
+    /// С якорем: запись в хранилище ОС новее нашего файла (другой экземпляр уже изменил
+    /// безопасность): `StaleInstance`, ничего не пишется, книгу нужно открыть заново.
     fn commit<K: ListKeyStore + ?Sized, T>(
         &mut self,
         keys: &K,
         f: impl FnOnce(&mut BookData) -> Result<T, FriendsError>,
     ) -> Result<T, FriendsError> {
+        // второй экземпляр с устаревшими данными не затирает изменение безопасности (S1 L2)
+        if let Some(a) = &self.anchor
+            && let Some(stored) = a.read_epoch().map_err(map_identity)?
+            && stored > self.data.epoch
+        {
+            return Err(FriendsError::StaleInstance);
+        }
         let backup = self.data.clone();
         let out = match f(&mut self.data) {
             Ok(v) => v,
@@ -695,7 +717,7 @@ impl FriendBook {
         {
             return Err(FriendsError::InvalidLimits);
         }
-        self.commit(keys, |d| {
+        self.commit_security(keys, |d| {
             let fr = d
                 .friends
                 .iter_mut()

@@ -53,16 +53,21 @@ impl std::fmt::Debug for ReceivePolicy {
 
 impl ReceivePolicy {
     pub fn new(root: ReceiveRoot, cfg: &ReceiveConfig) -> Self {
-        Self::with_space_probe(root, cfg, Arc::new(disk_space))
+        Self::build(root, cfg, Arc::new(disk_space))
     }
 
-    /// Свой способ узнать свободное место (тесты).
+    /// Свой способ узнать свободное место (тесты и фаззинг; в продукте этой функции нет).
+    #[cfg(any(test, feature = "fuzzing"))]
     #[doc(hidden)]
     pub fn with_space_probe(
         root: ReceiveRoot,
         cfg: &ReceiveConfig,
         probe: Arc<SpaceProbe>,
     ) -> Self {
+        Self::build(root, cfg, probe)
+    }
+
+    fn build(root: ReceiveRoot, cfg: &ReceiveConfig, probe: Arc<SpaceProbe>) -> Self {
         let limits = if cfg.limits.validate().is_ok() {
             cfg.limits
         } else {

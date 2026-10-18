@@ -306,7 +306,7 @@ async fn main() -> ExitCode {
         eprintln!("node15: key dir");
         return ExitCode::from(2);
     };
-    let Ok(book) = FriendBook::open(&args.book_dir.join("friends.chfl"), &*store) else {
+    let Ok(book) = FriendBook::open_unanchored(&args.book_dir.join("friends.chfl"), &*store) else {
         eprintln!("node15: book");
         return ExitCode::from(2);
     };

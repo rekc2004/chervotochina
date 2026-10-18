@@ -11,15 +11,16 @@ publish = false
 cargo-fuzz = true
 
 [dependencies]
-libfuzzer-sys = "0.4"
-chervo-token = { path = "../crates/chervo-token" }
+# S1 L5: exact version (the one resolved by `cargo fuzz build` on the owner's Linux box, 2026-10-18).
+libfuzzer-sys = "=0.4.13"
+chervo-token = { path = "../crates/chervo-token", features = ["fuzzing"] }
 chervo-timesync = { path = "../crates/chervo-timesync" }
-chervo-transfer = { path = "../crates/chervo-transfer" }
-chervo-receive = { path = "../crates/chervo-receive" }
+chervo-transfer = { path = "../crates/chervo-transfer", features = ["fuzzing"] }
+chervo-receive = { path = "../crates/chervo-receive", features = ["fuzzing"] }
 # Stage 17 (B6): newly reachable entry points (doc(hidden) pub, no behaviour change).
 chervo-identity = { path = "../crates/chervo-identity" }
-chervo-upnp = { path = "../crates/chervo-upnp" }
-chervo-transport-quinn = { path = "../crates/chervo-transport-quinn" }
+chervo-upnp = { path = "../crates/chervo-upnp", features = ["fuzzing"] }
+chervo-transport-quinn = { path = "../crates/chervo-transport-quinn", features = ["fuzzing"] }
 
 [workspace]
 members = ["."]

@@ -17,7 +17,7 @@ use common::*;
 fn fresh() -> (TestDir, MemStore, FriendBook) {
     let dir = TestDir::new();
     let store = MemStore::default();
-    let book = FriendBook::open(&dir.file(), &store).unwrap();
+    let book = FriendBook::open_unanchored(&dir.file(), &store).unwrap();
     (dir, store, book)
 }
 
@@ -38,7 +38,7 @@ fn list_key_created_on_first_save_only() {
     assert_eq!(key.len(), 32);
     assert!(dir.file().exists());
     // повторное открытие и ещё одна запись ключ не меняют
-    let mut again = FriendBook::open(&dir.file(), &store).unwrap();
+    let mut again = FriendBook::open_unanchored(&dir.file(), &store).unwrap();
     assert_eq!(again.pending().len(), 1);
     again.begin_pair(&store, PendingRole::Invitee, 200).unwrap();
     assert_eq!(store.list_key().unwrap(), key);
@@ -51,7 +51,7 @@ fn file_without_key_is_error_and_untouched() {
     let before = std::fs::read(dir.file()).unwrap();
     let empty = MemStore::default();
     assert_eq!(
-        FriendBook::open(&dir.file(), &empty).err(),
+        FriendBook::open_unanchored(&dir.file(), &empty).err(),
         Some(FriendsError::ListKeyMissing)
     );
     assert_eq!(std::fs::read(dir.file()).unwrap(), before);
@@ -59,7 +59,7 @@ fn file_without_key_is_error_and_untouched() {
     // другой ключ: файл нечитаем, но не тронут
     chervo_identity::ListKeyStore::write_list_key(&empty, &[7u8; 32]).unwrap();
     assert_eq!(
-        FriendBook::open(&dir.file(), &empty).err(),
+        FriendBook::open_unanchored(&dir.file(), &empty).err(),
         Some(FriendsError::Corrupt)
     );
     assert_eq!(std::fs::read(dir.file()).unwrap(), before);
@@ -71,7 +71,7 @@ fn start_over_renames() {
     add_friend(&mut book, &store, "Аня");
     let before = std::fs::read(dir.file()).unwrap();
     let empty = MemStore::default();
-    let mut fresh_book = FriendBook::start_over(&dir.file(), &empty, 77).unwrap();
+    let mut fresh_book = FriendBook::start_over_unanchored(&dir.file(), &empty, 77).unwrap();
     assert!(fresh_book.friends().is_empty());
     assert!(!dir.file().exists());
     let moved = dir.0.join("friends.chfl.unreadable-77");
@@ -88,7 +88,7 @@ fn start_over_renames() {
 fn begin_pair_saves_pending_before_create() {
     let dir = TestDir::new();
     let store = ProbeStore::new(dir.file());
-    let mut book = FriendBook::open(&dir.file(), &store).unwrap();
+    let mut book = FriendBook::open_unanchored(&dir.file(), &store).unwrap();
     let (pair, _k) = book.begin_pair(&store, PendingRole::Inviter, 10).unwrap();
     // в момент записи ключа пары запись pending уже была в файле
     assert_eq!(*store.pending_seen.lock().unwrap(), vec![1]);
@@ -99,7 +99,7 @@ fn begin_pair_saves_pending_before_create() {
 fn begin_pair_create_error_cleans_up() {
     let dir = TestDir::new();
     let store = FailingCreateStore::default();
-    let mut book = FriendBook::open(&dir.file(), &store).unwrap();
+    let mut book = FriendBook::open_unanchored(&dir.file(), &store).unwrap();
     let r = book.begin_pair(&store, PendingRole::Inviter, 10);
     assert_eq!(r.err(), Some(FriendsError::KeyStorageUnavailable));
     assert!(book.pending().is_empty());
@@ -111,7 +111,7 @@ fn begin_pair_create_error_cleans_up() {
             >= 1,
         "ключ не удалялся"
     );
-    let again = FriendBook::open(&dir.file(), &store).unwrap();
+    let again = FriendBook::open_unanchored(&dir.file(), &store).unwrap();
     assert!(again.pending().is_empty());
 }
 
@@ -124,7 +124,7 @@ fn expire_deletes_key_and_pending() {
     assert_eq!(book.expire(&store, 100).unwrap(), 1);
     assert!(!store.has(&p1) && store.has(&p2));
     assert_eq!(book.pending().len(), 1);
-    let again = FriendBook::open(&dir.file(), &store).unwrap();
+    let again = FriendBook::open_unanchored(&dir.file(), &store).unwrap();
     assert_eq!(again.pending().len(), 1);
 }
 
@@ -136,7 +136,7 @@ fn drop_all_pending_on_start() {
         .begin_pair(&store, PendingRole::Invitee, 1 << 40)
         .unwrap();
     let friend = add_friend(&mut book, &store, "Аня");
-    let mut reopened = FriendBook::open(&dir.file(), &store).unwrap();
+    let mut reopened = FriendBook::open_unanchored(&dir.file(), &store).unwrap();
     assert_eq!(reopened.drop_all_pending(&store).unwrap(), 2);
     assert!(!store.has(&p1) && !store.has(&p2));
     assert!(reopened.pending().is_empty());
@@ -155,7 +155,7 @@ fn finish_pair_creates_active_ask() {
     assert_eq!(f.last_addr_seq, 0);
     assert_eq!(f.added_at_unix, 1234);
     assert_eq!(f.friend_ed, a.remote.ed);
-    let again = FriendBook::open(&dir.file(), &store).unwrap();
+    let again = FriendBook::open_unanchored(&dir.file(), &store).unwrap();
     assert_eq!(again.get(&a.pair).unwrap().name, "Аня");
 }
 
@@ -221,7 +221,7 @@ fn locked_and_unavailable_same_error() {
     let dir = TestDir::new();
     for st in [locked_store(), unavailable_store()] {
         assert_eq!(
-            FriendBook::open(&dir.file(), &st).err(),
+            FriendBook::open_unanchored(&dir.file(), &st).err(),
             Some(FriendsError::KeyStorageUnavailable)
         );
     }
@@ -321,7 +321,7 @@ fn autoaccept_requires_trust_confirmation() {
         );
     }
     assert_eq!(book.get(&a.pair).unwrap().permission, Permission::Ask);
-    let again = FriendBook::open(&dir.file(), &store).unwrap();
+    let again = FriendBook::open_unanchored(&dir.file(), &store).unwrap();
     assert_eq!(again.get(&a.pair).unwrap().permission, Permission::Ask);
 
     // с подтверждением включается и переживает перезапуск
@@ -331,7 +331,7 @@ fn autoaccept_requires_trust_confirmation() {
         book.get(&a.pair).unwrap().permission,
         Permission::AutoAccept(_)
     ));
-    let again = FriendBook::open(&dir.file(), &store).unwrap();
+    let again = FriendBook::open_unanchored(&dir.file(), &store).unwrap();
     assert_eq!(
         again.get(&a.pair).unwrap().permission,
         book.get(&a.pair).unwrap().permission
@@ -371,7 +371,7 @@ fn block_unblock() {
         Some(FriendsError::UnknownPair)
     );
     assert!(store.has(&a.pair), "блокировка ключ не удаляет");
-    let again = FriendBook::open(&dir.file(), &store).unwrap();
+    let again = FriendBook::open_unanchored(&dir.file(), &store).unwrap();
     assert_eq!(again.get(&a.pair).unwrap().state, FriendState::Blocked);
     book.unblock(&store, &a.pair).unwrap();
     assert_eq!(book.get(&a.pair).unwrap().state, FriendState::Active);
@@ -404,12 +404,12 @@ fn remove_returns_revocation_and_deletes_key() {
     // запись `Retired` с текстом остаётся до `forget_retired`
     assert_eq!(book.get(&a.pair).unwrap().state, FriendState::Retired);
     assert_eq!(book.retired(), vec![(a.pair, text.clone())]);
-    let reopened = FriendBook::open(&dir.file(), &store).unwrap();
+    let reopened = FriendBook::open_unanchored(&dir.file(), &store).unwrap();
     assert_eq!(reopened.retired(), vec![(a.pair, text.clone())]);
     book.forget_retired(&store, &a.pair).unwrap();
     assert!(book.friends().is_empty());
     assert!(
-        FriendBook::open(&dir.file(), &store)
+        FriendBook::open_unanchored(&dir.file(), &store)
             .unwrap()
             .friends()
             .is_empty()
@@ -469,7 +469,7 @@ fn apply_revocation_marks_and_deletes_key() {
     assert!(!store.has(&a.pair), "наш ключ пары остался");
     // повтор ничего не делает
     assert_eq!(book.apply_revocation(&store, &text).unwrap(), None);
-    let again = FriendBook::open(&dir.file(), &store).unwrap();
+    let again = FriendBook::open_unanchored(&dir.file(), &store).unwrap();
     assert_eq!(
         again.get(&a.pair).unwrap().state,
         FriendState::RevokedByPeer
@@ -528,7 +528,7 @@ fn save_overwrites_existing() {
     let (dir, store, mut book) = fresh();
     for i in 0..5 {
         add_friend(&mut book, &store, &format!("Друг {i}"));
-        let again = FriendBook::open(&dir.file(), &store).unwrap();
+        let again = FriendBook::open_unanchored(&dir.file(), &store).unwrap();
         assert_eq!(again.friends().len(), i + 1);
     }
     assert!(!dir.0.join("friends.chfl.tmp").exists(), "остался .tmp");
@@ -698,7 +698,7 @@ fn save_uses_0600_and_does_not_follow_tmp_symlink() {
         ".tmp остался после rename"
     );
     assert_eq!(
-        FriendBook::open(&dir.file(), &store)
+        FriendBook::open_unanchored(&dir.file(), &store)
             .unwrap()
             .friends()
             .len(),
@@ -749,7 +749,7 @@ struct Side {
 fn side() -> Side {
     let dir = TestDir::new();
     let store = MemStore::default();
-    let book = FriendBook::open(&dir.file(), &store).unwrap();
+    let book = FriendBook::open_unanchored(&dir.file(), &store).unwrap();
     Side { dir, store, book }
 }
 
@@ -817,7 +817,7 @@ fn rewrite(s: &mut Side, edit: impl FnOnce(&mut BookData)) {
     edit(&mut data);
     let key: [u8; 32] = s.store.list_key().unwrap().try_into().unwrap();
     std::fs::write(s.dir.file(), vault::seal(&key, &data).unwrap()).unwrap();
-    s.book = FriendBook::open(&s.dir.file(), &s.store).unwrap();
+    s.book = FriendBook::open_unanchored(&s.dir.file(), &s.store).unwrap();
 }
 
 #[test]
@@ -837,7 +837,7 @@ fn issue_persists_seq_before_returning() {
     let tok = a.book.issue_addr_update(&a.store, &pa, &set, NOW).unwrap();
     assert_eq!(tok.seq(), NOW * 1000);
     assert_eq!(seq_out(&a, &pa), tok.seq());
-    let reopened = FriendBook::open(&a.dir.file(), &a.store).unwrap();
+    let reopened = FriendBook::open_unanchored(&a.dir.file(), &a.store).unwrap();
     assert_eq!(reopened.get(&pa).unwrap().addr_seq_out, tok.seq());
 }
 
@@ -851,7 +851,7 @@ fn issue_seq_strictly_increasing_across_reopen() {
         assert!(tok.seq() > last, "раунд {round}");
         last = tok.seq();
         // то же время, перезапуск: номер всё равно растёт на единицу
-        a.book = FriendBook::open(&a.dir.file(), &a.store).unwrap();
+        a.book = FriendBook::open_unanchored(&a.dir.file(), &a.store).unwrap();
         assert_eq!(seq_out(&a, &pa), last);
     }
     assert_eq!(last, NOW * 1000 + 3);
@@ -872,7 +872,7 @@ fn issue_seq_survives_file_rollback() {
     let t2 = a.book.issue_addr_update(&a.store, &pa, &set, NOW).unwrap();
     // файл откатили к копии: счётчик снова 0
     std::fs::write(a.dir.file(), &backup).unwrap();
-    a.book = FriendBook::open(&a.dir.file(), &a.store).unwrap();
+    a.book = FriendBook::open_unanchored(&a.dir.file(), &a.store).unwrap();
     assert_eq!(seq_out(&a, &pa), 0);
     let t3 = a
         .book
@@ -949,7 +949,7 @@ fn apply_text_roundtrip() {
                 && k.last_seen_unix == NOW + 5)
     );
     // на диске
-    let reopened = FriendBook::open(&b.dir.file(), &b.store).unwrap();
+    let reopened = FriendBook::open_unanchored(&b.dir.file(), &b.store).unwrap();
     assert_eq!(reopened.get(&pb).unwrap().last_addr_seq, tok.seq());
     assert_eq!(reopened.usable_addrs(&pb, NOW + 6), set.socket_addrs());
     // постоянный глобальный адрес друга: найдёмся и без своего
@@ -1450,7 +1450,7 @@ fn note_contact_persists_only_on_change() {
     // обновление по сроку: пишет
     let later = NOW + chervo_addr::CONTACT_REFRESH_SECS;
     b.book.note_contact(&b.store, &pb, c1, later).unwrap();
-    let reopened = FriendBook::open(&b.dir.file(), &b.store).unwrap();
+    let reopened = FriendBook::open_unanchored(&b.dir.file(), &b.store).unwrap();
     assert_eq!(
         reopened.get(&pb).unwrap().known_addrs[0].last_seen_unix,
         later

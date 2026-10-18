@@ -215,7 +215,8 @@ fn start_side(
     dest: Arc<TestDir>,
     cfg: TransferConfig,
 ) -> Side {
-    let book = book.unwrap_or_else(|| FriendBook::open(&bookdir.file(), &*store).unwrap());
+    let book =
+        book.unwrap_or_else(|| FriendBook::open_unanchored(&bookdir.file(), &*store).unwrap());
     let clock: Arc<dyn Clock> = Arc::new(SystemClock::new());
     let probe: Arc<dyn RouteProbe> = Arc::new(Probe);
     let (engine, _events) = Engine::start(
@@ -306,8 +307,8 @@ fn tcfg(partial: &Path) -> TransferConfig {
 async fn duo(fx: impl FnOnce(&mut TransferConfig), fy: impl FnOnce(&mut TransferConfig)) -> Duo {
     let (sx, sy) = (Arc::new(MemStore::default()), Arc::new(MemStore::default()));
     let (dx, dy) = (TestDir::new(), TestDir::new());
-    let mut bx_book = FriendBook::open(&dx.file(), &*sx).unwrap();
-    let mut by_book = FriendBook::open(&dy.file(), &*sy).unwrap();
+    let mut bx_book = FriendBook::open_unanchored(&dx.file(), &*sx).unwrap();
+    let mut by_book = FriendBook::open_unanchored(&dy.file(), &*sy).unwrap();
     let (bx, by) = (bind(0), bind(0));
     let (px, kx) = bx_book
         .begin_pair(&*sx, PendingRole::Inviter, u64::MAX)
