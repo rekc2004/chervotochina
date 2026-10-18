@@ -14,6 +14,7 @@ mod kit;
 mod knock;
 mod misc;
 mod peers;
+mod preauth;
 mod race;
 mod tlsx;
 mod windows;

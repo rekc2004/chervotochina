@@ -28,6 +28,9 @@ fn flood_cfg(rate: u32, burst: u32, deadline: Duration) -> QuinnConfig {
         kk_budget_per_sec: rate,
         kk_budget_burst: burst,
         max_preauth: 128,
+        // предмет этих тестов: общие ворота KK; десятки незнакомцев идут с одного адреса
+        // (предел на ключ проверяют модульные тесты `preauth`)
+        max_preauth_per_key: usize::MAX,
         per_ip_max: 1_000_000,
         // предмет этих тестов: ворота KK как предохранитель для того, кто дошёл до KK
         // (стук проверяют тесты `knock`)

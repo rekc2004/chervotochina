@@ -30,6 +30,9 @@ fn base(n_preauth: usize) -> QuinnConfig {
     QuinnConfig {
         auth_deadline: Duration::from_secs(5),
         max_preauth: n_preauth,
+        // эти тесты проверяют общие ворота и семафор: десятки клиентов с одного адреса
+        // (предел на ключ проверяют `per_key_*` в `preauth.rs`)
+        max_preauth_per_key: usize::MAX,
         ..test_cfg()
     }
 }

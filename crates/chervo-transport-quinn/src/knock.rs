@@ -532,6 +532,12 @@ impl KnockState {
         ring.table.clear();
     }
 
+    /// Только тесты: пары, чьи ключи стука сейчас в таблице (по порядку набора).
+    #[cfg(test)]
+    pub(crate) fn key_pairs(&self) -> Vec<PairId> {
+        lock(&self.ring).keys.iter().map(|(p, _)| *p).collect()
+    }
+
     // --- закрепления и допуск ---
 
     pub(crate) fn pin(self: &Arc<Self>, addr: SocketAddr) -> Pin {

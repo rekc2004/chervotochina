@@ -10,7 +10,7 @@ use tokio::time::{Instant, timeout_at};
 use crate::Inner;
 use crate::conn::{Fail, RefuseGuard, binding, expect_eof, read_exact_n, refuse};
 use crate::knock::Pin;
-use crate::limits::Counters;
+use crate::limits::{Counters, KeyPermit};
 use crate::registry::{Promoted, promote};
 use crate::tls::ephemeral_server_config;
 
@@ -43,6 +43,13 @@ pub(crate) fn admit(inner: &Arc<Inner>, incoming: quinn::Incoming) {
         Counters::bump(&inner.counters.ignored_rate);
         return;
     }
+    // Не больше `max_preauth_per_key` незавершённых с одного ключа лимитера: проверка без
+    // списания квоты, молчание как при занятом семафоре. Место освобождается при сбросе.
+    let Some(key_permit) = inner.preauth_keys.try_acquire(ip) else {
+        incoming.ignore();
+        Counters::bump(&inner.counters.ignored_busy);
+        return;
+    };
     let Ok(permit) = inner.preauth.clone().try_acquire_owned() else {
         incoming.ignore();
         Counters::bump(&inner.counters.ignored_busy);
@@ -64,15 +71,45 @@ pub(crate) fn admit(inner: &Arc<Inner>, incoming: quinn::Incoming) {
         incoming.ignore();
         return;
     };
-    let deadline = Instant::now() + inner.cfg.auth_deadline;
+    let start = Instant::now();
+    let deadline = start + inner.cfg.auth_deadline;
+    // полный `msg1` обязан прийти раньше, чем кончится вся аутентификация
+    let msg1_deadline = start + inner.cfg.msg1_deadline_eff();
     // закрепление адреса до конца KK: пакеты рукопожатия проходят и без действующего допуска
     let pin = inner.knock.pin(incoming.remote_address());
     if let Ok(connecting) = incoming.accept_with(server_cfg) {
         let inner = inner.clone();
         tokio::spawn(async move {
-            serve(inner, connecting, deadline, permit, pin).await;
+            serve(
+                inner,
+                connecting,
+                Deadlines {
+                    msg1_deadline,
+                    deadline,
+                },
+                Held {
+                    _permit: permit,
+                    _key: key_permit,
+                    _pin: pin,
+                },
+            )
+            .await;
         });
     }
+}
+
+/// Сроки приёма: до полного `msg1` и до конца всей аутентификации.
+#[derive(Clone, Copy)]
+struct Deadlines {
+    msg1_deadline: Instant,
+    deadline: Instant,
+}
+
+/// Всё, что держит место незавершённого соединения до конца `serve`.
+struct Held {
+    _permit: OwnedSemaphorePermit,
+    _key: KeyPermit,
+    _pin: Pin,
 }
 
 /// Результат успешной проверки вызываемого.
@@ -85,11 +122,14 @@ struct Authed {
 async fn serve(
     inner: Arc<Inner>,
     connecting: quinn::Connecting,
-    deadline: Instant,
-    _permit: OwnedSemaphorePermit,
-    _pin: Pin,
+    deadlines: Deadlines,
+    _held: Held,
 ) {
-    let conn = match timeout_at(deadline, connecting).await {
+    let Deadlines {
+        msg1_deadline,
+        deadline,
+    } = deadlines;
+    let conn = match timeout_at(msg1_deadline, connecting).await {
         Ok(Ok(c)) => c,
         Ok(Err(_)) => return,
         Err(_) => {
@@ -97,7 +137,11 @@ async fn serve(
             return;
         }
     };
-    let result = timeout_at(deadline, callee_handshake(&inner, &conn, deadline)).await;
+    let result = timeout_at(
+        deadline,
+        callee_handshake(&inner, &conn, msg1_deadline, deadline),
+    )
+    .await;
     let authed = match result {
         Ok(Ok(a)) => a,
         Ok(Err(fail)) => {
@@ -145,13 +189,23 @@ async fn serve(
 async fn callee_handshake(
     inner: &Arc<Inner>,
     conn: &quinn::Connection,
+    msg1_deadline: Instant,
     deadline: Instant,
 ) -> Result<Authed, Fail> {
     let bind = binding(conn).map_err(|_| Fail::Failed)?;
-    let (tx, rx) = conn.accept_bi().await.map_err(|_| Fail::Failed)?;
-    // защитник владеет потоками: при любом выходе или отмене отказ уходит раньше FIN/STOP_SENDING
-    let mut guard = RefuseGuard::new(conn, tx, rx);
-    let msg1: [u8; KK_MSG1_LEN] = read_exact_n(&mut guard.rx).await?;
+    // поток и полный `msg1` до `msg1_deadline`; при отмене по сроку защитник (создан внутри
+    // будущего) закрывает соединение отказом, как при любом другом выходе
+    let first = async {
+        let (tx, rx) = conn.accept_bi().await.map_err(|_| Fail::Failed)?;
+        // защитник владеет потоками: при любом выходе или отмене отказ уходит раньше FIN/STOP_SENDING
+        let mut guard = RefuseGuard::new(conn, tx, rx);
+        let msg1: [u8; KK_MSG1_LEN] = read_exact_n(&mut guard.rx).await?;
+        Ok::<_, Fail>((guard, msg1))
+    };
+    let (mut guard, msg1) = match timeout_at(msg1_deadline, first).await {
+        Ok(r) => r?,
+        Err(_) => return Err(Fail::Timeout),
+    };
     if msg1.first() != Some(&KK_KIND_V1) {
         return Err(Fail::Failed);
     }

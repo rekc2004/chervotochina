@@ -42,7 +42,7 @@ pub use conn::{QuinnConn, QuinnRecv, QuinnSend};
 pub use knock::window_at;
 
 use knock::{KnockSocket, KnockState};
-use limits::{Counters, IpLimiter, KkGate};
+use limits::{Counters, IpLimiter, KkGate, PreauthKeys};
 use registry::Registry;
 
 pub const ALPN: &[u8] = b"chervo/1";
@@ -87,6 +87,14 @@ pub struct QuinnConfig {
     pub limiter_capacity: usize,
     /// Соединений в работе до конца KK (семафор).
     pub max_preauth: usize,
+    /// Срок от приёма QUIC (`Incoming`) до полного `msg1`; не больше `auth_deadline` (при
+    /// использовании ограничивается им). Позже: единый отказ, как у остальных. По умолчанию 5 с:
+    /// больше `KK_ATTEMPT_CAP` (3 с) плюс шаг гонки адресов, чтобы честный второй адрес звонящего
+    /// не обрезался, пока первый молчит.
+    pub msg1_deadline: Duration,
+    /// Незавершённых (до конца KK) соединений на один ключ лимитера (IPv4 целиком, IPv6 по
+    /// /64); не меньше 1. Сверх предела: молчание, как при занятом семафоре.
+    pub max_preauth_per_key: usize,
     /// Одновременных переборов KK; при использовании ограничивается `[1, max_preauth]`.
     pub max_kk_trials: usize,
     /// Кандидатов в секунду (глобально).
@@ -139,6 +147,11 @@ pub struct QuinnConfig {
 const MIN_WINDOW: u32 = 64 * 1024;
 
 impl QuinnConfig {
+    /// Действующий срок до `msg1`: не больше срока всей аутентификации.
+    pub(crate) fn msg1_deadline_eff(&self) -> Duration {
+        self.msg1_deadline.min(self.auth_deadline)
+    }
+
     /// Окна согласованы: `MIN_WINDOW <= stream_receive_window <= post_auth_receive_window`,
     /// `send_window >= MIN_WINDOW` и все представимы в `VarInt`.
     pub(crate) fn windows_valid(&self) -> bool {
@@ -157,6 +170,8 @@ impl Default for QuinnConfig {
             per_ip_window: Duration::from_secs(10),
             limiter_capacity: 4096,
             max_preauth: 32,
+            msg1_deadline: Duration::from_secs(5),
+            max_preauth_per_key: 2,
             max_kk_trials: 1,
             kk_budget_per_sec: 2000,
             kk_budget_burst: 2000,
@@ -240,6 +255,15 @@ pub(crate) struct PromoteHook {
     pub(crate) proceed: Arc<tokio::sync::Notify>,
 }
 
+/// Только тесты: пауза `set_peers` после смены ключей стука и до смены реестра.
+#[cfg(test)]
+pub(crate) struct SetPeersHook {
+    /// Вызов дошёл до паузы.
+    pub(crate) reached: std::sync::mpsc::Sender<()>,
+    /// Разрешение продолжить.
+    pub(crate) proceed: std::sync::mpsc::Receiver<()>,
+}
+
 pub(crate) struct Inner {
     pub(crate) cfg: QuinnConfig,
     pub(crate) filter: Arc<dyn PeerFilter>,
@@ -253,6 +277,14 @@ pub(crate) struct Inner {
     pub(crate) knock: Arc<KnockState>,
     pub(crate) limiter: Mutex<IpLimiter>,
     pub(crate) preauth: Arc<Semaphore>,
+    /// Незавершённые соединения по ключу лимитера (`max_preauth_per_key`).
+    pub(crate) preauth_keys: Arc<PreauthKeys>,
+    /// Один замок на всю смену набора пар: ворота, ключи стука и реестр меняются под ним
+    /// вместе, параллельные `set_peers` не перемешиваются.
+    pub(crate) peers_update: Mutex<()>,
+    /// Крюк тестов: пауза внутри `set_peers` между ключами стука и реестром (срабатывает один раз).
+    #[cfg(test)]
+    pub(crate) set_peers_hook: Mutex<Option<SetPeersHook>>,
     pub(crate) gate: KkGate,
     pub(crate) registry: Registry,
     /// Пары с идущим исходящим звонком (не больше одного на пару).
@@ -280,6 +312,20 @@ impl Inner {
         if let Some(h) = hook {
             h.reached.notify_one();
             h.proceed.notified().await;
+        }
+    }
+
+    /// Только тесты: если задан крюк, сообщить о подходе к реестру и ждать разрешения.
+    #[cfg(test)]
+    pub(crate) fn test_pause_in_set_peers(&self) {
+        let hook = self
+            .set_peers_hook
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(h) = hook {
+            let _ = h.reached.send(());
+            let _ = h.proceed.recv_timeout(Duration::from_secs(10));
         }
     }
 
@@ -353,6 +399,10 @@ impl QuinnTransport {
                 cfg.limiter_capacity,
             )),
             preauth: Arc::new(Semaphore::new(cfg.max_preauth.max(1))),
+            preauth_keys: PreauthKeys::new(cfg.max_preauth_per_key),
+            peers_update: Mutex::new(()),
+            #[cfg(test)]
+            set_peers_hook: Mutex::new(None),
             gate: KkGate::new(&cfg, counters.clone()),
             registry: Registry::default(),
             dialing: Mutex::new(std::collections::HashSet::new()),
@@ -384,6 +434,9 @@ impl QuinnTransport {
     /// Атомарная замена набора пар. Ёмкость бюджета перебора не меньше числа пар
     /// (`kk_budget_burst` меньше этого числа поднимается, иначе стоимость обрезалась бы).
     ///
+    /// Ворота, ключи стука и реестр меняются под одним замком (`peers_update`): вызов,
+    /// вернувшийся после удаления друга, не оставляет ему ни стука, ни записи в наборе.
+    ///
     /// Живые соединения, чьей тройки `(пара, наш X25519, X25519 собеседника)` нет в новом
     /// наборе, закрываются отказом с пустой причиной (событие `PeerRemoved`, счётчик
     /// `removed_closed`). Порядок замков: реестр, затем набор пар; соединения закрываются
@@ -397,9 +450,21 @@ impl QuinnTransport {
         if !peers.iter().all(|p| seen.insert(p.pair())) {
             return Err(DuplicatePairError);
         }
-        self.inner.gate.set_min_burst(peers.len());
-        self.inner.knock.set_peers(&peers);
-        let removed = self.inner.registry.replace_peers(&self.inner.peers, peers);
+        let removed = {
+            // Весь набор меняется под одним замком: ни один вызов не видит и не оставляет
+            // ключи стука одного набора рядом с реестром другого. Закрытие соединений и
+            // события идут после снятия замка.
+            let _update = self
+                .inner
+                .peers_update
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            self.inner.gate.set_min_burst(peers.len());
+            self.inner.knock.set_peers(&peers);
+            #[cfg(test)]
+            self.inner.test_pause_in_set_peers();
+            self.inner.registry.replace_peers(&self.inner.peers, peers)
+        };
         for (pair, conn) in removed {
             conn::refuse(&conn);
             self.inner

@@ -158,6 +158,9 @@ async fn race_deadline_total_not_per_address() {
 async fn race_kk_silent_early_address_does_not_eat_deadline() {
     let k = Keys::new();
     let a = bind(cfg(), vec![k.peer_a()]);
+    // Хороший адрес стоит в очереди на KK за молчащим до его предела (3 с), а 3-секундный срок
+    // до `msg1` у вызываемого идёт от его приёма QUIC: запас лишь `connect_stagger`. Предмет
+    // теста клиентская гонка, поэтому срок вызываемого здесь расширен до общего.
     let b = bind(cfg(), vec![k.peer_b()]);
     let c = cfg();
     let ep = server_endpoint(&c);

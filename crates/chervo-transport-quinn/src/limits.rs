@@ -168,6 +168,71 @@ impl IpLimiter {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Незавершённые соединения по ключу лимитера
+// ---------------------------------------------------------------------------------------------
+
+/// Счётчик соединений в работе до конца KK по ключу лимитера (IPv4 /32, IPv6 /64). Записи
+/// удаляются при обнулении, поэтому карта не больше `max_preauth` записей.
+pub(crate) struct PreauthKeys {
+    cap: usize,
+    map: Mutex<HashMap<IpKey, usize>>,
+}
+
+impl PreauthKeys {
+    pub(crate) fn new(cap: usize) -> Arc<Self> {
+        Arc::new(Self {
+            cap: cap.max(1),
+            map: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// Занять место ключа адреса; `None`: на этом ключе уже `cap` незавершённых. Место
+    /// освобождается при сбросе `KeyPermit` (в том числе при любом раннем выходе).
+    pub(crate) fn try_acquire(self: &Arc<Self>, ip: IpAddr) -> Option<KeyPermit> {
+        let key = ip_key(ip);
+        let mut map = self.map.lock().unwrap_or_else(PoisonError::into_inner);
+        let n = map.entry(key).or_insert(0);
+        if *n >= self.cap {
+            return None;
+        }
+        *n += 1;
+        Some(KeyPermit {
+            owner: self.clone(),
+            key,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tracked(&self) -> usize {
+        self.map
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
+}
+
+pub(crate) struct KeyPermit {
+    owner: Arc<PreauthKeys>,
+    key: IpKey,
+}
+
+impl Drop for KeyPermit {
+    fn drop(&mut self) {
+        let mut map = self
+            .owner
+            .map
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(n) = map.get_mut(&self.key) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                map.remove(&self.key);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Ворота перебора KK
 // ---------------------------------------------------------------------------------------------
 
