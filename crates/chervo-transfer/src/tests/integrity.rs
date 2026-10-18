@@ -249,6 +249,94 @@ async fn block_len_lie_rejected_before_read() {
     assert!(r.p.partial.list().is_empty());
 }
 
+/// Пока нарушение протокола обнаружено, а попытка ещё не остановлена (заслонка на
+/// `ProtocolFail`), соседний поток не должен перезапросить освобождённый блок, довести файл
+/// до конца и разместить его: передача, закончившаяся `Failed(Protocol)`, ничего не кладёт
+/// в приёмник.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn protocol_violation_blocks_sibling_refetch_and_place() {
+    let data = rand_bytes(11, 3 << 20);
+    let mut r = fake_sender_rig(vec![FakeFile::new("a.bin", data)], |_| {}).await;
+    r.fake.respond_with(|q| match q {
+        Req::Block(0, 1, 1) => Resp::LieLen((1 << 20) + 1),
+        _ => Resp::Normal,
+    });
+    let gate = Gate::new();
+    *r.p.hook.pfail_gate.lock().unwrap() = Some(gate.clone());
+    r.accept().await;
+    gate.wait_reached().await;
+    // Окно между обнаружением и остановкой попытки открыто. Сосед, будь ему позволено,
+    // перезапросит блок 1 (вторая попытка, `Block(0, 1, 2)`) и дойдёт до размещения.
+    let refetch = |r: &FakeSenderRig| {
+        r.fake
+            .log
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .any(|q| matches!(q, Req::Block(0, 1, n) if *n >= 2))
+    };
+    for _ in 0..300 {
+        if refetch(&r) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    if refetch(&r) {
+        for _ in 0..2000 {
+            if r.p
+                .spy
+                .log
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, PlaceEv::Place(_)))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+    gate.release();
+    // со старым порядком сосед успевает завершить файл, и передача заканчивается
+    // `Completed`, а не `Failed`: ждём любой из концов и проверяем его ниже
+    let f = wait_ev(&mut r.p.ev, 10, |e| {
+        matches!(
+            e,
+            TransferEvent::Failed { .. } | TransferEvent::Completed { .. }
+        )
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let reqs = r.fake.log.lock().unwrap().requests.clone();
+    let places = r.p.spy.log.lock().unwrap().clone();
+    assert!(
+        !places.iter().any(|e| matches!(e, PlaceEv::Place(_))),
+        "placed after a protocol violation: {places:?}; requests {reqs:?}"
+    );
+    assert!(
+        r.p.dest.list().is_empty(),
+        "dest {:?}; requests {reqs:?}",
+        r.p.dest.list()
+    );
+    assert!(
+        !reqs
+            .iter()
+            .any(|q| matches!(q, Req::Block(0, 1, n) if *n >= 2)),
+        "sibling re-fetched the lied block: {reqs:?}"
+    );
+    assert!(
+        matches!(
+            f,
+            TransferEvent::Failed {
+                reason: FailReason::Protocol,
+                ..
+            }
+        ),
+        "ended with {f:?}"
+    );
+}
+
 #[tokio::test]
 async fn manifest_block_err_fails_file() {
     let mut r = fake_sender_rig(

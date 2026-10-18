@@ -637,6 +637,7 @@ pub enum Ev {
     /// Длина записываемого файла имён.
     NamesWrite(usize),
     RemovePart(u32),
+    ProtocolFail,
 }
 
 type Handler = Box<dyn FnMut(&Ev) -> io::Result<()> + Send>;
@@ -647,6 +648,8 @@ type Handler = Box<dyn FnMut(&Ev) -> io::Result<()> + Send>;
 pub struct TestHook {
     pub log: Mutex<Vec<Ev>>,
     handler: Mutex<Option<Handler>>,
+    /// Заслонка на `ProtocolFail`: поток, обнаруживший нарушение, ждёт `release`.
+    pub pfail_gate: Mutex<Option<Arc<Gate>>>,
 }
 
 impl TestHook {
@@ -682,8 +685,17 @@ impl Hook for TestHook {
             HookPoint::HashBlock { file, block } => Ev::HashBlock(file, block),
             HookPoint::NamesWrite { bytes } => Ev::NamesWrite(bytes.len()),
             HookPoint::RemovePart { file } => Ev::RemovePart(file),
+            HookPoint::ProtocolFail => Ev::ProtocolFail,
         };
         self.log.lock().unwrap().push(ev.clone());
+        // заслонка берётся до замка обработчика: остановленный здесь поток не должен
+        // останавливать остальные точки (писатель тоже ходит через обработчик)
+        if ev == Ev::ProtocolFail {
+            let g = self.pfail_gate.lock().unwrap().clone();
+            if let Some(g) = g {
+                g.hold();
+            }
+        }
         match self.handler.lock().unwrap().as_mut() {
             Some(h) => h(&ev),
             None => Ok(()),

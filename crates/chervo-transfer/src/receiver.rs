@@ -117,6 +117,13 @@ impl Attempt {
         });
     }
 
+    /// Причина конца уже названа: попытка новой работы не берёт. Проверяется под замком
+    /// `core` вместе с взятием работы, поэтому после `finish` и последующего освобождения
+    /// блоков никто не успеет взять освобождённое.
+    pub(crate) fn is_over(&self) -> bool {
+        self.end.borrow().is_some()
+    }
+
     pub(crate) async fn ended(&self) -> End {
         let mut rx = self.end.subscribe();
         match rx.wait_for(Option::is_some).await {

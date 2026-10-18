@@ -44,6 +44,8 @@ pub(crate) enum HookPoint<'a> {
     NamesWrite { bytes: &'a [u8] },
     /// Перед строгим удалением старого `<i>.part` (ошибка = удалить не удалось).
     RemovePart { file: u32 },
+    /// Получатель: нарушение протокола обнаружено, попытка ещё не остановлена.
+    ProtocolFail,
 }
 
 pub(crate) trait Hook: Send + Sync {

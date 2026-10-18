@@ -19,7 +19,7 @@ use crate::limits::STREAM_TRANSFER_DATA;
 use crate::liveness::{idle_limit, stall_limit};
 use crate::receiver::{Attempt, End, RecvSession};
 use crate::sched::{BadBlock, Work};
-use crate::shared::{Acquired, Permits, acquire_pair, io_deadline, kib, lock};
+use crate::shared::{Acquired, HookPoint, Permits, acquire_pair, io_deadline, kib, lock};
 use crate::wire_io::{read_exact, read_message};
 use crate::writer::WCmd;
 
@@ -32,13 +32,28 @@ pub(crate) async fn write_msg<T: SendStream>(tx: &mut T, m: &Message, limit: Dur
     matches!(timeout(limit, tx.write_all(&out)).await, Ok(Ok(())))
 }
 
-/// Нарушение протокола отправителем: CANCEL{Protocol} и конец передачи.
+/// Нарушение протокола отправителем: CANCEL{Protocol} и конец передачи. Вызывается РАНЬШЕ,
+/// чем нарушивший поток освободит свои блоки и разбудит соседей: после этого `take` попытки
+/// не выдаёт работы (`Attempt::is_over`), а итоговая проверка файла не размещает (`halt`).
+/// Иначе сосед перезапросил бы освобождённый блок, довёл файл до конца и разместил его в
+/// передаче, закончившейся `Failed(Protocol)`. Повторный вызов ничего не делает.
 fn protocol_fail(s: &RecvSession, att: &Attempt) {
+    if s.halt.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let _ = s.sh.hook(HookPoint::ProtocolFail);
     s.ctl_send(Message::Cancel {
         id: s.key.id,
         reason: CancelReason::Protocol,
     });
     att.finish(End::Protocol);
+}
+
+/// Поток данных закончился нарушением: остановить попытку (см. `protocol_fail`).
+fn stop_on_violation(s: &RecvSession, att: &Attempt, e: StreamEnd) {
+    if e == StreamEnd::Protocol {
+        protocol_fail(s, att);
+    }
 }
 
 /// Пишет сообщения потока управления; на остановке дописывает очередь (CANCEL, DONE).
@@ -308,6 +323,8 @@ pub(crate) async fn data_stream_loop<C: Connection>(
         let end = data_stream(&s, &att, &conn, &wtx).await;
         match end {
             StreamEnd::Stopped | StreamEnd::Done => return,
+            // обычно `protocol_fail` уже вызван в `data_stream` до освобождения блоков;
+            // повтор безвреден
             StreamEnd::Protocol => {
                 protocol_fail(&s, &att);
                 return;
@@ -347,6 +364,7 @@ async fn send_request<T: SendStream>(
 
 async fn fill<T: SendStream>(
     s: &Arc<RecvSession>,
+    att: &Attempt,
     tx: &mut T,
     pending: &mut VecDeque<Pend>,
     stop: &mut crate::util::StopWatch,
@@ -354,7 +372,15 @@ async fn fill<T: SendStream>(
     let cfg = &s.sh.cfg;
     let window = usize::from(cfg.per_stream_window);
     while pending.len() < window {
-        let work = lock(&s.core).sched.take();
+        // Проверка конца попытки и взятие работы под одним замком: кто освобождает блоки после
+        // `finish` (под этим же замком), тот гарантирует, что освобождённое никто не возьмёт.
+        let work = {
+            let mut c = lock(&s.core);
+            if att.is_over() {
+                return Err(StreamEnd::Stopped);
+            }
+            c.sched.take()
+        };
         match work {
             Work::Wait => return Ok(Fill::Idle { all_done: false }),
             Work::AllDone => return Ok(Fill::Idle { all_done: true }),
@@ -426,7 +452,7 @@ async fn data_stream<C: Connection>(
         let news = s.wake.notified();
         tokio::pin!(news);
         news.as_mut().enable();
-        match fill(s, &mut tx, &mut pending, &mut stop).await {
+        match fill(s, att, &mut tx, &mut pending, &mut stop).await {
             Err(e) => break e,
             Ok(Fill::Idle { all_done: true }) if pending.is_empty() => break StreamEnd::Done,
             Ok(Fill::Full | Fill::NoBudget | Fill::Idle { .. }) => {}
@@ -461,7 +487,9 @@ async fn data_stream<C: Connection>(
                 },
             ) if index == file => {
                 let r = handle_manifest(s, att, &mut rx, file, block_size, block_count, root).await;
-                if r.is_err() {
+                if let Err(e) = r {
+                    // нарушение останавливает попытку раньше, чем что-либо освободится
+                    stop_on_violation(s, att, e);
                     // запрос уже снят с очереди потока: без этого файл остался бы «запрошенным»
                     lock(&s.core).sched.release_manifest(file);
                 }
@@ -485,12 +513,16 @@ async fn data_stream<C: Connection>(
                 },
             ) if index == file && b == block => {
                 if l != len {
-                    // длина не равна `block_len`: тело не читается
+                    // длина не равна `block_len`: тело не читается. Попытка останавливается
+                    // раньше, чем блок освободится: иначе сосед перезапросит его, получит
+                    // честный ответ и разместит файл в провалившейся передаче.
+                    stop_on_violation(s, att, StreamEnd::Protocol);
                     lock(&s.core).sched.release_block(file, block);
                     Err(StreamEnd::Protocol)
                 } else {
                     let r = handle_block(s, wtx, &mut rx, file, block, len, _permit).await;
-                    if r.is_err() {
+                    if let Err(e) = r {
+                        stop_on_violation(s, att, e);
                         // блок не дочитан (обрыв, срок на блок): он снова свободен, иначе он
                         // остался бы «в полёте» до конца попытки
                         lock(&s.core).sched.release_block(file, block);
@@ -515,6 +547,8 @@ async fn data_stream<C: Connection>(
             break e;
         }
     };
+    // любое нарушение (в том числе не пойманное выше) останавливает попытку до освобождения
+    stop_on_violation(s, att, end);
     // запросы без ответа снова свободны
     {
         let mut c = lock(&s.core);
