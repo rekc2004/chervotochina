@@ -8,6 +8,7 @@ use std::time::Duration;
 use chervo_transport::Connection;
 
 use super::fake::{Fake, FakeFile, Req, Resp};
+use super::hashprog::{failsafe, settle, tick, until};
 use super::kit::*;
 use crate::paths::{part_path, session_dir, write_hashes, write_state};
 use crate::state::{FileStatus, Progress, decode_state, encode_state};
@@ -587,8 +588,13 @@ async fn sender_drops_session_after_resume_hold() {
     assert!(rig.b.partial.list().is_empty());
 }
 
-#[tokio::test]
+// Часы остановлены и двигаются только явно: в реальном времени под нагрузкой процессора
+// перезапуск потока и разбор блока не укладывались в запас до предела «нет принятых блоков»
+// (3 x stall_timeout), и передача уходила на паузу `Stalled`. Пока писатель держит блокирующую
+// задачу, tokio сам время не переводит, поэтому молчание и паузу отмеряет тест.
+#[tokio::test(start_paused = true)]
 async fn stall_timeout_requeues() {
+    let _fs = failsafe(120);
     let data = rand_bytes(74, 4 << 20);
     let mut pre = Pre::new();
     let pair = pre.solo_friend();
@@ -620,7 +626,37 @@ async fn stall_timeout_requeues() {
     p.tr.respond(&key, true).unwrap();
     assert_eq!(Fake::decision(&mut rx, 10).await, Some(Verdict::Accept));
     fake.run(peer, Some((tx, rx)));
-    wait_ev(&mut p.ev, 30, is_completed(key)).await;
+    let asked = |b: u32, nth: u32| {
+        fake.log
+            .lock()
+            .unwrap()
+            .requests
+            .contains(&Req::Block(0, b, nth))
+    };
+    // блок 1 запрошен и молчит; часы стоят, поэтому срок молчания не мог истечь раньше
+    assert!(until(|| asked(1, 1)).await, "block 1 never requested");
+    assert!(!asked(1, 2));
+    settle().await;
+    // ровно `stall_timeout` молчания, затем пауза в 50 мс перед новым потоком
+    tick(Duration::from_millis(300)).await;
+    tick(Duration::from_millis(50)).await;
+    assert!(until(|| asked(1, 2)).await, "block 1 not requeued");
+    // дальше ответы обычные; часы стоят, завершение ждём по событию
+    let t0 = std::time::Instant::now();
+    loop {
+        let evs = drain(&mut p.ev).await;
+        assert!(
+            !evs.iter()
+                .any(|e| matches!(e, TransferEvent::Paused { .. })),
+            "paused: {evs:?}"
+        );
+        if evs.iter().any(is_completed(key)) {
+            break;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(30), "no Completed");
+        tokio::task::yield_now().await;
+        std::thread::sleep(Duration::from_millis(1));
+    }
     let placed = placed_files(&p.dest);
     assert!(placed[0].1 == data);
     let log = fake.log.lock().unwrap();

@@ -15,19 +15,22 @@ use super::fake::{Fake, FakeFile};
 use super::kit::*;
 use crate::{
     CancelReason, FailReason, Message, PauseReason, TransferConfig, TransferEvent, TransferEvents,
-    TransferKey, Verdict, read_message,
+    TransferKey, Verdict, encode, read_message,
 };
 
 const MIB: u64 = 1 << 20;
 
 /// Страховка от зависания при остановленном времени: по истечении реального срока процесс
 /// завершается (иначе упавший тест ждал бы вечно).
-struct Failsafe(
+pub(super) struct Failsafe(
     std::sync::mpsc::Sender<()>,
     std::sync::RwLockReadGuard<'static, ()>,
 );
 
-fn failsafe(secs: u64) -> Failsafe {
+pub(super) fn failsafe(secs: u64) -> Failsafe {
+    // общий доступ берётся до запуска таймера: ожидание за исключительным тестом (10 000
+    // файлов, под нагрузкой минуты) не должно съедать срок страховки
+    let shared = timing_shared();
     let (tx, rx) = std::sync::mpsc::channel::<()>();
     std::thread::spawn(move || {
         if rx.recv_timeout(Duration::from_secs(secs))
@@ -36,11 +39,11 @@ fn failsafe(secs: u64) -> Failsafe {
             std::process::exit(101);
         }
     });
-    Failsafe(tx, timing_shared())
+    Failsafe(tx, shared)
 }
 
 /// Ждёт условие, отдавая ход задачам и реальное время потокам (до 30 с реального времени).
-async fn until(mut f: impl FnMut() -> bool) -> bool {
+pub(super) async fn until(mut f: impl FnMut() -> bool) -> bool {
     let t0 = std::time::Instant::now();
     while t0.elapsed() < Duration::from_secs(30) {
         if f() {
@@ -53,7 +56,7 @@ async fn until(mut f: impl FnMut() -> bool) -> bool {
 }
 
 /// Даёт всем задачам и потокам разойтись.
-async fn settle() {
+pub(super) async fn settle() {
     for _ in 0..30 {
         tokio::task::yield_now().await;
         std::thread::sleep(Duration::from_millis(1));
@@ -61,9 +64,42 @@ async fn settle() {
 }
 
 /// Двигает часы и даёт задачам отработать.
-async fn tick(d: Duration) {
+pub(super) async fn tick(d: Duration) {
     tokio::time::advance(d).await;
     settle().await;
+}
+
+/// Ждёт `Paused(Stalled)` по реальному времени (до 30 с); виртуальные часы при этом стоят.
+async fn wait_stalled(ev: &mut TransferEvents, seen: &mut Vec<TransferEvent>) -> bool {
+    let t0 = std::time::Instant::now();
+    while t0.elapsed() < Duration::from_secs(30) {
+        if stalled_seen(ev, seen).await {
+            return true;
+        }
+        tokio::task::yield_now().await;
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    false
+}
+
+/// Ждёт паузу «обрыв связи» по реальному времени (до 30 с); виртуальные часы при этом стоят.
+/// Обрыв замечается задачами приёмника, и под нагрузкой это отстаёт от тиков.
+async fn wait_disconnected(ev: &mut TransferEvents, seen: &mut Vec<TransferEvent>) {
+    let t0 = std::time::Instant::now();
+    let is_it = |e: &TransferEvent| {
+        matches!(
+            e,
+            TransferEvent::Paused {
+                reason: PauseReason::Disconnected,
+                ..
+            }
+        )
+    };
+    while !seen.iter().any(is_it) && t0.elapsed() < Duration::from_secs(30) {
+        tokio::task::yield_now().await;
+        std::thread::sleep(Duration::from_millis(1));
+        seen.extend(drain(ev).await);
+    }
 }
 
 async fn stalled_seen(ev: &mut TransferEvents, seen: &mut Vec<TransferEvent>) -> bool {
@@ -186,6 +222,29 @@ impl Raw {
         settle().await;
     }
 
+    /// Как `progress`, но `false`, если получатель уже закрыл поток управления (передача на
+    /// паузе, а событие об этом ещё в пути).
+    async fn progress_open(&mut self, hashed: u64) -> bool {
+        let mut out = Vec::new();
+        encode(&Message::HashProgress { hashed }, &mut out).unwrap();
+        let open = self.tx.write_all(&out).await.is_ok();
+        settle().await;
+        open
+    }
+
+    /// Закрыл ли получатель поток управления (чтение даёт конец потока); пришедшие байты
+    /// отбрасываются.
+    async fn ctl_closed(&mut self) -> bool {
+        let mut b = [0u8; 64];
+        loop {
+            match tokio::time::timeout(Duration::ZERO, self.rx.read(&mut b)).await {
+                Ok(Ok(Some(_))) => {}
+                Ok(Ok(None) | Err(_)) => return true,
+                Err(_) => return false,
+            }
+        }
+    }
+
     fn manifests(&self) -> Vec<u32> {
         self.fake
             .log
@@ -277,6 +336,22 @@ async fn slow_hash_longer_than_stall_completes() {
         gate.release().await;
         seen.extend(drain(&mut rig.b.ev).await);
     }
+    // остальные блоки хэшируются без задержки, но в реальном времени, зависящем от нагрузки:
+    // часы стоят, пока отправитель не сообщит, что захэшировал всё (иначе молчание считалось бы
+    // по виртуальным секундам, ушедшим на чужую работу процессора)
+    let t_hash = std::time::Instant::now();
+    loop {
+        let evs = drain(&mut rig.a.ev).await;
+        if evs
+            .iter()
+            .any(|e| matches!(e, TransferEvent::Preparing { hashed, total, .. } if hashed == total))
+        {
+            break;
+        }
+        assert!(t_hash.elapsed() < Duration::from_secs(60), "hashing stuck");
+        tokio::task::yield_now().await;
+        std::thread::sleep(Duration::from_millis(1));
+    }
     // дальше события идут сами: часы двигаем понемногу, пока не завершится
     let mut done = false;
     for _ in 0..600 {
@@ -290,7 +365,7 @@ async fn slow_hash_longer_than_stall_completes() {
         }
         tick(Duration::from_millis(200)).await;
     }
-    assert!(done, "transfer did not complete");
+    assert!(done, "transfer did not complete: {seen:?}");
     wait_ev(&mut rig.a.ev, 60, is_completed(key)).await;
     assert!(
         !seen
@@ -372,11 +447,26 @@ async fn hash_progress_trickle_capped() {
     'outer: while t0.elapsed() < stall + Duration::from_secs(80) {
         k += 1;
         // +1 байт раз в `stall / 2`
-        r.progress(k).await;
+        if !r.progress_open(k).await {
+            // поток закрыт получателем: пауза наступила, событие о ней под нагрузкой могло
+            // отстать от тика. Часы стоят, так что `at` не вырастет, пока ждём его по событию.
+            at = Some(t0.elapsed());
+            assert!(
+                wait_stalled(&mut r.p.ev, &mut seen).await,
+                "stream closed without Paused(Stalled): {seen:?}"
+            );
+            break 'outer;
+        }
         for _ in 0..5 {
             tick(stall / 10).await;
-            if stalled_seen(&mut r.p.ev, &mut seen).await {
+            // закрытие потока управления идёт раньше события о паузе и не отстаёт от тика
+            let paused = stalled_seen(&mut r.p.ev, &mut seen).await;
+            if paused || r.ctl_closed().await {
                 at = Some(t0.elapsed());
+                assert!(
+                    paused || wait_stalled(&mut r.p.ev, &mut seen).await,
+                    "stream closed without Paused(Stalled): {seen:?}"
+                );
                 break 'outer;
             }
         }
@@ -593,6 +683,22 @@ async fn sender_hash_progress_frames_bounded() {
     tick(Duration::from_millis(500)).await;
     gate.release().await;
     let t_last = tokio::time::Instant::now();
+    // последний блок хэшируется в блокирующей задаче, её время зависит от нагрузки процессора:
+    // кадр с полным размером ждём по событию, а не по фиксированной паузе. Часы стоят, так что
+    // кадр, дожидавшийся тика, не появился бы никогда.
+    let total_seen = until(|| {
+        frames
+            .lock()
+            .unwrap()
+            .last()
+            .is_some_and(|f| f.1 == 4 * MIB)
+    })
+    .await;
+    assert!(
+        total_seen,
+        "no total frame: {:?}",
+        frames.lock().unwrap().clone()
+    );
     settle().await;
     tick(Duration::from_millis(500)).await;
     let got = frames.lock().unwrap().clone();
@@ -804,6 +910,7 @@ async fn honest_resume_after_long_outage_is_not_stalled() {
         tick(Duration::from_secs(6)).await;
         seen.extend(drain(&mut r.p.ev).await);
     }
+    wait_disconnected(&mut r.p.ev, &mut seen).await;
     assert!(
         seen.iter().any(|e| matches!(
             e,
@@ -886,6 +993,7 @@ async fn honest_partial_hash_after_long_outage_is_not_stalled() {
         tick(Duration::from_secs(6)).await;
         seen.extend(drain(&mut r.p.ev).await);
     }
+    wait_disconnected(&mut r.p.ev, &mut seen).await;
     assert!(
         seen.iter().any(|e| matches!(
             e,

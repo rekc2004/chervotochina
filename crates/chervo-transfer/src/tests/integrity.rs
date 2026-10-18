@@ -240,7 +240,12 @@ async fn block_len_lie_rejected_before_read() {
             .iter()
             .any(|l| l == "cancel Protocol")
     );
-    assert!(r.p.dest.list().is_empty());
+    assert!(
+        r.p.dest.list().is_empty(),
+        "dest {:?}; requests {:?}",
+        r.p.dest.list(),
+        r.fake.log.lock().unwrap().requests
+    );
     assert!(r.p.partial.list().is_empty());
 }
 
@@ -519,8 +524,14 @@ async fn source_changed_detected_by_sender() {
     let key = rig.a.tr.send(&rig.pa, files).unwrap();
     let e = wait_ev(&mut rig.b.ev, 10, is_offer()).await;
     let kb = key_of(&e);
-    // хэширование идёт, пока получатель решает; дать ему закончиться, затем подменить файл
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    // хэширование идёт, пока получатель решает; дождаться его конца по событию отправителя
+    // (фиксированная пауза под нагрузкой кончалась раньше хэширования), затем подменить файл
+    wait_ev(
+        &mut rig.a.ev,
+        30,
+        |e| matches!(e, TransferEvent::Preparing { hashed, total, .. } if hashed == total),
+    )
+    .await;
     let mut changed = data.clone();
     changed[1 << 20] ^= 0xFF;
     std::fs::write(src.path().join("a.bin"), &changed).unwrap();
