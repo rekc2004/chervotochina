@@ -282,6 +282,7 @@ Analysis: `docs/reports/NETTEST-2026-10-18.md` section 12. Rule D8 holds: an exp
 - **S3 rows.** Implement 20.1 (C07 `meet_first`, C07H, C18 path rule, G7-DROP15 expectation, G7-DROP45).
 
 ### 20.3 Rows after TASK 16а (product fixes П1, П2)
+> Superseded for G7-REBIND (and the C06/C20 expectations after 16а) by `docs/specs/stage-16a-fixes.md` section 6.
 - **G7-REBIND (new):** D20, HA (behind NAT-A PR) -> WA, NAT-A WAN `.10` -> `.11` at 30 %. Expected: completes, cmp equal; HA `nat_view` not `Conflicting` within 60 s after the change; connections=1 if F4 is implemented, otherwise >= 2 accepted.
 - **C06 / X01, C20:** rerun with rev 1 expectations (C06 guard `other = other_in = 0` after S1 and П2).
 
