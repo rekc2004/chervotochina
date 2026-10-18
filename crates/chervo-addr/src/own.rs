@@ -141,7 +141,14 @@ impl fmt::Debug for PublishSet {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Без адреса пути в отладочной печати (спецификация 16а, разд. 3).
+impl fmt::Debug for PublishCtx {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PublishCtx(..)")
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub struct PublishCtx {
     /// Явный выбор пользователя «в одной сети» (приглашение или токен): частные адреса
     /// маршрута по умолчанию.
