@@ -200,6 +200,39 @@ fn random_input(rng: &mut Rng, alpha: &[char]) -> String {
     }
 }
 
+/// Вход у предела `max_path_bytes`: компоненты, которые правки удлиняют (зарезервированные
+/// имена получают `_`, символы с NFC длиннее исходных).
+fn long_input(rng: &mut Rng, l: &ReceiveLimits) -> String {
+    const PIECES: &[&str] = &[
+        "CON.",
+        "LPT\u{B3}.",
+        "\u{958}",
+        "\u{212A}",
+        "x",
+        "aux.",
+        "\u{FFFD}",
+    ];
+    let max = usize::from(l.max_path_bytes);
+    let depth = usize::from(l.max_depth);
+    let mut s = String::new();
+    let mut comps = 0;
+    while s.len() < max && comps < depth {
+        if comps > 0 {
+            s.push('/');
+        }
+        comps += 1;
+        let target = 1 + rng.below(usize::from(l.max_name_bytes));
+        let mut c = String::new();
+        while c.len() < target {
+            c.push_str(PIECES.get(rng.below(PIECES.len())).copied().unwrap_or("x"));
+        }
+        s.push_str(&c);
+    }
+    let cut_at = max.saturating_sub(rng.below(4));
+    s.truncate(s.floor_char_boundary(cut_at));
+    s
+}
+
 fn nfc_path_len(input: &str) -> usize {
     input.split('/').map(nfc_len).sum::<usize>() + input.matches('/').count()
 }
@@ -221,6 +254,11 @@ fn check(input: &str, l: &ReceiveLimits, root: &Path) {
         assert!(!c.is_empty() && !c.contains('/') && !c.contains('\\'));
     }
     let shown = p.display();
+    // Предел длины пути действует на ИТОГЕ, а не только на входе (находка libFuzzer, TooLong).
+    assert!(
+        shown.len() <= usize::from(l.max_path_bytes),
+        "{input:?} -> {shown:?} exceeds max_path_bytes"
+    );
     assert!(
         shown.len() <= nfc_path_len(input) + depth,
         "grew: {input:?} -> {shown:?}"
@@ -294,8 +332,12 @@ fn fuzz_smoke_sanitizer() {
     let mut rng = Rng(fuzz_seed(0x9E37_79B9_7F4A_7C15));
     let mut ok = 0u64;
     for i in 0..n {
-        let input = random_input(&mut rng, &alpha);
         let l = if i % 4 == 3 { &small } else { &default };
+        let input = if i % 16 == 5 {
+            long_input(&mut rng, l)
+        } else {
+            random_input(&mut rng, &alpha)
+        };
         if sanitize_path(&input, l).is_ok() {
             ok += 1;
         }

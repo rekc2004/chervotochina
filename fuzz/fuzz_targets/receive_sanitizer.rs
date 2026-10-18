@@ -18,6 +18,7 @@ fn check(input: &str, l: &ReceiveLimits) {
         assert!(!c.is_empty() && !c.contains('/') && !c.contains('\\'));
     }
     let shown = p.display();
+    assert!(shown.len() <= usize::from(l.max_path_bytes), "{input:?} -> {shown:?}");
     let (again, f2) = sanitize_path(&shown, l).expect("second pass must succeed");
     assert_eq!(again, p, "not idempotent: {input:?} -> {shown:?}");
     assert!(!f2.changed && !f2.suspicious);

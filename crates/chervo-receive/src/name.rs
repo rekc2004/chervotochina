@@ -262,7 +262,8 @@ fn is_dots_and_spaces(c: &str) -> bool {
     c.chars().all(|ch| ch == '.' || ch == ' ')
 }
 
-/// Санитайзер недоверенного пути (H1-H7, затем R1-R6 по компонентам).
+/// Санитайзер недоверенного пути (H1-H7, затем R1-R6 по компонентам). Предел `max_path_bytes`
+/// проверяется дважды: на входе (дёшево, до разбора) и на итоге (правки могут удлинить путь).
 pub fn sanitize_path(s: &str, l: &ReceiveLimits) -> Result<(SafeRelPath, NameFlags), PathError> {
     l.validate()?;
     if s.is_empty() {
@@ -305,6 +306,13 @@ pub fn sanitize_path(s: &str, l: &ReceiveLimits) -> Result<(SafeRelPath, NameFla
             flags.changed = true;
         }
         out.push(r);
+    }
+    // H1, второй раз, на ИТОГЕ. Правки R1-R6 могут удлинить путь (префикс `_` у зарезервированного
+    // имени, NFC), поэтому проверка одного входа не гарантирует предел для результата. Без неё
+    // принятый путь мог бы быть длиннее `max_path_bytes`, а повторный проход давал бы `TooLong`.
+    let final_len = out.iter().map(String::len).sum::<usize>() + out.len().saturating_sub(1);
+    if final_len > usize::from(l.max_path_bytes) {
+        return Err(PathError::TooLong);
     }
     Ok((SafeRelPath::from_parts(out), flags))
 }
