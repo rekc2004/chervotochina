@@ -25,6 +25,8 @@ pub enum FriendsError {
     SeqExhausted,
     RateLimited,
     NotActive,
+    /// Список старше последнего изменения безопасности (якорь в хранилище ОС).
+    RolledBack,
 }
 
 impl fmt::Display for FriendsError {
@@ -51,6 +53,7 @@ impl fmt::Display for FriendsError {
             Self::SeqExhausted => "address update numbers exhausted",
             Self::RateLimited => "address update rate limited",
             Self::NotActive => "friend is not active",
+            Self::RolledBack => "friends list is older than the last security change",
         };
         f.write_str(text)
     }

@@ -4,7 +4,10 @@ use std::sync::Arc;
 use keyring_core::{CredentialStore, Entry, Error as KeyringError};
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::{DEFAULT_SERVICE, IdentityError, LIST_KEY_ACCOUNT, ListKeyStore, PairId, SecretStore};
+use crate::{
+    DEFAULT_SERVICE, EPOCH_ACCOUNT, EpochStore, IdentityError, LIST_KEY_ACCOUNT, ListKeyStore,
+    PairId, SecretStore,
+};
 
 /// Хранилище ОС: Credential Manager, login keychain, Secret Service.
 /// Создаётся явным конструктором платформенного крейта, глобальное хранилище не используется.
@@ -134,6 +137,29 @@ impl ListKeyStore for OsKeyStore {
             Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
             Err(e) => Err(map_error(e)),
         }
+    }
+}
+
+impl EpochStore for OsKeyStore {
+    fn read_epoch(&self) -> Result<Option<u64>, IdentityError> {
+        match self.entry_named(EPOCH_ACCOUNT)?.get_secret() {
+            Ok(secret) => {
+                let secret = Zeroizing::new(secret);
+                let bytes: [u8; 8] = secret
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| IdentityError::StorageInconsistent)?;
+                Ok(Some(u64::from_be_bytes(bytes)))
+            }
+            Err(KeyringError::NoEntry) => Ok(None),
+            Err(e) => Err(map_error(e)),
+        }
+    }
+
+    fn write_epoch(&self, epoch: u64) -> Result<(), IdentityError> {
+        self.entry_named(EPOCH_ACCOUNT)?
+            .set_secret(&epoch.to_be_bytes())
+            .map_err(map_error)
     }
 }
 

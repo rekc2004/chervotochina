@@ -295,3 +295,80 @@ pub fn add_friend(book: &mut FriendBook, store: &MemStore, name: &str) -> Added 
         our_x,
     }
 }
+
+/// Хранилище счётчика (якорь против отката) в памяти; запись можно сломать.
+#[derive(Default)]
+pub struct MemEpoch {
+    value: Mutex<Option<u64>>,
+    pub fail_write: std::sync::atomic::AtomicBool,
+    pub fail_read: std::sync::atomic::AtomicBool,
+}
+
+impl MemEpoch {
+    pub fn new() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self::default())
+    }
+
+    pub fn get(&self) -> Option<u64> {
+        *self.value.lock().unwrap()
+    }
+
+    pub fn set(&self, v: Option<u64>) {
+        *self.value.lock().unwrap() = v;
+    }
+}
+
+impl chervo_identity::EpochStore for MemEpoch {
+    fn read_epoch(&self) -> Result<Option<u64>, IdentityError> {
+        if self.fail_read.load(Ordering::SeqCst) {
+            return Err(IdentityError::StorageUnavailable);
+        }
+        Ok(self.get())
+    }
+
+    fn write_epoch(&self, epoch: u64) -> Result<(), IdentityError> {
+        if self.fail_write.load(Ordering::SeqCst) {
+            return Err(IdentityError::StorageUnavailable);
+        }
+        self.set(Some(epoch));
+        Ok(())
+    }
+}
+
+/// Как `MemStore`, но удаление ключа пары можно сломать (имитация сбоя после записи `Retired`).
+#[derive(Default)]
+pub struct FlakyDeleteStore {
+    pub inner: MemStore,
+    pub fail_delete: std::sync::atomic::AtomicBool,
+}
+
+impl SecretStore for FlakyDeleteStore {
+    fn read(&self, pair: &PairId) -> Result<Option<Zeroizing<Vec<u8>>>, IdentityError> {
+        self.inner.read(pair)
+    }
+
+    fn write(&self, pair: &PairId, blob: &[u8]) -> Result<(), IdentityError> {
+        self.inner.write(pair, blob)
+    }
+
+    fn delete(&self, pair: &PairId) -> Result<(), IdentityError> {
+        if self.fail_delete.load(Ordering::SeqCst) {
+            return Err(IdentityError::StorageUnavailable);
+        }
+        self.inner.delete(pair)
+    }
+}
+
+impl ListKeyStore for FlakyDeleteStore {
+    fn read_list_key(&self) -> Result<Option<Zeroizing<Vec<u8>>>, IdentityError> {
+        self.inner.read_list_key()
+    }
+
+    fn write_list_key(&self, key: &[u8]) -> Result<(), IdentityError> {
+        self.inner.write_list_key(key)
+    }
+
+    fn delete_list_key(&self) -> Result<(), IdentityError> {
+        self.inner.delete_list_key()
+    }
+}

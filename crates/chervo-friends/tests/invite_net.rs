@@ -580,6 +580,10 @@ async fn revocation_end_to_end() {
     assert!(!f.a.store.has(&f.pair_a));
     f.a.publish(Vec::new());
     assert!(is_dead(&ca).await && is_dead(&cb).await);
+    // запись удалённого друга стала `Retired` (текст отзыва в ней), в наборе пар её нет
+    assert_eq!(f.a.book.retired(), vec![(f.pair_a, text.clone())]);
+    assert!(f.a.book.kx_peers(&f.a.store).unwrap().0.is_empty());
+    f.a.book.forget_retired(&f.a.store, &f.pair_a).unwrap();
     assert!(f.a.book.friends().is_empty());
     // B принимает отзыв: друг помечен, ключ пары удалён, набор пар пуст
     assert_eq!(

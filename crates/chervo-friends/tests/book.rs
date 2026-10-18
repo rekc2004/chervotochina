@@ -401,6 +401,12 @@ fn remove_returns_revocation_and_deletes_key() {
     assert_eq!(n.reason, RevocationReason::Removed);
     assert_eq!(n.issued_at, 55);
     assert!(!store.has(&a.pair));
+    // запись `Retired` с текстом остаётся до `forget_retired`
+    assert_eq!(book.get(&a.pair).unwrap().state, FriendState::Retired);
+    assert_eq!(book.retired(), vec![(a.pair, text.clone())]);
+    let reopened = FriendBook::open(&dir.file(), &store).unwrap();
+    assert_eq!(reopened.retired(), vec![(a.pair, text.clone())]);
+    book.forget_retired(&store, &a.pair).unwrap();
     assert!(book.friends().is_empty());
     assert!(
         FriendBook::open(&dir.file(), &store)
@@ -428,7 +434,8 @@ fn rekey_returns_revocation_and_deletes_key() {
     assert_eq!(n.revoked_ed, a.our_ed);
     assert_eq!(n.reason, RevocationReason::Rekey);
     assert!(!store.has(&a.pair));
-    assert!(book.friends().is_empty());
+    assert_eq!(book.get(&a.pair).unwrap().state, FriendState::Retired);
+    assert_eq!(book.retired(), vec![(a.pair, text)]);
     assert_eq!(store.pair_count(), 0);
 }
 
@@ -606,7 +613,7 @@ fn break_file(dir: &TestDir) {
 }
 
 #[test]
-fn rekey_save_failure_keeps_revocation_text() {
+fn rekey_save_fails_key_kept() {
     let (dir, store, mut book) = fresh();
     let a = add_friend(&mut book, &store, "А");
     break_file(&dir);
@@ -614,26 +621,26 @@ fn rekey_save_failure_keeps_revocation_text() {
         book.rekey(&store, &a.pair, 66).err(),
         Some(FriendsError::Io)
     );
-    // ключ удалён, запись осталась
-    assert!(!store.has(&a.pair));
-    assert_eq!(book.friends().len(), 1);
+    // сохранить запись не удалось: ключ на месте, друг прежний, отзыва нигде нет
+    assert!(store.has(&a.pair));
+    assert_eq!(book.get(&a.pair).unwrap().state, FriendState::Active);
+    assert!(book.retired().is_empty());
+    assert_eq!(store.deletes.load(std::sync::atomic::Ordering::SeqCst), 0);
     std::fs::remove_dir(dir.file()).unwrap();
-    // повтор отдаёт тот же подписанный текст, а не KeyMissingOrChanged
+    // повтор подписывает заново (прежнего текста не было)
     let text = book.rekey(&store, &a.pair, 99).unwrap();
     let n = revocation_of(&text);
     assert_eq!(n.revoked_ed, a.our_ed);
     assert_eq!(n.reason, RevocationReason::Rekey);
-    assert_eq!(n.issued_at, 66);
-    assert!(book.friends().is_empty());
-    // текст выдан один раз: дальше пара неизвестна
-    assert_eq!(
-        book.rekey(&store, &a.pair, 1).err(),
-        Some(FriendsError::UnknownPair)
-    );
+    assert_eq!(n.issued_at, 99);
+    assert!(!store.has(&a.pair));
+    assert_eq!(book.retired(), vec![(a.pair, text.clone())]);
+    // повтор после успеха отдаёт тот же текст, не подписывая заново
+    assert_eq!(book.rekey(&store, &a.pair, 123).unwrap(), text);
 }
 
 #[test]
-fn remove_save_failure_keeps_revocation_text() {
+fn remove_save_fails_key_kept() {
     let (dir, store, mut book) = fresh();
     let a = add_friend(&mut book, &store, "А");
     break_file(&dir);
@@ -641,13 +648,18 @@ fn remove_save_failure_keeps_revocation_text() {
         book.remove(&store, &a.pair, 55).err(),
         Some(FriendsError::Io)
     );
-    assert!(!store.has(&a.pair));
+    assert!(store.has(&a.pair));
+    assert_eq!(book.get(&a.pair).unwrap().state, FriendState::Active);
+    assert!(book.retired().is_empty());
+    assert_eq!(store.deletes.load(std::sync::atomic::Ordering::SeqCst), 0);
     std::fs::remove_dir(dir.file()).unwrap();
     let text = book.remove(&store, &a.pair, 77).unwrap().unwrap();
     let n = revocation_of(&text);
     assert_eq!(n.reason, RevocationReason::Removed);
-    assert_eq!(n.issued_at, 55);
-    assert!(book.friends().is_empty());
+    assert_eq!(n.issued_at, 77);
+    assert!(!store.has(&a.pair));
+    assert_eq!(book.retired(), vec![(a.pair, text.clone())]);
+    assert_eq!(book.remove(&store, &a.pair, 78).unwrap(), Some(text));
 }
 
 #[test]
@@ -798,6 +810,7 @@ fn file_bytes(s: &Side) -> Vec<u8> {
 /// запечатать, открыть заново.
 fn rewrite(s: &mut Side, edit: impl FnOnce(&mut BookData)) {
     let mut data = BookData {
+        epoch: s.book.epoch(),
         friends: s.book.friends().to_vec(),
         pending: s.book.pending().to_vec(),
     };

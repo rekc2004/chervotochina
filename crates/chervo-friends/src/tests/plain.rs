@@ -1,5 +1,6 @@
 use chervo_addr::{AddrSource, KnownAddr};
 use chervo_identity::PairId;
+use chervo_token::RevocationReason;
 
 use super::kit::*;
 use crate::plain::{decode, encode};
@@ -12,6 +13,9 @@ fn bytes_of(d: &BookData) -> Vec<u8> {
     encode(d).unwrap().to_vec()
 }
 
+/// Версия, epoch, число друзей.
+const HEADER: usize = 1 + 8 + 2;
+
 /// Смещения полей первого друга в открытом тексте.
 struct Off {
     name_len: usize,
@@ -23,7 +27,7 @@ struct Off {
 }
 
 fn off(name_len: usize) -> Off {
-    let name_len_at = 3 + 16;
+    let name_len_at = HEADER + 16;
     let friend_ed = name_len_at + 1 + name_len;
     Off {
         name_len: name_len_at,
@@ -37,6 +41,7 @@ fn off(name_len: usize) -> Off {
 
 fn one_friend() -> (BookData, Vec<u8>, Off) {
     let mut d = BookData {
+        epoch: 0,
         friends: vec![friend(1)],
         pending: vec![],
     };
@@ -49,9 +54,11 @@ fn one_friend() -> (BookData, Vec<u8>, Off) {
 fn plain_roundtrip_and_layout() {
     let d = sample();
     let b = bytes_of(&d);
-    assert_eq!(b[0], 2);
-    assert_eq!(u16::from_be_bytes([b[1], b[2]]), 2);
+    assert_eq!(b[0], 3);
+    assert_eq!(u64::from_be_bytes(b[1..9].try_into().unwrap()), 77);
+    assert_eq!(u16::from_be_bytes([b[9], b[10]]), 3);
     let back = decode(&b).unwrap();
+    assert_eq!(back.epoch, 77);
     assert!(same(&d, &back));
     assert_eq!(bytes_of(&back), b, "кодирование каноническое");
 }
@@ -65,6 +72,7 @@ fn plain_encode_exact_capacity() {
     let empty = encode(&BookData::default()).unwrap();
     assert_eq!(empty.capacity(), empty.len());
     let many = BookData {
+        epoch: 0,
         friends: (0..200u8).map(friend).collect(),
         pending: vec![pending(1, PendingRole::Inviter)],
     };
@@ -77,6 +85,7 @@ fn plain_limits() {
     // 1025 друзей: запись отказывает, разбор отказывает
     let f = friend(1);
     let many = BookData {
+        epoch: 0,
         friends: (0..=MAX_FRIENDS)
             .map(|i| {
                 let mut g = f.clone();
@@ -106,6 +115,7 @@ fn plain_limits() {
     assert_eq!(encode(&many).err(), Some(FriendsError::LimitExceeded));
     // ровно 1024: запись и разбор проходят
     let max = BookData {
+        epoch: 0,
         friends: many.friends[..MAX_FRIENDS].to_vec(),
         pending: vec![],
     };
@@ -113,11 +123,12 @@ fn plain_limits() {
     assert_eq!(decode(&b).unwrap().friends.len(), MAX_FRIENDS);
     // счётчик 1025 в заголовке
     let mut bad = b.clone();
-    bad[1..3].copy_from_slice(&1025u16.to_be_bytes());
+    bad[9..11].copy_from_slice(&1025u16.to_be_bytes());
     assert_eq!(decode(&bad).err(), Some(FriendsError::Corrupt));
 
     // 65 pending
     let pend = |n: usize| BookData {
+        epoch: 0,
         friends: vec![],
         pending: (0..n)
             .map(|i| crate::PendingEntry {
@@ -146,6 +157,7 @@ fn plain_limits() {
 
     // имя: 64 байта можно, 65 нельзя, пустое нельзя, управляющий символ нельзя
     let named = |name: &str| BookData {
+        epoch: 0,
         friends: vec![{
             let mut g = friend(1);
             g.name = name.to_owned();
@@ -202,12 +214,14 @@ fn plain_limits() {
         })
         .collect();
     let seventeen = BookData {
+        epoch: 0,
         friends: vec![g.clone()],
         pending: vec![],
     };
     assert_eq!(encode(&seventeen).err(), Some(FriendsError::LimitExceeded));
     g.known_addrs.truncate(MAX_ADDRS_PER_FRIEND);
     let sixteen = BookData {
+        epoch: 0,
         friends: vec![g.clone()],
         pending: vec![],
     };
@@ -228,12 +242,14 @@ fn plain_rejects_duplicates() {
     let mut f2 = friend(2);
     f2.pair = friend(1).pair;
     let dup = BookData {
+        epoch: 0,
         friends: vec![friend(1), f2],
         pending: vec![],
     };
     assert_eq!(encode(&dup).err(), Some(FriendsError::AlreadyExists));
     // руками: два разных друга, затем второй pair := первый
     let d = BookData {
+        epoch: 0,
         friends: vec![friend(1), friend(2)],
         pending: vec![],
     };
@@ -241,16 +257,17 @@ fn plain_rejects_duplicates() {
     let first_len = {
         // длина записи первого друга = позиция второго `pair` - 3
         let p2 = [2u8; 16];
-        b.windows(16).position(|w| w == p2).unwrap() - 3
+        b.windows(16).position(|w| w == p2).unwrap() - HEADER
     };
-    let second_pair_at = 3 + first_len;
-    let first_pair: Vec<u8> = b[3..19].to_vec();
+    let second_pair_at = HEADER + first_len;
+    let first_pair: Vec<u8> = b[HEADER..HEADER + 16].to_vec();
     b[second_pair_at..second_pair_at + 16].copy_from_slice(&first_pair);
     assert_eq!(decode(&b).err(), Some(FriendsError::Corrupt));
 
     // pending
     let p = pending(1, PendingRole::Inviter);
     let dup = BookData {
+        epoch: 0,
         friends: vec![],
         pending: vec![p, p],
     };
@@ -264,6 +281,7 @@ fn plain_rejects_duplicates() {
     assert_eq!(decode(&raw).err(), Some(FriendsError::Corrupt));
     // пара и друг, и pending
     let mixed = BookData {
+        epoch: 0,
         friends: vec![friend(1)],
         pending: vec![crate::PendingEntry {
             pair: friend(1).pair,
@@ -301,8 +319,8 @@ fn plain_rejects_bad_keys() {
 #[test]
 fn plain_rejects_unknown_enums() {
     let (_d, b, o) = one_friend();
-    // состояние 3, разрешение 2
-    for v in [3u8, 4, 0xFF] {
+    // состояние 4, разрешение 2 (3 это `Retired`: без записи об отзыве отклоняется ниже)
+    for v in [3u8, 4, 5, 0xFF] {
         let mut x = b.clone();
         x[o.state] = v;
         assert_eq!(decode(&x).err(), Some(FriendsError::Corrupt), "state {v}");
@@ -345,10 +363,11 @@ fn plain_rejects_unknown_enums() {
     assert!(decode(&raw).is_ok());
     // версия открытого текста
     let mut x = b.clone();
-    x[0] = 3;
+    x[0] = 4;
     assert_eq!(decode(&x).err(), Some(FriendsError::Corrupt));
     // автоприём с нулевыми лимитами: запись отказывает, разбор отказывает
     let mut d = BookData {
+        epoch: 0,
         friends: vec![friend(1)],
         pending: vec![],
     };
@@ -442,10 +461,15 @@ fn plain_v1_migrates() {
     assert!(!g.known_addrs[0].short_lived && g.known_addrs[1].short_lived);
     assert_eq!(g.known_addrs[0].source, AddrSource::Invite);
     assert_eq!(g.known_addrs[1].source, AddrSource::ObservedByFriend);
-    // запись всегда v2; повторное чтение даёт те же данные
+    // запись всегда v3; повторное чтение даёт те же данные
     let again = bytes_of(&d);
-    assert_eq!(again[0], 2);
-    assert_eq!(again.len(), v1.len() + 8, "добавлен только addr_seq_out");
+    assert_eq!(again[0], 3);
+    assert_eq!(d.epoch, 0);
+    assert_eq!(
+        again.len(),
+        v1.len() + 8 + 8,
+        "добавлены только addr_seq_out и epoch"
+    );
     assert!(same(&decode(&again).unwrap(), &d));
     assert_eq!(bytes_of(&decode(&again).unwrap()), again);
     // v1 строже: источник 6, байт short_lived 2 и обрезки отклоняются
@@ -470,6 +494,7 @@ fn plain_v1_migrates() {
 #[test]
 fn plain_v2_roundtrip_new_fields() {
     let mut d = BookData {
+        epoch: 0,
         friends: vec![friend(1)],
         pending: vec![],
     };
@@ -499,7 +524,7 @@ fn plain_v2_roundtrip_new_fields() {
         },
     ];
     let b = bytes_of(&d);
-    assert_eq!(b[0], 2);
+    assert_eq!(b[0], 3);
     let back = decode(&b).unwrap();
     assert!(same(&d, &back));
     assert_eq!(back.friends[0].addr_seq_out, u64::MAX - 3);
@@ -558,4 +583,114 @@ fn plain_v2_rejects_source_7() {
             "источник {s}"
         );
     }
+}
+
+/// v2 из v3-кодировки данных без `Retired` и с `epoch = 0`: версия 2, без поля `epoch`.
+fn v2_of(d: &BookData) -> Vec<u8> {
+    assert_eq!(d.epoch, 0);
+    assert!(d.friends.iter().all(|f| f.retired.is_none()));
+    let v3 = bytes_of(d);
+    let mut v = vec![2u8];
+    v.extend_from_slice(&v3[9..]);
+    v
+}
+
+#[test]
+fn plain_v2_upgrades_to_v3() {
+    let mut d = sample();
+    d.epoch = 0;
+    d.friends.retain(|f| f.retired.is_none());
+    let v3 = bytes_of(&d);
+    let v2 = v2_of(&d);
+    assert_eq!(v2[0], 2);
+    assert_eq!(v2.len() + 8, v3.len(), "в v3 добавлен только epoch");
+    let back = decode(&v2).unwrap();
+    assert!(same(&d, &back));
+    assert_eq!(back.epoch, 0, "v2 не знает epoch");
+    assert!(back.friends.iter().all(|f| f.retired.is_none()));
+    // запись даёт канонический v3, он читается и пишется байт в байт
+    assert_eq!(bytes_of(&back), v3);
+    assert_eq!(bytes_of(&decode(&v3).unwrap()), v3);
+    // v2 строгий: состояния 3 (`Retired`) в нём нет
+    let (d1, _b, o) = one_friend();
+    let x2 = v2_of(&d1);
+    assert!(decode(&x2).is_ok());
+    let mut x = x2.clone();
+    x[o.state - 8] = 3;
+    assert_eq!(decode(&x).err(), Some(FriendsError::Corrupt));
+    for n in 0..v2.len() {
+        assert!(decode(&v2[..n]).is_err(), "обрезка v2 до {n}");
+    }
+}
+
+#[test]
+fn plain_v3_retired_roundtrip_and_strict() {
+    let f = retired_friend(5, RevocationReason::Removed);
+    let d = BookData {
+        epoch: 9,
+        friends: vec![f.clone(), friend(6)],
+        pending: vec![],
+    };
+    let b = bytes_of(&d);
+    assert_eq!(b[0], 3);
+    let back = decode(&b).unwrap();
+    assert!(same(&d, &back));
+    assert_eq!(back.epoch, 9);
+    assert_eq!(bytes_of(&back), b, "v3 байт в байт");
+    for n in 0..b.len() {
+        assert!(decode(&b[..n]).is_err(), "обрезка до {n}");
+    }
+    // запись: состояние и запись об отзыве согласованы, текст разбирается как отзыв нашего ключа
+    let enc = |g: &crate::Friend| {
+        encode(&BookData {
+            epoch: 0,
+            friends: vec![g.clone()],
+            pending: vec![],
+        })
+        .err()
+    };
+    let mut g = f.clone();
+    g.retired = None;
+    assert_eq!(enc(&g), Some(FriendsError::Corrupt));
+    let mut g = friend(7);
+    g.retired = f.retired.clone();
+    assert_eq!(enc(&g), Some(FriendsError::Corrupt));
+    let mut g = f.clone();
+    g.retired.as_mut().unwrap().reason = RevocationReason::Rekey;
+    assert_eq!(enc(&g), Some(FriendsError::BadRevocation));
+    let mut g = f.clone();
+    g.our_ed = friend(8).our_ed;
+    assert_eq!(enc(&g), Some(FriendsError::BadRevocation));
+    let mut g = f.clone();
+    g.retired.as_mut().unwrap().revocation = "CHR1AAAA".into();
+    assert_eq!(enc(&g), Some(FriendsError::BadRevocation));
+    let mut g = f.clone();
+    g.retired.as_mut().unwrap().revocation = "A".repeat(3000);
+    assert_eq!(enc(&g), Some(FriendsError::BadRevocation));
+    // разбор: причина, длина и каждый символ текста
+    let o = off(f.name.len());
+    let text_len = f.retired.as_ref().unwrap().revocation.len();
+    assert_eq!(b[o.state], 3);
+    assert_eq!(
+        usize::from(u16::from_be_bytes([b[o.state + 2], b[o.state + 3]])),
+        text_len
+    );
+    for v in [0u8, 3, 0xFF] {
+        let mut x = b.clone();
+        x[o.state + 1] = v;
+        assert_eq!(decode(&x).err(), Some(FriendsError::Corrupt), "причина {v}");
+    }
+    let mut x = b.clone();
+    x[o.state + 1] = 1; // Rekey вместо Removed: не совпадает с подписанным текстом
+    assert_eq!(decode(&x).err(), Some(FriendsError::Corrupt));
+    for i in 0..text_len {
+        let mut x = b.clone();
+        x[o.state + 4 + i] ^= 0x01;
+        assert!(decode(&x).is_err(), "символ {i}");
+    }
+    // чужой our_ed
+    let mut x = b.clone();
+    let other = friend(9).our_ed.to_bytes();
+    x[o.our_ed..o.our_ed + 32].copy_from_slice(&other);
+    assert_eq!(decode(&x).err(), Some(FriendsError::Corrupt));
 }

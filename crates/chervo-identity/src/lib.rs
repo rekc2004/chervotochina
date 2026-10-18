@@ -35,7 +35,7 @@ pub use knock::{KNOCK_ID_LABEL, KNOCK_KDF_LABEL, KNOCK_LEN, KNOCK_TAG_LABEL, Kno
 pub use kx::{KxPublicKey, PairKx};
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 pub use os::OsKeyStore;
-pub use store::{ListKeyStore, SecretStore, UnavailableKeyStore, create, load, rekey};
+pub use store::{EpochStore, ListKeyStore, SecretStore, UnavailableKeyStore, create, load, rekey};
 
 /// Версия формата записи ключа.
 pub const KEY_BLOB_VERSION: u8 = 2;
@@ -47,5 +47,7 @@ pub const DEFAULT_SERVICE: &str = "chervotochina";
 pub const ACCOUNT_PREFIX: &str = "pair-v1-";
 /// Имя записи ключа списка друзей (не начинается с `ACCOUNT_PREFIX`).
 pub const LIST_KEY_ACCOUNT: &str = "friends-key-v1";
+/// Имя записи счётчика изменений безопасности списка друзей (не секрет, 8 байт big-endian).
+pub const EPOCH_ACCOUNT: &str = "friends-epoch-v1";
 /// Длина ключа списка друзей, байт.
 pub const LIST_KEY_LEN: usize = 32;

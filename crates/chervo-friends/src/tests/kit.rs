@@ -6,10 +6,11 @@ use std::sync::Mutex;
 
 use chervo_addr::{AddrSource, KnownAddr};
 use chervo_identity::{IdentityError, PairId, PairKey, SecretStore, create};
+use chervo_token::{RevocationReason, issue_revocation};
 use zeroize::Zeroizing;
 
 use crate::{
-    AutoAcceptLimits, BookData, Friend, FriendState, PendingEntry, PendingRole, Permission,
+    AutoAcceptLimits, BookData, Friend, FriendState, PendingEntry, PendingRole, Permission, Retired,
 };
 
 #[derive(Default)]
@@ -80,6 +81,7 @@ pub fn friend(i: u8) -> Friend {
         last_addr_seq: 7,
         addr_seq_out: 9,
         added_at_unix: 1000 + u64::from(i),
+        retired: None,
     }
 }
 
@@ -91,7 +93,21 @@ pub fn pending(i: u8, role: PendingRole) -> PendingEntry {
     }
 }
 
-/// Образец: два друга (Ask и AutoAccept, разные состояния) и две записи pending.
+/// Друг `Retired` с настоящим подписанным отзывом нашего ключа.
+pub fn retired_friend(i: u8, reason: RevocationReason) -> Friend {
+    let ours = key();
+    let mut f = friend(i);
+    f.our_ed = ours.public_key();
+    f.state = FriendState::Retired;
+    f.known_addrs.clear();
+    f.retired = Some(Retired {
+        revocation: issue_revocation(&ours, reason, 4242).unwrap(),
+        reason,
+    });
+    f
+}
+
+/// Образец: три друга (Ask и AutoAccept, `Blocked`, `RevokedByPeer`, `Retired`) и две записи pending.
 pub fn sample() -> BookData {
     let mut a = friend(1);
     a.state = FriendState::Blocked;
@@ -103,7 +119,8 @@ pub fn sample() -> BookData {
     b.state = FriendState::RevokedByPeer;
     b.known_addrs.clear();
     BookData {
-        friends: vec![a, b],
+        epoch: 77,
+        friends: vec![a, b, retired_friend(3, RevocationReason::Removed)],
         pending: vec![
             pending(1, PendingRole::Inviter),
             pending(2, PendingRole::Invitee),
@@ -123,10 +140,12 @@ pub fn same_friend(a: &Friend, b: &Friend) -> bool {
         && a.last_addr_seq == b.last_addr_seq
         && a.addr_seq_out == b.addr_seq_out
         && a.added_at_unix == b.added_at_unix
+        && a.retired == b.retired
 }
 
 pub fn same(a: &BookData, b: &BookData) -> bool {
-    a.friends.len() == b.friends.len()
+    a.epoch == b.epoch
+        && a.friends.len() == b.friends.len()
         && a.pending == b.pending
         && a.friends
             .iter()

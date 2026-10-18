@@ -17,6 +17,21 @@
 //! `flow::invitee_exchange`, SAS, `flow::exchange_decision`. Оба подтвердили:
 //! `finish_pair(A_ed, A_x, ..)`, `set_peers(kx_peers)`; иначе `abort_pair`.
 //!
+//! # Отзыв и удаление ключа
+//!
+//! `remove`/`rekey`: подписать отзыв, СОХРАНИТЬ запись друга как `Retired` с текстом, только
+//! затем удалить ключ пары. Сбой сохранения: `Io`, ключ на месте, ничего не удалено. Сбой после
+//! сохранения: повтор `remove`/`rekey` удаляет ключ и отдаёт тот же текст; `open` удаляет ключи
+//! всех `Retired`. `forget_retired` убирает запись после доставки отзыва.
+//!
+//! # Якорь против отката файла
+//!
+//! `open_anchored` сверяет счётчик изменений безопасности файла (`BookData::epoch`) с записью в
+//! хранилище ОС: файл старше (`RolledBack`) принимается только явным `accept_older`. Счётчик
+//! растёт при блокировке, разблокировке, удалении, смене ключа, принятом отзыве и новом друге;
+//! порядок записи: файл, затем хранилище. Обновления адреса счётчик не трогают. `open` без
+//! якоря защиты от отката не даёт.
+//!
 //! После любого изменения книги (блокировка, удаление, отзыв, смена ключа) вызывающий делает
 //! `set_peers(kx_peers + гостевые пары)`: живые соединения исключённых пар рвутся.
 //! При старте приложения вызывается `drop_all_pending` (секреты незавершённых сессий жили
@@ -27,11 +42,12 @@ use std::fmt;
 use std::io::{ErrorKind, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use chervo_addr::{Findability, KnownAddr, PublishSet};
 use chervo_identity::{
-    IdentityError, KxPeer, KxPublicKey, LIST_KEY_LEN, ListKeyStore, PairId, PairKey, PublicKey,
-    SecretStore, create, load,
+    EpochStore, IdentityError, KxPeer, KxPublicKey, LIST_KEY_LEN, ListKeyStore, PairId, PairKey,
+    PublicKey, SecretStore, create, load,
 };
 use chervo_token::{
     AddrUpdate, IssuedAddrUpdate, RevocationReason, SignedAddrUpdate, Token, TokenError, decode,
@@ -42,7 +58,7 @@ use zeroize::Zeroizing;
 use crate::plain::name_ok;
 use crate::{
     AutoAcceptLimits, BookData, Friend, FriendState, FriendsError, MAX_ADDRS_PER_FRIEND,
-    MAX_FILE_BYTES, MAX_FRIENDS, MAX_PENDING, PendingEntry, PendingRole, Permission,
+    MAX_FILE_BYTES, MAX_FRIENDS, MAX_PENDING, PendingEntry, PendingRole, Permission, Retired,
     TrustConfirmation, vault,
 };
 
@@ -51,9 +67,8 @@ pub struct FriendBook {
     path: PathBuf,
     key: Option<Zeroizing<[u8; 32]>>,
     data: BookData,
-    /// Подписанные отзывы, чей ключ пары уже удалён, а запись списка сохранить не удалось
-    /// (по одному на пару). Повтор `remove`/`rekey` отдаёт этот текст. Только в памяти.
-    unsent: Vec<(PairId, String)>,
+    /// Якорь против отката файла (счётчик в хранилище ОС). `None`: книга открыта без якоря.
+    anchor: Option<Arc<dyn EpochStore>>,
     /// Время последнего применённого обновления адреса по соединению (на пару). Только в памяти.
     inband: Vec<(PairId, u64)>,
 }
@@ -139,6 +154,27 @@ fn key_from(raw: &[u8]) -> Result<Zeroizing<[u8; 32]>, FriendsError> {
     Ok(k)
 }
 
+/// Сверка счётчика файла `file_epoch` с хранилищем ОС.
+fn check_anchor(
+    anchor: &dyn EpochStore,
+    file_epoch: u64,
+    accept_older: bool,
+) -> Result<(), FriendsError> {
+    let stored = anchor.read_epoch().map_err(map_identity)?;
+    let behind = match stored {
+        Some(s) => file_epoch < s,
+        None => file_epoch > 0,
+    };
+    if behind && !accept_older {
+        return Err(FriendsError::RolledBack);
+    }
+    if stored != Some(file_epoch) && (behind || stored.is_some() || file_epoch > 0) {
+        // файл новее (сбой между записями) или явное принятие старого файла
+        anchor.write_epoch(file_epoch).map_err(map_identity)?;
+    }
+    Ok(())
+}
+
 fn read_file(path: &Path) -> Result<Option<Zeroizing<Vec<u8>>>, FriendsError> {
     let meta = match std::fs::metadata(path) {
         Ok(m) => m,
@@ -157,33 +193,80 @@ fn read_file(path: &Path) -> Result<Option<Zeroizing<Vec<u8>>>, FriendsError> {
 
 impl FriendBook {
     /// Файла нет: пустая книга (ключ читается, если он есть). Файл есть, ключа нет:
-    /// `ListKeyMissing`, файл не трогается.
-    pub fn open<K: ListKeyStore + ?Sized>(path: &Path, keys: &K) -> Result<Self, FriendsError> {
-        let stored = keys.read_list_key().map_err(map_identity)?;
+    /// `ListKeyMissing`, файл не трогается. Ключи пар друзей `Retired` удаляются (идемпотентно).
+    /// Без якоря: защиты от отката файла нет (см. `open_anchored`).
+    pub fn open<S: ListKeyStore + SecretStore + ?Sized>(
+        path: &Path,
+        store: &S,
+    ) -> Result<Self, FriendsError> {
+        Self::open_inner(path, store, None, false)
+    }
+
+    /// Как `open`, плюс сверка счётчика изменений файла с `anchor`: файл старше записи в
+    /// хранилище (или записи нет, а в файле счётчик больше нуля): `RolledBack`; файл новее:
+    /// запись молча исправляется (сбой между двумя записями).
+    pub fn open_anchored<S: ListKeyStore + SecretStore + ?Sized>(
+        path: &Path,
+        store: &S,
+        anchor: Arc<dyn EpochStore>,
+    ) -> Result<Self, FriendsError> {
+        Self::open_inner(path, store, Some(anchor), false)
+    }
+
+    /// Явное решение пользователя после `RolledBack`: принять старый файл, запись в
+    /// хранилище ОС приравнивается к счётчику файла. Только этот вызов понижает запись.
+    pub fn accept_older<S: ListKeyStore + SecretStore + ?Sized>(
+        path: &Path,
+        store: &S,
+        anchor: Arc<dyn EpochStore>,
+    ) -> Result<Self, FriendsError> {
+        Self::open_inner(path, store, Some(anchor), true)
+    }
+
+    fn open_inner<S: ListKeyStore + SecretStore + ?Sized>(
+        path: &Path,
+        store: &S,
+        anchor: Option<Arc<dyn EpochStore>>,
+        accept_older: bool,
+    ) -> Result<Self, FriendsError> {
+        let stored = store.read_list_key().map_err(map_identity)?;
         let key = match stored {
             Some(raw) => Some(key_from(&raw)?),
             None => None,
         };
-        match read_file(path)? {
-            None => Ok(Self {
-                path: path.to_path_buf(),
-                key,
-                data: BookData::default(),
-                unsent: Vec::new(),
-                inband: Vec::new(),
-            }),
+        let (key, data) = match read_file(path)? {
+            None => {
+                // файла нет: поднимать нечего; счётчик берётся из хранилища, чтобы не упасть назад
+                let mut data = BookData::default();
+                if let Some(a) = &anchor {
+                    data.epoch = a.read_epoch().map_err(map_identity)?.unwrap_or(0);
+                }
+                (key, data)
+            }
             Some(file) => {
                 let k = key.ok_or(FriendsError::ListKeyMissing)?;
                 let data = vault::open(&k, &file)?;
-                Ok(Self {
-                    path: path.to_path_buf(),
-                    key: Some(k),
-                    data,
-                    unsent: Vec::new(),
-                    inband: Vec::new(),
-                })
+                if let Some(a) = &anchor {
+                    check_anchor(a.as_ref(), data.epoch, accept_older)?;
+                }
+                (Some(k), data)
             }
+        };
+        // ключи отозванных нами пар: запись `Retired` уже на диске, ключ больше не нужен
+        for fr in data
+            .friends
+            .iter()
+            .filter(|f| f.state == FriendState::Retired)
+        {
+            SecretStore::delete(store, &fr.pair).map_err(map_identity)?;
         }
+        Ok(Self {
+            path: path.to_path_buf(),
+            key,
+            data,
+            anchor,
+            inband: Vec::new(),
+        })
     }
 
     /// Явно: переименовать нечитаемый файл в `"<path>.unreadable-<now>"` и начать пустую книгу.
@@ -192,11 +275,34 @@ impl FriendBook {
         keys: &K,
         now_unix: u64,
     ) -> Result<Self, FriendsError> {
+        Self::start_over_inner(path, keys, None, now_unix)
+    }
+
+    /// Как `start_over`, с якорем: счётчик новой книги равен записи в хранилище ОС.
+    pub fn start_over_anchored<K: ListKeyStore + ?Sized>(
+        path: &Path,
+        keys: &K,
+        anchor: Arc<dyn EpochStore>,
+        now_unix: u64,
+    ) -> Result<Self, FriendsError> {
+        Self::start_over_inner(path, keys, Some(anchor), now_unix)
+    }
+
+    fn start_over_inner<K: ListKeyStore + ?Sized>(
+        path: &Path,
+        keys: &K,
+        anchor: Option<Arc<dyn EpochStore>>,
+        now_unix: u64,
+    ) -> Result<Self, FriendsError> {
         let stored = keys.read_list_key().map_err(map_identity)?;
         let key = match stored {
             Some(raw) => Some(key_from(&raw)?),
             None => None,
         };
+        let mut data = BookData::default();
+        if let Some(a) = &anchor {
+            data.epoch = a.read_epoch().map_err(map_identity)?.unwrap_or(0);
+        }
         let mut moved: OsString = path.as_os_str().to_os_string();
         moved.push(format!(".unreadable-{now_unix}"));
         match std::fs::rename(path, PathBuf::from(moved)) {
@@ -207,8 +313,8 @@ impl FriendBook {
         Ok(Self {
             path: path.to_path_buf(),
             key,
-            data: BookData::default(),
-            unsent: Vec::new(),
+            data,
+            anchor,
             inband: Vec::new(),
         })
     }
@@ -223,6 +329,40 @@ impl FriendBook {
 
     pub fn pending(&self) -> &[PendingEntry] {
         &self.data.pending
+    }
+
+    /// Счётчик изменений безопасности (значение в файле).
+    pub fn epoch(&self) -> u64 {
+        self.data.epoch
+    }
+
+    /// Подписанные нами отзывы, которые ещё не сняты с учёта (`forget_retired`): пара и текст.
+    pub fn retired(&self) -> Vec<(PairId, String)> {
+        self.data
+            .friends
+            .iter()
+            .filter_map(|f| f.retired.as_ref().map(|r| (f.pair, r.revocation.clone())))
+            .collect()
+    }
+
+    /// Убрать запись `Retired` (отзыв доставлен или пользователь отказался). Ключ пары
+    /// удаляется ещё раз (идемпотентно), затем запись. Счётчик безопасности не меняется.
+    pub fn forget_retired<S: SecretStore + ListKeyStore + ?Sized>(
+        &mut self,
+        store: &S,
+        pair: &PairId,
+    ) -> Result<(), FriendsError> {
+        if !self
+            .get(pair)
+            .is_some_and(|f| f.state == FriendState::Retired)
+        {
+            return Err(FriendsError::UnknownPair);
+        }
+        SecretStore::delete(store, pair).map_err(map_identity)?;
+        self.commit(store, |d| {
+            d.friends.retain(|x| x.pair != *pair);
+            Ok(())
+        })
     }
 
     /// Ключ списка: из памяти, из хранилища или (только если нет ни файла, ни ключа) новый.
@@ -316,6 +456,45 @@ impl FriendBook {
         if let Err(e) = self.save(keys) {
             self.data = backup;
             return Err(e);
+        }
+        Ok(out)
+    }
+
+    /// Как `commit`, но изменение относится к безопасности: счётчик файла растёт на 1, затем (с
+    /// якорем) значение пишется в хранилище ОС. Порядок: файл, потом хранилище. Хранилище
+    /// недоступно или значение в нём больше нашего: ничего не меняется (`RolledBack`/ошибка).
+    /// Сбой записи в хранилище ПОСЛЕ сохранения файла: ошибка `KeyStorageUnavailable`, изменение
+    /// применено и лежит в файле; следующий `open` или изменение безопасности исправит запись.
+    fn commit_security<K: ListKeyStore + ?Sized, T>(
+        &mut self,
+        keys: &K,
+        f: impl FnOnce(&mut BookData) -> Result<T, FriendsError>,
+    ) -> Result<T, FriendsError> {
+        if let Some(a) = &self.anchor
+            && let Some(stored) = a.read_epoch().map_err(map_identity)?
+            && stored > self.data.epoch
+        {
+            return Err(FriendsError::RolledBack);
+        }
+        let backup = self.data.clone();
+        let out = match f(&mut self.data) {
+            Ok(v) => v,
+            Err(e) => {
+                self.data = backup;
+                return Err(e);
+            }
+        };
+        let Some(next) = self.data.epoch.checked_add(1) else {
+            self.data = backup;
+            return Err(FriendsError::LimitExceeded);
+        };
+        self.data.epoch = next;
+        if let Err(e) = self.save(keys) {
+            self.data = backup;
+            return Err(e);
+        }
+        if let Some(a) = &self.anchor {
+            a.write_epoch(next).map_err(map_identity)?;
         }
         Ok(out)
     }
@@ -441,8 +620,9 @@ impl FriendBook {
             last_addr_seq: 0,
             addr_seq_out: 0,
             added_at_unix: f.now_unix,
+            retired: None,
         };
-        self.commit(store, |d| {
+        self.commit_security(store, |d| {
             d.pending.retain(|p| p.pair != *pair);
             d.friends.push(friend);
             Ok(())
@@ -533,7 +713,7 @@ impl FriendBook {
         from: FriendState,
         to: FriendState,
     ) -> Result<(), FriendsError> {
-        self.commit(keys, |d| {
+        self.commit_security(keys, |d| {
             let fr = d
                 .friends
                 .iter_mut()
@@ -583,37 +763,47 @@ impl FriendBook {
         }
     }
 
-    fn drop_friend<S: SecretStore + ListKeyStore + ?Sized>(
+    /// Запись друга становится `Retired` с подписанным текстом (счётчик безопасности растёт).
+    /// Ключ пары здесь НЕ удаляется: вызывающий удаляет его только после успеха.
+    fn retire<S: SecretStore + ListKeyStore + ?Sized>(
         &mut self,
         store: &S,
         pair: &PairId,
-        text: Option<&str>,
+        text: String,
+        reason: RevocationReason,
     ) -> Result<(), FriendsError> {
-        SecretStore::delete(store, pair).map_err(map_identity)?;
-        let saved = self.commit(store, |d| {
-            d.friends.retain(|x| x.pair != *pair);
+        self.commit_security(store, |d| {
+            let fr = d
+                .friends
+                .iter_mut()
+                .find(|x| x.pair == *pair && x.state != FriendState::Retired)
+                .ok_or(FriendsError::UnknownPair)?;
+            fr.state = FriendState::Retired;
+            fr.permission = Permission::Ask;
+            fr.known_addrs.clear();
+            fr.retired = Some(Retired {
+                revocation: text,
+                reason,
+            });
             Ok(())
-        });
-        self.unsent.retain(|(p, _)| p != pair);
-        if saved.is_err()
-            && let Some(t) = text
-        {
-            // ключ уже удалён, запись осталась: текст отзыва не теряем до повтора
-            self.unsent.push((*pair, t.to_owned()));
-        }
-        saved
+        })
     }
 
-    fn unsent_for(&self, pair: &PairId) -> Option<String> {
-        self.unsent
-            .iter()
-            .find(|(p, _)| p == pair)
-            .map(|(_, t)| t.clone())
+    /// Повтор после сбоя: запись уже `Retired`, текст на диске; ключ удаляется ещё раз.
+    fn finish_retired<S: SecretStore + ?Sized>(
+        store: &S,
+        pair: &PairId,
+        text: String,
+    ) -> Result<String, FriendsError> {
+        SecretStore::delete(store, pair).map_err(map_identity)?;
+        Ok(text)
     }
 
-    /// Отзыв (`Removed`), если ключ загрузился; затем удалить ключ и запись. Если запись
-    /// списка сохранить не удалось (`Io`), ключ уже удалён, а подписанный текст отзыва
-    /// хранится в памяти: повтор `remove` вернёт его (до перезапуска программы).
+    /// Отзыв (`Removed`), если ключ загрузился: подписать, сохранить запись как `Retired` с
+    /// текстом, и только затем удалить ключ. Сбой сохранения: `Io`, ключ на месте, ничего не
+    /// удалено. Сбой удаления ключа или записи в хранилище после сохранения: запись `Retired`
+    /// остаётся, повтор `remove` удаляет ключ и отдаёт тот же текст. Запись `Retired` живёт,
+    /// пока не вызван `forget_retired`. Ключа нет: запись просто убирается, отзыва нет.
     pub fn remove<S: SecretStore + ListKeyStore + ?Sized>(
         &mut self,
         store: &S,
@@ -621,17 +811,27 @@ impl FriendBook {
         now_unix: u64,
     ) -> Result<Option<String>, FriendsError> {
         let fr = self.get(pair).ok_or(FriendsError::UnknownPair)?;
-        let text = match self.unsent_for(pair) {
-            Some(t) => Some(t),
-            None => Self::revocation_for(store, fr, RevocationReason::Removed, now_unix)?,
-        };
-        self.drop_friend(store, pair, text.as_deref())?;
-        Ok(text)
+        if let Some(r) = &fr.retired {
+            return Self::finish_retired(store, pair, r.revocation.clone()).map(Some);
+        }
+        match Self::revocation_for(store, fr, RevocationReason::Removed, now_unix)? {
+            Some(text) => {
+                self.retire(store, pair, text.clone(), RevocationReason::Removed)?;
+                Self::finish_retired(store, pair, text).map(Some)
+            }
+            None => {
+                SecretStore::delete(store, pair).map_err(map_identity)?;
+                self.commit_security(store, |d| {
+                    d.friends.retain(|x| x.pair != *pair);
+                    Ok(())
+                })?;
+                Ok(None)
+            }
+        }
     }
 
-    /// «Пересоздать ключ»: отзыв (`Rekey`) старым ключом, удалить ключ и запись. Ключ не
-    /// загрузился: ошибка, ничего не удалено. Сбой записи списка после удаления ключа:
-    /// как у `remove`, повтор `rekey` вернёт сохранённый в памяти текст отзыва.
+    /// «Пересоздать ключ»: отзыв (`Rekey`) старым ключом; порядок и повторы как у `remove`.
+    /// Ключ не загрузился: ошибка, ничего не удалено.
     pub fn rekey<S: SecretStore + ListKeyStore + ?Sized>(
         &mut self,
         store: &S,
@@ -639,28 +839,26 @@ impl FriendBook {
         now_unix: u64,
     ) -> Result<String, FriendsError> {
         let fr = self.get(pair).ok_or(FriendsError::UnknownPair)?;
-        let text = match self.unsent_for(pair) {
-            Some(t) => t,
-            None => match load(store, &fr.pair, &fr.our_ed) {
-                Ok(key) => issue_revocation(&key, RevocationReason::Rekey, now_unix)
-                    .map_err(|_| FriendsError::BadRevocation)?,
-                Err(IdentityError::UnsupportedKeyVersion) => {
-                    return Err(FriendsError::KeyNeedsDecision);
-                }
-                Err(
-                    IdentityError::KeyMissing
-                    | IdentityError::KeyMismatch
-                    | IdentityError::CorruptKey,
-                ) => return Err(FriendsError::KeyMissingOrChanged),
-                Err(e) => return Err(map_identity(e)),
-            },
+        if let Some(r) = &fr.retired {
+            return Self::finish_retired(store, pair, r.revocation.clone());
+        }
+        let text = match load(store, &fr.pair, &fr.our_ed) {
+            Ok(key) => issue_revocation(&key, RevocationReason::Rekey, now_unix)
+                .map_err(|_| FriendsError::BadRevocation)?,
+            Err(IdentityError::UnsupportedKeyVersion) => {
+                return Err(FriendsError::KeyNeedsDecision);
+            }
+            Err(
+                IdentityError::KeyMissing | IdentityError::KeyMismatch | IdentityError::CorruptKey,
+            ) => return Err(FriendsError::KeyMissingOrChanged),
+            Err(e) => return Err(map_identity(e)),
         };
-        self.drop_friend(store, pair, Some(&text))?;
-        Ok(text)
+        self.retire(store, pair, text.clone(), RevocationReason::Rekey)?;
+        Self::finish_retired(store, pair, text)
     }
 
-    /// Отзыв от друга: `decode`; друг с теми же `friend_ed` и `friend_x`, не `RevokedByPeer`,
-    /// получает `RevokedByPeer`, наш ключ пары удаляется. Иначе `Ok(None)`.
+    /// Отзыв от друга: `decode`; друг с теми же `friend_ed` и `friend_x`, не `RevokedByPeer` и не
+    /// `Retired`, получает `RevokedByPeer`, наш ключ пары удаляется. Иначе `Ok(None)`.
     pub fn apply_revocation<S: SecretStore + ListKeyStore + ?Sized>(
         &mut self,
         store: &S,
@@ -674,13 +872,14 @@ impl FriendBook {
             f.friend_ed == notice.revoked_ed
                 && f.friend_x == notice.revoked_x
                 && f.state != FriendState::RevokedByPeer
+                && f.state != FriendState::Retired
         }) {
             Some(f) => f.pair,
             None => return Ok(None),
         };
         // сначала ключ (идемпотентно), затем запись: при сбое сохранения отзыв можно применить снова
         SecretStore::delete(store, &pair).map_err(map_identity)?;
-        self.commit(store, |d| {
+        self.commit_security(store, |d| {
             let fr = d
                 .friends
                 .iter_mut()

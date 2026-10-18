@@ -1,5 +1,8 @@
+use std::fmt;
+
 use chervo_addr::KnownAddr;
 use chervo_identity::{KxPublicKey, PairId, PublicKey};
+use chervo_token::RevocationReason;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AutoAcceptLimits {
@@ -20,6 +23,22 @@ pub enum FriendState {
     Active,
     Blocked,
     RevokedByPeer,
+    /// Мы удалили друга или пересоздали ключ: подписанный отзыв лежит в `Friend::retired`,
+    /// ключ пары удалён (или будет удалён при открытии). Не участвует ни в `kx_peers`, ни в наборе.
+    Retired,
+}
+
+/// Подписанный нами отзыв, сохранённый ДО удаления ключа пары. `Debug` без содержимого.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Retired {
+    pub revocation: String,
+    pub reason: RevocationReason,
+}
+
+impl fmt::Debug for Retired {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Retired(..)")
+    }
 }
 
 /// Без `Debug`: имена, адреса и ключи не печатаются через derive.
@@ -39,6 +58,8 @@ pub struct Friend {
     /// Последний выпущенный нами номер обновления для этого друга (сохраняется до выдачи токена).
     pub addr_seq_out: u64,
     pub added_at_unix: u64,
+    /// `Some` тогда и только тогда, когда `state == FriendState::Retired`.
+    pub retired: Option<Retired>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +78,9 @@ pub struct PendingEntry {
 /// Содержимое файла списка.
 #[derive(Clone, Default)]
 pub struct BookData {
+    /// Счётчик изменений безопасности (блокировка, разблокировка, удаление, смена ключа,
+    /// принятый отзыв, новый друг). Якорь против отката файла лежит в хранилище ОС.
+    pub epoch: u64,
     pub friends: Vec<Friend>,
     pub pending: Vec<PendingEntry>,
 }

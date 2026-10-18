@@ -29,6 +29,15 @@ pub trait ListKeyStore: Send + Sync {
     fn delete_list_key(&self) -> Result<(), IdentityError>;
 }
 
+/// Якорь против отката файла списка друзей: один счётчик изменений безопасности, не секрет,
+/// запись `EPOCH_ACCOUNT` в хранилище ОС (8 байт, big-endian). `read_epoch` возвращает
+/// `None`, только если записи точно нет.
+pub trait EpochStore: Send + Sync {
+    fn read_epoch(&self) -> Result<Option<u64>, IdentityError>;
+    /// Перезапись записи (в том числе меньшим значением: это решает вызывающий).
+    fn write_epoch(&self, epoch: u64) -> Result<(), IdentityError>;
+}
+
 /// Заглушка хранилища: всегда `NotImplemented`.
 pub struct UnavailableKeyStore;
 
@@ -42,6 +51,16 @@ impl ListKeyStore for UnavailableKeyStore {
     }
 
     fn delete_list_key(&self) -> Result<(), IdentityError> {
+        Err(IdentityError::NotImplemented)
+    }
+}
+
+impl EpochStore for UnavailableKeyStore {
+    fn read_epoch(&self) -> Result<Option<u64>, IdentityError> {
+        Err(IdentityError::NotImplemented)
+    }
+
+    fn write_epoch(&self, _epoch: u64) -> Result<(), IdentityError> {
         Err(IdentityError::NotImplemented)
     }
 }
