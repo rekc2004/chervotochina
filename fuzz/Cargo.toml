@@ -1,0 +1,94 @@
+[package]
+name = "chervo-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Stage 17 (B4): libFuzzer targets, cargo-fuzz 0.13.2 layout. NIGHTLY ONLY (see rust-toolchain.toml).
+# Not a member of the root workspace (root Cargo.toml: exclude = ["fuzz"]); own [workspace] and own Cargo.lock.
+# Product builds stay on the pinned stable toolchain and never see this crate.
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+chervo-token = { path = "../crates/chervo-token" }
+chervo-timesync = { path = "../crates/chervo-timesync" }
+chervo-transfer = { path = "../crates/chervo-transfer" }
+chervo-receive = { path = "../crates/chervo-receive" }
+
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "token_decode"
+path = "fuzz_targets/token_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "addr_update"
+path = "fuzz_targets/addr_update.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "addr_info"
+path = "fuzz_targets/addr_info.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transfer_codec"
+path = "fuzz_targets/transfer_codec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transfer_offer"
+path = "fuzz_targets/transfer_offer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transfer_state"
+path = "fuzz_targets/transfer_state.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transfer_names"
+path = "fuzz_targets/transfer_names.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "receive_sanitizer"
+path = "fuzz_targets/receive_sanitizer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "receive_plan"
+path = "fuzz_targets/receive_plan.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sntp"
+path = "fuzz_targets/sntp.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,7 @@
+# Nightly for libFuzzer only (sanitizer flags). The date is a pin chosen by the builder and NOT verified
+# (no network, no nightly on the build machine): before the first run the conductor checks with
+# `rustup toolchain install nightly-2026-10-01 --profile minimal` (needs the owner's yes, spec 17 Q2)
+# and changes the date here if that nightly is missing or does not build the path crates.
+[toolchain]
+channel = "nightly-2026-10-01"
+profile = "minimal"
