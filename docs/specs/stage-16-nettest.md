@@ -1,6 +1,6 @@
 # SPEC 16: Network tests (netns, nftables, tc netem)          criticality: P0 CRITICAL (token API), rest NORMAL (test stand)
 
-Author: combine-architect (opus), 2026-10-18, revision 1. Labels: [P] verified by me in the repository source (file:line); [C] confirmed by the conductor on the Linux box, not by me; [V] architect's inference from code; [NP] not verified. **Nothing was run by me.** No new external packages. One new internal dev-edge: `chervo-transfer` (dev) -> `chervo-upnp` (path crate).
+Author: combine-architect (opus), 2026-10-18, revision 1; Rev. 2 addendum 2026-10-18 after the full run (section 20). Labels: [P] verified by me in the repository source (file:line); [C] confirmed by the conductor on the Linux box, not by me; [V] architect's inference from code; [NP] not verified. **Nothing was run by me.** No new external packages. One new internal dev-edge: `chervo-transfer` (dev) -> `chervo-upnp` (path crate).
 
 Goal (TASK stage 16): netns/netem stand for the BRIEF section 10 scenario; the same NATs via rendezvous; speed table (LAN, IPv6, UPnP, hole punch) with CPU; generated report "which pairs did not connect and why"; separate line "not verified: real operators, TSPU".
 
@@ -262,3 +262,28 @@ Prepare: same commit on every machine; `cargo build --release --locked -p chervo
 ## 19. Open questions (contested only)
 **В1. Add the product API P0 in stage 16?** Without it PR-PR, C20 and "IP change restored via token" (BRIEF 10) cannot run; the alternative is a temporary port forward during pairing (then C05/C06/C17 run without tokens, C20 and the token half of C04/C09-C11/C14 become NOTRUN). **Recommendation: add now** (two thin methods in `addrinfo.rs` over already reviewed stage 12 functions, needed by stage 18 anyway, one security review of a small diff).
 **В2. CPU load on the smart-home box.** `speed` keeps 2-3 of 4 cores busy for 35-60 min; `nice` would distort the numbers. **Recommendation:** run `speed` when the smart home is idle (e.g. at night) at normal priority; if the owner prefers safety, `CHV_NICE=10` is applied to nodes and the report marks every speed number "under nice 10".
+
+## 20. Rev. 2 addendum (2026-10-18, after the full run on 8d9e279)
+Analysis: `docs/reports/NETTEST-2026-10-18.md` section 12. Rule D8 holds: an expectation changes here only where repository code contradicts rev 1, never because of a result. C06 and C20 expectations are **unchanged** (product defects, TASK 16а). The stand is not re-specified elsewhere.
+
+**Резюме (русский).** Меняются ожидания трёх строк, которые я написал вопреки коду: C07 (связка сама передаёт подсказку внешнего адреса, поэтому соединение есть), C18 (вид пути зависит от того, кто победил в гонке), G7-DROP15 (15 с меньше простоя QUIC 30 с, паузы быть не может). Новые строки: C07H, G7-DROP45 и после 16а G7-REBIND. Две правки стенда: ICMP во входной цепи охраны и выключение UDP GSO для контроля потерь.
+
+### 20.1 Expectation changes (code facts)
+| Row | Rev 1 | Rev 2 | Code fact |
+|---|---|---|---|
+| C07 | meet after observation, no token: no, NeedToken / NeedToken | **C07H** = the rev 1 flow: yes, path SimultaneousOpen, reasons none. **C07** = new flow `meet_first`: meet up, invite over the meet link, both `invite_finished`, meet down, **then** observers (`obs_start`, invites, wait nat_view not Unknown), no token, W = 240 s: no, NeedToken / NeedToken | ADDR_INFO on the meet connection carries the own observed address as a hint (own.rs:368-377, :430-433; addrinfo.rs:89-112; engine.rs:517); hints live 24 h (chervo-addr/src/book.rs:11). With no observation at meet time nothing external is published. |
+| C18 | path PortMapped | path PortMapped **or** SimultaneousOpen; still required: connected both, HR `nat_view=PortMapped`, mapping removed after stop | `path_kind` labels the winning connection; a `Contact` entry is deliberately not "stable" (chervo-connect/src/plan.rs:109-134, :124-128). Which dial wins is a race. Same as stage 13 FORWARD. |
+| G7-DROP15 | paused, resumed, cmp equal | completes, cmp equal, connections=1, paused=0, max_stall_s <= 30 | idle 30 s, keep-alive 10 s (chervo-transport-quinn/src/lib.rs:171-172): a 15 s outage cannot close the connection. |
+| G7-DROP45 (new) | - | D20, WA -> WB, UDP dropped 45 s at 30 %: paused, resumed, cmp equal | the outage now exceeds idle 30 s (stage 14 DROP, now with delay). |
+
+### 20.2 Stand fixes (builder; expectations untouched)
+- **S1 guard, input side.** In `nft_guard` input chain, before `other_in`: `ip protocol icmp icmp type destination-unreachable counter name "icmp_unreach_in" accept` (and the ICMPv6 equivalent). Add dynamic sets `other_d { type ipv4_addr . inet_service; flags dynamic; size 64; }` (output, `update @other_d { ip daddr . th dport }`, non-UDP/TCP: daddr only in a second set) and `other_s` (input, saddr); the report prints roles from the fixed map, never addresses. Pass rule unchanged.
+- **S2 UDP GSO.** `offloads_off`: in addition to `gso off tso off gro off`, apply `tx-udp-segmentation off`, `rx-udp-gro-forwarding off`, `rx-gro-list off` on every stand interface except `lo` (each option separately, `fixed`/unsupported is not an error), then `ethtool -k` must show `tx-udp-segmentation: off` on the endpoint `wan`/`eth0` and the `p-*` ports; else loss rows INCONCLUSIVE "UDP GSO не отключается". Reason [V]: the measured loss ratio was a constant ~1/6 of the target in R3, P2 and P3; netem drops a whole GSO skb and counts one drop while `Sent pkt` counts segments. R3/P2/P3 numbers of 8d9e279 are discarded and rerun.
+- **S3 rows.** Implement 20.1 (C07 `meet_first`, C07H, C18 path rule, G7-DROP15 expectation, G7-DROP45).
+
+### 20.3 Rows after TASK 16а (product fixes П1, П2)
+- **G7-REBIND (new):** D20, HA (behind NAT-A PR) -> WA, NAT-A WAN `.10` -> `.11` at 30 %. Expected: completes, cmp equal; HA `nat_view` not `Conflicting` within 60 s after the change; connections=1 if F4 is implemented, otherwise >= 2 accepted.
+- **C06 / X01, C20:** rerun with rev 1 expectations (C06 guard `other = other_in = 0` after S1 and П2).
+
+### 20.4 Acceptance
+Rows of 20.1-20.2 rerun on the Linux box. Section 15 "no open FAIL in guard" stays: C06 and C20 close only after 16а, or the conductor carries them into 16а with the owner's consent.
