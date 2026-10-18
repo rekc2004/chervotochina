@@ -4,10 +4,10 @@
 //! Токен выпускается лениво (решение 9): только при обмене с живым другом и только если набор
 //! публикации изменился. Отправитель включает свой последний токен в каждый ADDR_INFO.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
-use chervo_addr::PublishCtx;
+use chervo_addr::{AddrClass, PublishCtx, classify, normalize};
 use chervo_friends::{FriendsError, MIN_INBAND_UPDATE_INTERVAL_SECS};
 use chervo_identity::{ListKeyStore, PairId, SecretStore};
 use chervo_token::IssuedAddrUpdate;
@@ -97,11 +97,12 @@ where
         st: &mut State<T::Conn>,
         pair: &PairId,
         remote: SocketAddr,
+        path_source: Option<IpAddr>,
         unix: u64,
     ) -> Option<IssuedAddrUpdate> {
         let set = st
             .own
-            .publishable(PublishCtx::for_connection(remote, None), unix);
+            .publishable(PublishCtx::for_connection(remote, path_source), unix);
         if set.is_empty() {
             return None;
         }
@@ -159,9 +160,12 @@ where
     /// Мы открываем поток ADDR_INFO. Ошибка или срок: поток сбрасывается, соединение живо.
     async fn send_addr_info(self: Arc<Self>, pair: PairId, conn: T::Conn) {
         let unix = self.clock.now_unix();
+        let remote = conn.remote_addr();
+        // П2a: проба маршрута вне замка состояния
+        let path_source = self.path_source(remote);
         let ours = {
             let mut st = self.lock();
-            self.ours(&mut st, &pair, conn.remote_addr(), unix)
+            self.ours(&mut st, &pair, remote, path_source, unix)
         };
         let res = tokio::time::timeout(
             self.cfg.addr_info_timeout,
@@ -175,16 +179,29 @@ where
             rt.sending = false;
         }
         if let Ok(Ok(info)) = res {
-            self.apply_peer_info(&mut st, pair, info, now, unix);
+            self.apply_peer_info(&mut st, pair, conn.conn_id(), info, now, unix);
         }
     }
 
+    /// П2a: наш адрес на пути соединения, только для частного `remote` (UDP `connect` без
+    /// отправки пакета, `RouteProbe::source_for`). Для остальных проба не вызывается. Вызывать
+    /// только вне замка состояния.
+    pub(crate) fn path_source(&self, remote: SocketAddr) -> Option<IpAddr> {
+        if classify(normalize(remote).ip()) != AddrClass::Private {
+            return None;
+        }
+        self.probe.source_for(remote)
+    }
+
     /// Присланное другом (по любую сторону обмена). Только `Active`: наблюдение
-    /// «как вы выглядите снаружи» и подписанное обновление.
+    /// «как вы выглядите снаружи» и подписанное обновление. Наблюдение засчитывается, только
+    /// если обмен шёл по живому соединению `conn_id` этого друга (F1: замещённое соединение
+    /// текущим мнением не станет); подписанное обновление применяется независимо от соединения.
     pub(crate) fn apply_peer_info(
         &self,
         st: &mut State<T::Conn>,
         pair: PairId,
+        conn_id: u64,
         info: PeerAddrInfo,
         now: Instant,
         unix: u64,
@@ -192,7 +209,9 @@ where
         if !st.book.is_active(&pair) {
             return;
         }
-        let _ = st.own.observe(pair, info.via, info.observed_me, unix);
+        if st.live.get(&pair).is_some_and(|l| l.id == conn_id) {
+            let _ = st.own.observe(pair, info.via, info.observed_me, unix);
+        }
         if let Some(update) = info.update {
             self.apply_update(st, pair, update, now, unix);
         }

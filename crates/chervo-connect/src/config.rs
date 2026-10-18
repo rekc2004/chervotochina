@@ -43,6 +43,9 @@ pub struct ConnectConfig {
     pub unreachable_after_fails: u32,
     pub udp_blocked_window: Duration,
     pub udp_blocked_min_friends: usize,
+    /// Не чаще одного объявления «внешний адрес изменился» (повторный стук, ADDR_INFO друзьям,
+    /// событие) за этот срок. Быстрого окна и сброса ограничителя оно не вызывает.
+    pub ext_announce_gap: Duration,
 }
 
 impl Default for ConnectConfig {
@@ -75,6 +78,7 @@ impl Default for ConnectConfig {
             unreachable_after_fails: 3,
             udp_blocked_window: Duration::from_secs(600),
             udp_blocked_min_friends: 2,
+            ext_announce_gap: Duration::from_secs(30),
         }
     }
 }

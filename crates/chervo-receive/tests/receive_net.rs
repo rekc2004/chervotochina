@@ -104,6 +104,10 @@ impl RouteProbe for Probe {
             ..RouteSources::default()
         }
     }
+
+    fn source_for(&self, _target: SocketAddr) -> Option<std::net::IpAddr> {
+        None
+    }
 }
 
 fn quinn_cfg() -> QuinnConfig {

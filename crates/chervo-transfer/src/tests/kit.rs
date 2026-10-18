@@ -171,6 +171,10 @@ impl RouteProbe for FakeProbe {
     fn probe(&self) -> RouteSources {
         *self.0.lock().unwrap()
     }
+
+    fn source_for(&self, _target: SocketAddr) -> Option<std::net::IpAddr> {
+        None
+    }
 }
 
 // --------------------------------------------------------------------- потоки

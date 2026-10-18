@@ -110,6 +110,11 @@ fn src_guard() {
     // наблюдения и выпуск токенов обновления только в жизненном цикле ADDR_INFO
     assert!(count(".observe(", "addrinfo.rs") >= 1);
     assert!(count("issue_addr_update(", "addrinfo.rs") >= 1);
+    // отметки «друг на связи» (F1) ставятся и снимаются только по событиям соединения в движке
+    assert!(count("reporter_up(", "engine.rs") >= 1);
+    assert!(count("reporter_down(", "engine.rs") >= 1);
+    // проба маршрута к цели (сокетный код) вызывается только из `clock.rs`
+    assert!(count("route_source_for(", "clock.rs") >= 1);
     // положительный контроль: охрана видит нужные файлы
     assert!(engine.iter().any(|s| s.rel == "watch.rs"));
     assert!(engine.iter().any(|s| s.rel == "addrinfo.rs"));

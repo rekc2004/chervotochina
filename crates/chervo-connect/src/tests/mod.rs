@@ -12,6 +12,7 @@ mod candidates;
 mod diag;
 mod engine;
 mod fake_mapper;
+mod fixes16a;
 mod gateway;
 mod inbox;
 mod invite;

@@ -544,8 +544,10 @@ async fn main() -> ExitCode {
     let t0 = Instant::now();
     out!(
         t0,
-        "EVENT started listen_port={}",
-        transport.local_addrs().first().map_or(0, SocketAddr::port)
+        "EVENT started listen_port={} stall_reknock={}",
+        transport.local_addrs().first().map_or(0, SocketAddr::port),
+        // F4 (повторный стук при застое) в транспорте появится отдельным шагом: пока выключен
+        "off"
     );
 
     let give_up = t0 + args.deadline;
@@ -573,7 +575,17 @@ async fn main() -> ExitCode {
                 match ev {
                     EngineEvent::Connected { pair, path } => {
                         connected.insert(pair);
-                        out!(t0, "EVENT connected pair={} path={path:?}", labels.label(&pair));
+                        // роль в QUIC: client = звонили мы (`is_initiator`)
+                        let role = match engine.connection(&pair).map(|c| c.is_initiator()) {
+                            Some(true) => "client",
+                            Some(false) => "server",
+                            None => "unknown",
+                        };
+                        out!(
+                            t0,
+                            "EVENT connected pair={} path={path:?} role={role}",
+                            labels.label(&pair)
+                        );
                     }
                     EngineEvent::Disconnected { pair } => {
                         connected.remove(&pair);

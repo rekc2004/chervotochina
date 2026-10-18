@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -150,27 +150,60 @@ impl Clock for TestClock {
     }
 }
 
-pub struct FakeProbe(Mutex<RouteSources>);
+pub struct FakeProbe {
+    sources: Mutex<RouteSources>,
+    /// Адрес-источник на пути к цели (`source_for`); цели нет в таблице: `None`.
+    path: Mutex<HashMap<SocketAddr, IpAddr>>,
+    source_calls: AtomicUsize,
+}
 
 impl FakeProbe {
     pub fn new(v4: Option<&str>) -> Arc<Self> {
-        let p = Arc::new(Self(Mutex::new(RouteSources::default())));
+        let p = Arc::new(Self {
+            sources: Mutex::new(RouteSources::default()),
+            path: Mutex::new(HashMap::new()),
+            source_calls: AtomicUsize::new(0),
+        });
         p.set_v4(v4);
         p
     }
 
+    /// Что вернёт `source_for(target)`.
+    pub fn set_source(&self, target: &str, src: Option<&str>) {
+        let t: SocketAddr = target.parse().unwrap();
+        let mut m = self.path.lock().unwrap();
+        match src {
+            Some(s) => {
+                m.insert(t, s.parse().unwrap());
+            }
+            None => {
+                m.remove(&t);
+            }
+        }
+    }
+
+    /// Сколько раз вызывали `source_for`.
+    pub fn source_calls(&self) -> usize {
+        self.source_calls.load(Ordering::SeqCst)
+    }
+
     pub fn set_v4(&self, v4: Option<&str>) {
-        self.0.lock().unwrap().v4 = v4.map(|s| s.parse().unwrap());
+        self.sources.lock().unwrap().v4 = v4.map(|s| s.parse().unwrap());
     }
 
     pub fn set_v6(&self, v6: Option<&str>) {
-        self.0.lock().unwrap().v6 = v6.map(|s| s.parse().unwrap());
+        self.sources.lock().unwrap().v6 = v6.map(|s| s.parse().unwrap());
     }
 }
 
 impl RouteProbe for FakeProbe {
     fn probe(&self) -> RouteSources {
-        *self.0.lock().unwrap()
+        *self.sources.lock().unwrap()
+    }
+
+    fn source_for(&self, target: SocketAddr) -> Option<IpAddr> {
+        self.source_calls.fetch_add(1, Ordering::SeqCst);
+        self.path.lock().unwrap().get(&target).copied()
     }
 }
 
@@ -247,7 +280,7 @@ async fn wait_true(mut rx: watch::Receiver<bool>) {
 
 pub struct ConnInner {
     pair: PairId,
-    remote: SocketAddr,
+    remote: Mutex<SocketAddr>,
     id: u64,
     initiator: bool,
     closed: Arc<watch::Sender<bool>>,
@@ -275,7 +308,7 @@ impl FakeConn {
         let closed = Arc::new(watch::channel(false).0);
         let a = FakeConn(Arc::new(ConnInner {
             pair: pair_a,
-            remote: remote_a,
+            remote: Mutex::new(remote_a),
             id: CONN_ID.fetch_add(1, Ordering::SeqCst),
             initiator: a_initiator,
             closed: closed.clone(),
@@ -287,7 +320,7 @@ impl FakeConn {
         }));
         let b = FakeConn(Arc::new(ConnInner {
             pair: pair_b,
-            remote: remote_b,
+            remote: Mutex::new(remote_b),
             id: CONN_ID.fetch_add(1, Ordering::SeqCst),
             initiator: !a_initiator,
             closed,
@@ -322,6 +355,11 @@ impl FakeConn {
         *self.0.closed.borrow()
     }
 
+    /// Собеседник сменил адрес посреди соединения (как после NAT-перепривязки).
+    pub fn set_remote(&self, remote: SocketAddr) {
+        *self.0.remote.lock().unwrap() = remote;
+    }
+
     pub fn opened(&self) -> usize {
         self.0.opened.load(Ordering::SeqCst)
     }
@@ -340,7 +378,7 @@ impl Connection for FakeConn {
     }
 
     fn remote_addr(&self) -> SocketAddr {
-        self.0.remote
+        *self.0.remote.lock().unwrap()
     }
 
     fn open_bi(&self) -> impl Future<Output = Result<(FakeTx, FakeRx), TransportError>> + Send {
@@ -498,6 +536,11 @@ impl FakeTransport {
 
     pub fn reknock_count(&self) -> usize {
         self.s.reknocks.load(Ordering::SeqCst)
+    }
+
+    /// Событие транспорта для движка (например, `RemoteAddrChanged`).
+    pub fn emit(&self, e: TransportEvent) {
+        let _ = self.s.events_tx.send(e);
     }
 }
 
@@ -807,14 +850,26 @@ pub fn add_solo_friend(
     Ok(pair)
 }
 
-/// Наблюдение друга: «с моей стороны вы выглядите как `observed`», друг на `via`.
+/// Наблюдение друга без живого соединения (отключённый друг): «с моей стороны вы выглядите
+/// как `observed`», друг на `via`. Идёт напрямую в `observe` активного друга, мимо проверки
+/// живого соединения `apply_peer_info`; отметки `reporter_up` нет, наблюдение не текущее.
 pub fn apply_obs(n: &Node, pair: PairId, via: &str, observed: &str) {
+    let unix = n.clock.now_unix();
+    let mut st = n.engine.inner.lock();
+    if st.book.is_active(&pair) {
+        let _ = st.own.observe(pair, addr(via), addr(observed), unix);
+    }
+}
+
+/// То же через `apply_peer_info` от имени соединения `conn_id`.
+pub fn apply_obs_on(n: &Node, pair: PairId, conn_id: u64, via: &str, observed: &str) {
     let now = Instant::now();
     let unix = n.clock.now_unix();
     let mut st = n.engine.inner.lock();
     n.engine.inner.apply_peer_info(
         &mut st,
         pair,
+        conn_id,
         chervo_token::addr_flow::PeerAddrInfo {
             observed_me: addr(observed),
             via: addr(via),
@@ -823,4 +878,10 @@ pub fn apply_obs(n: &Node, pair: PairId, via: &str, observed: &str) {
         now,
         unix,
     );
+}
+
+/// Наблюдение по живому соединению друга (его `conn_id` берётся из движка).
+pub fn apply_obs_live(n: &Node, pair: PairId, via: &str, observed: &str) {
+    let id = n.engine.connection(&pair).map_or(0, |c| c.conn_id());
+    apply_obs_on(n, pair, id, via, observed);
 }

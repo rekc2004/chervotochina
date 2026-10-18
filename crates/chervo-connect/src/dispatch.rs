@@ -117,12 +117,15 @@ where
             return;
         }
         let unix = self.clock.now_unix();
+        let remote = conn.remote_addr();
+        // П2a: проба маршрута вне замка состояния
+        let path_source = self.path_source(remote);
         let ours = {
             let mut st = self.lock();
             if !st.book.is_active(&pair) {
                 return;
             }
-            self.ours(&mut st, &pair, conn.remote_addr(), unix)
+            self.ours(&mut st, &pair, remote, path_source, unix)
         };
         let res = tokio::time::timeout(
             self.cfg.addr_info_timeout,
@@ -133,7 +136,7 @@ where
             let now = Instant::now();
             let unix = self.clock.now_unix();
             let mut st = self.lock();
-            self.apply_peer_info(&mut st, pair, info, now, unix);
+            self.apply_peer_info(&mut st, pair, conn.conn_id(), info, now, unix);
         }
     }
 

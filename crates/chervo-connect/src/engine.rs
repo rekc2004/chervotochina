@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use chervo_addr::{MapStatus, NatView, OwnAddrs, normalize};
+use chervo_addr::{AddrClass, MapStatus, NatView, OwnAddrs, PublishSet, classify, normalize};
 use chervo_friends::{FriendBook, FriendsError, KeyStatus};
 use chervo_identity::{KxPeer, ListKeyStore, PairId, SecretStore};
 use chervo_token::{InviteError, Sas, SignedAddrUpdate, TokenError};
@@ -219,6 +219,12 @@ pub(crate) struct State<C> {
     /// Удержания соединений: пара -> (`conn_id` соединения, число живых удержаний). Удержание
     /// относится к одному соединению; запись другого `conn_id` на живое не действует.
     pub(crate) holds: HashMap<PairId, (u64, usize)>,
+    /// F2: последний объявленный (или принятый за исходный) глобальный набор адресов.
+    pub(crate) ext_announced: Option<PublishSet>,
+    /// F2: исходный набор уже запомнен (первый непустой набор молчит).
+    pub(crate) ext_baseline: bool,
+    /// F2: когда объявление было в последний раз.
+    pub(crate) ext_last: Option<Instant>,
 }
 
 pub(crate) struct Inner<T: ManagedTransport, S> {
@@ -325,7 +331,11 @@ where
         let conns: Vec<T::Conn> = {
             let mut st = self.lock();
             st.inflight.clear();
-            st.live.drain().map(|(_, l)| l.conn).collect()
+            let drained: Vec<(PairId, LiveConn<T::Conn>)> = st.live.drain().collect();
+            for (pair, _) in &drained {
+                st.own.reporter_down(pair);
+            }
+            drained.into_iter().map(|(_, l)| l.conn).collect()
         };
         for c in &conns {
             c.close();
@@ -482,6 +492,8 @@ where
                     since: now,
                 },
             );
+            // F1: наблюдения этого друга до сих пор не текущие, пока он не сообщит заново
+            st.own.reporter_up(pair);
             // удержания прежнего соединения новому не принадлежат
             if st.holds.get(&pair).is_some_and(|(hid, _)| *hid != id) {
                 st.holds.remove(&pair);
@@ -501,6 +513,7 @@ where
                     .map(|(p, _)| *p);
                 let Some(victim) = oldest else { break };
                 if let Some(l) = st.live.remove(&victim) {
+                    st.own.reporter_down(&victim);
                     closing.push(l.conn);
                     events.push(EngineEvent::Disconnected { pair: victim });
                 }
@@ -543,6 +556,7 @@ where
             let mut st = self.lock();
             if st.live.get(&pair).is_some_and(|l| l.id == id) {
                 st.live.remove(&pair);
+                st.own.reporter_down(&pair);
                 if let Some(rt) = st.friends.get_mut(&pair) {
                     rt.want_addr_info = false;
                 }
@@ -768,12 +782,19 @@ where
         let mut events: Vec<EngineEvent> = Vec::new();
         let mut dials: Vec<(PairId, Vec<Candidate>)> = Vec::new();
         let mut sends: Vec<(PairId, T::Conn)> = Vec::new();
+        let announce;
         {
             let mut st = self.lock();
             self.fast_window_ends(&mut st, &local, now, unix, &mut events);
             self.retry_deferred(&mut st, now, unix);
+            // F2: до `collect_sends`, чтобы ADDR_INFO ушёл этим же тактом
+            announce = self.check_external(&mut st, now, unix);
             self.collect_sends(&mut st, now, &mut sends);
             self.plan_dials(&mut st, &local, now, unix, &mut dials);
+        }
+        if announce {
+            self.transport.reknock();
+            self.emit(EngineEvent::OwnAddrsChanged);
         }
         for e in events {
             self.emit(e);
@@ -819,6 +840,12 @@ where
                     let addr = st.live.get(&pair).map(|l| l.conn.remote_addr());
                     if let Some(addr) = addr {
                         let _ = st.book.note_contact(&*self.store, &pair, addr, unix);
+                        // F3: другу сообщаем, как мы видим его теперь; не чаще
+                        // `addr_info_out_interval` (отправляет `collect_sends`). Не наше
+                        // собственное событие: ни стука, ни быстрого окна, ни сброса.
+                        if st.book.is_active(&pair) {
+                            st.friends.entry(pair).or_default().want_addr_info = true;
+                        }
                     }
                 }
                 TransportEvent::ClockSkewSuspected { pair } => {
@@ -862,6 +889,23 @@ where
             if matches!(st.book.expire(&*self.store, unix), Ok(n) if n > 0) {
                 let _ = self.publish(&mut st);
             }
+            self.refresh_private_contacts(&mut st, unix);
+        }
+    }
+
+    /// П2c: живое соединение по частному адресу продлевает запись `Contact` (не чаще раза в
+    /// `CONTACT_REFRESH_SECS`, это решает `note_contact`). Только доказанный адрес: живое
+    /// соединение с ним.
+    fn refresh_private_contacts(&self, st: &mut State<T::Conn>, unix: u64) {
+        let private: Vec<(PairId, SocketAddr)> = st
+            .live
+            .iter()
+            .filter(|(pair, _)| st.book.is_active(pair))
+            .map(|(pair, l)| (*pair, l.conn.remote_addr()))
+            .filter(|(_, remote)| classify(normalize(*remote).ip()) == AddrClass::Private)
+            .collect();
+        for (pair, remote) in private {
+            let _ = st.book.note_contact(&*self.store, &pair, remote, unix);
         }
     }
 
@@ -975,6 +1019,9 @@ where
             key_problems: HashMap::new(),
             last_success_any: None,
             holds: HashMap::new(),
+            ext_announced: None,
+            ext_baseline: false,
+            ext_last: None,
         };
         let inner = Arc::new(Inner {
             transport,

@@ -41,10 +41,12 @@ fn info(update: Option<SignedAddrUpdate>) -> PeerAddrInfo {
 fn apply(n: &Node, pair: PairId, update: Option<SignedAddrUpdate>) {
     let now = Instant::now();
     let unix = n.clock.now_unix();
+    // обмен идёт по живому соединению друга, если оно есть (иначе наблюдение не засчитывается)
+    let id = n.engine.connection(&pair).map_or(0, |c| c.conn_id());
     let mut st = n.engine.inner.lock();
     n.engine
         .inner
-        .apply_peer_info(&mut st, pair, info(update), now, unix);
+        .apply_peer_info(&mut st, pair, id, info(update), now, unix);
 }
 
 fn known_has(n: &Node, pair: &PairId, a: &str) -> bool {
@@ -205,10 +207,18 @@ async fn addrinfo_observe_only_active() {
             ..ConnectConfig::default()
         },
     );
+    // наблюдение засчитывается по живому соединению (F1): сначала соединение, затем блокировка
+    let c = FakeConn::lonely(p, addr("5.6.7.8:4000"), false);
+    n.t.push_incoming(c.clone());
+    tokio::time::sleep(secs(1)).await;
+    assert!(n.engine.connection(&p).is_some());
     n.engine.update_book(|b, s| b.block(s, &p)).unwrap();
     apply(&n, p, None);
     assert_ne!(n.engine.nat_view(), NatView::ManualForward);
     n.engine.update_book(|b, s| b.unblock(s, &p)).unwrap();
+    let c2 = FakeConn::lonely(p, addr("5.6.7.8:4000"), false);
+    n.t.push_incoming(c2);
+    tokio::time::sleep(secs(1)).await;
     apply(&n, p, None);
     assert_eq!(n.engine.nat_view(), NatView::ManualForward);
 }

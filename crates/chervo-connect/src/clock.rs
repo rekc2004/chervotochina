@@ -1,10 +1,11 @@
 //! Часы и проба маршрута. Время для подписей и сроков берётся только отсюда.
 
 use std::fmt;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use chervo_addr::{RouteSources, probe_route_sources};
+use chervo_addr::{RouteSources, probe_route_sources, route_source_for};
 
 /// Секунды UTC с учётом поправки пользователя.
 pub trait Clock: Send + Sync {
@@ -72,6 +73,9 @@ impl Clock for SystemClock {
 /// Источник сведений о маршруте (для тестов подменяется).
 pub trait RouteProbe: Send + Sync {
     fn probe(&self) -> RouteSources;
+    /// Наш адрес-источник на маршруте к `target` (пакет не отправляется). `None`: адрес не
+    /// определён. Вызывается вне замка состояния.
+    fn source_for(&self, target: SocketAddr) -> Option<IpAddr>;
 }
 
 /// Настоящая проба: `chervo_addr::probe_route_sources`.
@@ -80,5 +84,9 @@ pub struct SystemProbe;
 impl RouteProbe for SystemProbe {
     fn probe(&self) -> RouteSources {
         probe_route_sources()
+    }
+
+    fn source_for(&self, target: SocketAddr) -> Option<IpAddr> {
+        route_source_for(target)
     }
 }

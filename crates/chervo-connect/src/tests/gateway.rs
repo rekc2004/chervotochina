@@ -130,8 +130,16 @@ async fn mapper_result_sets_gateway_and_resends_addr_info() {
             .await
             .contains(&EngineEvent::OwnAddrsChanged)
     );
-    // без нового стука и без сброса: проброс не новая сеть
-    assert_eq!(a.t.reknock_count(), 0);
+    // подтверждённый проброс меняет объявляемый глобальный набор, поэтому F2 объявляет это
+    // один раз (повторный стук + ADDR_INFO + `OwnAddrsChanged`); быстрого окна и сброса
+    // ограничителя нет: проброс не новая сеть
+    assert_eq!(a.t.reknock_count(), 1);
+    let st = a.engine.inner.lock();
+    assert!(
+        st.fast_global_until
+            .is_none_or(|t| t <= tokio::time::Instant::now()),
+        "no fast window from the mapping announce"
+    );
 }
 
 #[tokio::test(start_paused = true)]

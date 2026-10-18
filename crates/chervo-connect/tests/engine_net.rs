@@ -128,6 +128,10 @@ impl RouteProbe for Probe {
     fn probe(&self) -> RouteSources {
         *self.0.lock().unwrap()
     }
+
+    fn source_for(&self, _target: SocketAddr) -> Option<std::net::IpAddr> {
+        None
+    }
 }
 
 fn quinn_cfg() -> QuinnConfig {
