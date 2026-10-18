@@ -1,7 +1,7 @@
 //! Собственные адреса: наблюдения, вид сети, набор для публикации.
 //! Значения `PublishSet` строятся только через `OwnAddrs`.
 
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 
 use chervo_addr::{
     GatewayInfo, LocalSnapshot, MAX_OBSERVATIONS, MAX_UPDATE_ADDRS, NatView, OBSERVED_TTL_SECS,
@@ -467,16 +467,28 @@ fn publish_v6_short_lived_never_eui64() {
     let mut u = OwnAddrs::new();
     u.set_local(snap(None, Some("fd00::211:22ff:fe33:4455"), &["[::]:4001"]));
     assert!(
-        u.publishable(PublishCtx { include_lan: true }, NOW)
-            .is_empty()
+        u.publishable(
+            PublishCtx {
+                include_lan: true,
+                path_source: None,
+            },
+            NOW
+        )
+        .is_empty()
     );
     // не глобальный и не частный IPv6 не публикуется
     for bad in ["fe80::1", "2001:db8::1", "::1"] {
         let mut b = OwnAddrs::new();
         b.set_local(snap(None, Some(bad), &["[::]:4001"]));
         assert!(
-            b.publishable(PublishCtx { include_lan: true }, NOW)
-                .is_empty(),
+            b.publishable(
+                PublishCtx {
+                    include_lan: true,
+                    path_source: None,
+                },
+                NOW
+            )
+            .is_empty(),
             "{bad}"
         );
     }
@@ -492,7 +504,13 @@ fn publish_lan_only_with_ctx() {
     ));
     assert!(o.publishable(PublishCtx::default(), NOW).is_empty());
     assert_eq!(
-        flags(&o.publishable(PublishCtx { include_lan: true }, NOW)),
+        flags(&o.publishable(
+            PublishCtx {
+                include_lan: true,
+                path_source: None,
+            },
+            NOW
+        )),
         vec![
             (sa("192.168.1.2:4000"), false, false),
             (sa("[fd00::7]:4001"), true, false)
@@ -526,7 +544,13 @@ fn publish_dedup_and_cap() {
         &["0.0.0.0:4000", "[::]:4001"],
     ));
     report(&mut o, 1, "9.9.9.9:6000");
-    let full = flags(&o.publishable(PublishCtx { include_lan: true }, NOW));
+    let full = flags(&o.publishable(
+        PublishCtx {
+            include_lan: true,
+            path_source: None,
+        },
+        NOW,
+    ));
     assert_eq!(full.len(), 3);
     assert!(full.len() <= MAX_UPDATE_ADDRS);
     for (i, a) in full.iter().enumerate() {
@@ -540,16 +564,25 @@ fn publish_dedup_and_cap() {
 }
 
 #[test]
-fn for_connection_lan_rule() {
-    for s in [
-        "192.168.1.9:5",
-        "10.0.0.1:5",
-        "172.16.0.1:5",
-        "[fd00::1]:5",
-        "[::ffff:192.168.1.9]:5",
+fn for_connection_rules() {
+    let src4: IpAddr = "10.99.0.1".parse().unwrap();
+    let src6: IpAddr = "fd00::5".parse().unwrap();
+    // частный удалённый адрес и частный источник того же семейства: путь принят
+    for (s, src) in [
+        ("192.168.1.9:5", src4),
+        ("10.0.0.1:5", src4),
+        ("172.16.0.1:5", src4),
+        ("[fd00::1]:5", src6),
+        ("[::ffff:192.168.1.9]:5", src4),
     ] {
-        assert!(PublishCtx::for_connection(sa(s)).include_lan, "{s}");
+        let c = PublishCtx::for_connection(sa(s), Some(src));
+        assert!(!c.include_lan, "{s}");
+        assert_eq!(c.path_source, Some(src), "{s}");
+        // без источника пути нет, и LAN по умолчанию не включается
+        let n = PublishCtx::for_connection(sa(s), None);
+        assert_eq!(n, PublishCtx::default(), "{s}");
     }
+    // не частный удалённый адрес: источника нет, что бы ни дали
     for s in [
         "8.8.8.8:5",
         "[2606:4700::1]:5",
@@ -559,7 +592,41 @@ fn for_connection_lan_rule() {
         "[fe80::1]:5",
         "[::ffff:8.8.8.8]:5",
     ] {
-        assert!(!PublishCtx::for_connection(sa(s)).include_lan, "{s}");
+        for src in [src4, src6] {
+            let c = PublishCtx::for_connection(sa(s), Some(src));
+            assert!(!c.include_lan && c.path_source.is_none(), "{s}");
+        }
+    }
+    // семейство источника другое: нет; источник не частный: нет
+    assert!(
+        PublishCtx::for_connection(sa("192.168.1.9:5"), Some(src6))
+            .path_source
+            .is_none()
+    );
+    assert!(
+        PublishCtx::for_connection(sa("[fd00::1]:5"), Some(src4))
+            .path_source
+            .is_none()
+    );
+    for bad in [
+        "8.8.8.8",
+        "100.64.0.9",
+        "169.254.1.1",
+        "127.0.0.1",
+        "2606:4700::7",
+    ] {
+        let ip: IpAddr = bad.parse().unwrap();
+        let remote = if ip.is_ipv4() {
+            "192.168.1.9:5"
+        } else {
+            "[fd00::1]:5"
+        };
+        assert!(
+            PublishCtx::for_connection(sa(remote), Some(ip))
+                .path_source
+                .is_none(),
+            "{bad}"
+        );
     }
 }
 

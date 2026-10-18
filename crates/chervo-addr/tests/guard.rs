@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::Path;
 
-use chervo_addr::{PROBE_V4, PROBE_V6, probe_route_sources};
+use chervo_addr::{PROBE_V4, PROBE_V6, probe_route_sources, route_source_for};
 
 #[test]
 fn probe_no_panic() {
@@ -17,6 +17,17 @@ fn probe_no_panic() {
     }
     assert_eq!(PROBE_V4, "192.0.2.1:9".parse().unwrap());
     assert_eq!(PROBE_V6, "[2001:db8::1]:9".parse().unwrap());
+}
+
+#[test]
+fn route_source_for_loopback_none() {
+    // петлевая цель даёт петлевой источник, а он отбрасывается; ничего не отправляется
+    assert_eq!(route_source_for("127.0.0.1:9".parse().unwrap()), None);
+    assert_eq!(route_source_for("[::1]:9".parse().unwrap()), None);
+    // любой результат для остальных целей допустим (сети может не быть), но не петлевой
+    if let Some(ip) = route_source_for("10.255.255.1:9".parse().unwrap()) {
+        assert!(!ip.is_unspecified() && !ip.is_loopback());
+    }
 }
 
 #[test]

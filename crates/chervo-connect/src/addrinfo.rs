@@ -30,7 +30,7 @@ where
     S: SecretStore + ListKeyStore + 'static,
 {
     /// Действие пользователя «отправить токен адреса этому другу». Только `Active`. Адреса:
-    /// `own.publishable(PublishCtx { include_lan }, now)` (частные адреса только по явному
+    /// `own.publishable(PublishCtx { include_lan, .. }, now)` (частные адреса только по явному
     /// выбору). Номер сохраняется на диск до подписи (`FriendBook::issue_addr_update`).
     /// Пустой набор: `NoAddresses`, номер не тратится. Возвращает текст `CHA1`, в журнал
     /// ничего не пишется. Запись `last_sent` для ADDR_INFO не трогается.
@@ -51,7 +51,13 @@ where
         if !st.book.is_active(pair) {
             return Err(ConnectError::NotActive);
         }
-        let set = st.own.publishable(PublishCtx { include_lan }, unix);
+        let set = st.own.publishable(
+            PublishCtx {
+                include_lan,
+                path_source: None,
+            },
+            unix,
+        );
         if set.is_empty() {
             return Err(ConnectError::NoAddresses);
         }
@@ -93,7 +99,9 @@ where
         remote: SocketAddr,
         unix: u64,
     ) -> Option<IssuedAddrUpdate> {
-        let set = st.own.publishable(PublishCtx::for_connection(remote), unix);
+        let set = st
+            .own
+            .publishable(PublishCtx::for_connection(remote, None), unix);
         if set.is_empty() {
             return None;
         }

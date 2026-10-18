@@ -12,6 +12,10 @@ pub const HINT_TTL_SECS: u64 = 86_400;
 pub const CONTACT_TTL_SECS: u64 = 86_400;
 pub const CONTACT_REFRESH_SECS: u64 = 3_600;
 pub const MAX_CONTACT_ADDRS: usize = 4;
+/// Срок жизни любой записи друга с частным адресом (RFC 1918, ULA), независимо от источника.
+/// ПРЕДВАРИТЕЛЬНО: решение владельца по сроку не окончательное, см. docs/OWNER_DECISIONS.md,
+/// «16а Q1». Менять только эту константу.
+pub const PRIVATE_TTL_SECS: u64 = 86_400;
 /// Сколько адресов берётся из приглашения.
 const MAX_INVITE_KEEP: usize = 8;
 
@@ -42,7 +46,8 @@ pub fn from_invite(addrs: &[SocketAddr], now_unix: u64) -> Vec<KnownAddr> {
 /// (`last_seen = now`) в начало, остальное (в первую очередь `Contact`) оставить. Остальная
 /// запись с тем же адресом, что у обновления, заменяется записью обновления.
 /// Исключение (L1): обновление только из подсказок (`hint`) не вытесняет прежние
-/// `AddressUpdate` без подсказки: они остаются после новых подсказок. Лимит записей на
+/// `AddressUpdate` без подсказки с глобальным адресом: они остаются после новых подсказок
+/// (частные записи не остаются: их срок `PRIVATE_TTL_SECS`). Лимит записей на
 /// стороне вызывающего (`trim`).
 /// Из принимаемых полей `short_lived` берётся не из флага отправителя, а по семейству
 /// адреса: `short_lived = addr.is_ipv6()` (L3).
@@ -63,7 +68,10 @@ pub fn merge_update(addrs: &mut Vec<KnownAddr>, update: &[UpdateAddr], now_unix:
     }
     let fresh = out.len();
     for k in addrs.drain(..) {
-        let keep_prev_update = hints_only && k.source == AddrSource::AddressUpdate && !k.hint;
+        let keep_prev_update = hints_only
+            && k.source == AddrSource::AddressUpdate
+            && !k.hint
+            && classify(normalize(k.addr).ip()) == AddrClass::Global;
         if matches!(k.source, AddrSource::Invite | AddrSource::AddressUpdate) && !keep_prev_update {
             continue;
         }
@@ -134,6 +142,8 @@ fn dead(k: &KnownAddr, now_unix: u64) -> bool {
         || (k.hint && expired(k.last_seen_unix, HINT_TTL_SECS, now_unix))
         || (k.source == AddrSource::Contact
             && expired(k.last_seen_unix, CONTACT_TTL_SECS, now_unix))
+        || (expired(k.last_seen_unix, PRIVATE_TTL_SECS, now_unix)
+            && classify(normalize(k.addr).ip()) == AddrClass::Private)
 }
 
 /// Убрать короткоживущие и подсказки старше их сроков, `Contact` старше `CONTACT_TTL_SECS`.

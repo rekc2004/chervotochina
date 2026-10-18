@@ -213,7 +213,13 @@ fn fuzz_set() -> chervo_addr::PublishSet {
         "9.9.9.9:6000".parse().unwrap(),
         1_000,
     );
-    o.publishable(chervo_addr::PublishCtx { include_lan: true }, 1_000)
+    o.publishable(
+        chervo_addr::PublishCtx {
+            include_lan: true,
+            path_source: None,
+        },
+        1_000,
+    )
 }
 
 #[test]

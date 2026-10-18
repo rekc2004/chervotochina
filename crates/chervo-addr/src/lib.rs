@@ -22,16 +22,16 @@ use std::net::SocketAddr;
 
 pub use book::{
     CONTACT_REFRESH_SECS, CONTACT_TTL_SECS, Findability, HINT_TTL_SECS, MAX_CONTACT_ADDRS,
-    NEED_TOKEN_TEXT, NO_PUBLIC_ADDR_TEXT, SHORT_LIVED_TTL_SECS, findability, from_invite,
-    merge_update, note_contact, prune, usable, usable_entries,
+    NEED_TOKEN_TEXT, NO_PUBLIC_ADDR_TEXT, PRIVATE_TTL_SECS, SHORT_LIVED_TTL_SECS, findability,
+    from_invite, merge_update, note_contact, prune, usable, usable_entries,
 };
 pub use class::{AddrClass, classify, is_eui64, normalize, update_allowed};
 pub use mapper::{MapReport, MapRequest, MapStatus, PortMapper};
 pub use own::{
-    GatewayInfo, LocalSnapshot, MAX_OBSERVATIONS, MAX_UPDATE_ADDRS, NatView, OBSERVED_TTL_SECS,
-    ObserveOutcome, ObserveReject, OwnAddrs, PublishCtx, PublishSet, UpdateAddr,
+    GatewayInfo, LocalSnapshot, MAX_OBSERVATIONS, MAX_REPORTERS_UP, MAX_UPDATE_ADDRS, NatView,
+    OBSERVED_TTL_SECS, ObserveOutcome, ObserveReject, OwnAddrs, PublishCtx, PublishSet, UpdateAddr,
 };
-pub use probe::{PROBE_V4, PROBE_V6, RouteSources, probe_route_sources};
+pub use probe::{PROBE_V4, PROBE_V6, RouteSources, probe_route_sources, route_source_for};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddrSource {

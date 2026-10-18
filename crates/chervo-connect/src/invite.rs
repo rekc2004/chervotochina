@@ -351,6 +351,7 @@ where
                         .publishable(
                             PublishCtx {
                                 include_lan: same_network,
+                                path_source: None,
                             },
                             unix,
                         )

@@ -116,12 +116,13 @@ fn merge_update_replaces_invite_and_update_keeps_contact() {
 
 #[test]
 fn merge_update_hint_only_keeps_previous_non_hint_updates() {
+    // Адреса глобальные: класс Documentation (198.51.100/24, 203.0.113/24) не Global, L1 его не хранит.
     let base = || {
         vec![
-            known("198.51.100.1:1", AddrSource::Invite, 1, false, false),
-            known("198.51.100.2:2", AddrSource::AddressUpdate, 2, false, false),
-            known("198.51.100.6:6", AddrSource::AddressUpdate, 2, false, true),
-            known("198.51.100.3:3", AddrSource::Contact, 3, false, false),
+            known("8.8.4.1:1", AddrSource::Invite, 1, false, false),
+            known("8.8.4.2:2", AddrSource::AddressUpdate, 2, false, false),
+            known("8.8.4.6:6", AddrSource::AddressUpdate, 2, false, true),
+            known("8.8.4.3:3", AddrSource::Contact, 3, false, false),
         ]
     };
     // только подсказки: прежний AddressUpdate без подсказки остаётся после новых подсказок
@@ -129,8 +130,8 @@ fn merge_update_hint_only_keeps_previous_non_hint_updates() {
     merge_update(
         &mut v,
         &[
-            upd("203.0.113.5:50", false, true),
-            upd("198.51.100.2:2", false, true),
+            upd("9.9.9.5:50", false, true),
+            upd("8.8.4.2:2", false, true),
         ],
         NOW,
     );
@@ -141,10 +142,10 @@ fn merge_update_hint_only_keeps_previous_non_hint_updates() {
     assert_eq!(
         got,
         vec![
-            (sa("203.0.113.5:50"), AddrSource::AddressUpdate, NOW, true),
+            (sa("9.9.9.5:50"), AddrSource::AddressUpdate, NOW, true),
             // тот же адрес, что и у подсказки, заменяется записью обновления
-            (sa("198.51.100.2:2"), AddrSource::AddressUpdate, NOW, true),
-            (sa("198.51.100.3:3"), AddrSource::Contact, 3, false),
+            (sa("8.8.4.2:2"), AddrSource::AddressUpdate, NOW, true),
+            (sa("8.8.4.3:3"), AddrSource::Contact, 3, false),
         ]
     );
     // вторая ветвь, как раньше: есть запись без подсказки, прежние AddressUpdate уходят
@@ -152,29 +153,21 @@ fn merge_update_hint_only_keeps_previous_non_hint_updates() {
     merge_update(
         &mut v,
         &[
-            upd("203.0.113.5:50", false, true),
-            upd("203.0.113.6:60", false, false),
+            upd("9.9.9.5:50", false, true),
+            upd("9.9.9.6:60", false, false),
         ],
         NOW,
     );
     assert_eq!(
         addrs_of(&v),
-        vec![
-            sa("203.0.113.5:50"),
-            sa("203.0.113.6:60"),
-            sa("198.51.100.3:3")
-        ]
+        vec![sa("9.9.9.5:50"), sa("9.9.9.6:60"), sa("8.8.4.3:3")]
     );
     // подсказки без совпадений: прежний AddressUpdate без подсказки цел, старая подсказка ушла
     let mut v = base();
-    merge_update(&mut v, &[upd("203.0.113.5:50", false, true)], NOW);
+    merge_update(&mut v, &[upd("9.9.9.5:50", false, true)], NOW);
     assert_eq!(
         addrs_of(&v),
-        vec![
-            sa("203.0.113.5:50"),
-            sa("198.51.100.2:2"),
-            sa("198.51.100.3:3")
-        ]
+        vec![sa("9.9.9.5:50"), sa("8.8.4.2:2"), sa("8.8.4.3:3")]
     );
 }
 

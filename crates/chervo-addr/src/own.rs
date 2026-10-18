@@ -16,6 +16,8 @@ use crate::probe::RouteSources;
 pub const OBSERVED_TTL_SECS: u64 = 1_800;
 pub const MAX_OBSERVATIONS: usize = 16;
 pub const MAX_UPDATE_ADDRS: usize = 8;
+/// Сколько друзей с живым соединением помнится одновременно (больше `ConnectConfig::max_live`).
+pub const MAX_REPORTERS_UP: usize = 256;
 
 /// Допуск на «будущее» время наблюдения, секунд.
 const OBSERVED_FUTURE_SKEW_SECS: u64 = 60;
@@ -141,14 +143,28 @@ impl fmt::Debug for PublishSet {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PublishCtx {
+    /// Явный выбор пользователя «в одной сети» (приглашение или токен): частные адреса
+    /// маршрута по умолчанию.
     pub include_lan: bool,
+    /// Наш адрес на пути конкретного частного соединения (`local_addr` нашего сокета при
+    /// маршруте к `remote`); друг выбирает только цель пробы, но не сам адрес.
+    pub path_source: Option<IpAddr>,
 }
 
 impl PublishCtx {
-    /// `include_lan` = соединение само идёт по частному адресу.
-    pub fn for_connection(remote: SocketAddr) -> Self {
+    /// `include_lan` всегда `false`. `path_source` = `source`, если `remote` (после
+    /// `normalize`) частный, `source` тоже частный и того же семейства; иначе `None`.
+    pub fn for_connection(remote: SocketAddr, source: Option<IpAddr>) -> Self {
+        let remote = normalize(remote);
+        let path_source = source.and_then(|ip| {
+            let ip = normalize(SocketAddr::new(ip, 0)).ip();
+            let private_remote = classify(remote.ip()) == AddrClass::Private;
+            let private_src = classify(ip) == AddrClass::Private;
+            (private_remote && private_src && ip.is_ipv4() == remote.is_ipv4()).then_some(ip)
+        });
         Self {
-            include_lan: classify(normalize(remote).ip()) == AddrClass::Private,
+            include_lan: false,
+            path_source,
         }
     }
 }
@@ -160,6 +176,8 @@ struct Obs {
     via: SocketAddr,
     observed: SocketAddr,
     at: u64,
+    /// Порядковый номер принятия (`OwnAddrs::seq`); сравнивается с отметкой `reporter_up`.
+    seq: u64,
 }
 
 #[derive(Default)]
@@ -169,6 +187,11 @@ pub struct OwnAddrs {
     obs: Vec<Obs>,
     /// Внешний порт ручного проброса (настройка пользователя); не сбрасывается `set_local`.
     manual: Option<u16>,
+    /// Внутренний счётчик порядка (не время) для наблюдений и отметок `reporter_up`.
+    seq: u64,
+    /// Друзья с живым соединением: (кто, номер отметки). Наблюдения не новее отметки
+    /// не считаются текущими.
+    up: Vec<(PairId, u64)>,
 }
 
 impl fmt::Debug for OwnAddrs {
@@ -257,11 +280,13 @@ impl OwnAddrs {
             return ObserveOutcome::Rejected(ObserveReject::ReporterOwnIp);
         }
         self.obs.retain(|o| o.reporter != reporter);
+        self.seq = self.seq.saturating_add(1);
         self.obs.push(Obs {
             reporter,
             via,
             observed,
             at: now_unix,
+            seq: self.seq,
         });
         while self.obs.len() > MAX_OBSERVATIONS {
             let oldest = self
@@ -280,8 +305,52 @@ impl OwnAddrs {
         ObserveOutcome::Accepted
     }
 
+    /// Забыть друга: наблюдения и отметка `reporter_up` удаляются.
     pub fn forget_reporter(&mut self, reporter: &PairId) {
         self.obs.retain(|o| &o.reporter != reporter);
+        self.reporter_down(reporter);
+    }
+
+    /// С этого момента у `reporter` есть живое соединение; его прежние наблюдения перестают
+    /// быть текущими. Повторный вызов обновляет отметку. Сверх `MAX_REPORTERS_UP` уходит
+    /// отметка с самым старым номером.
+    pub fn reporter_up(&mut self, reporter: PairId) {
+        self.seq = self.seq.saturating_add(1);
+        let mark = self.seq;
+        if let Some(slot) = self.up.iter_mut().find(|(p, _)| *p == reporter) {
+            slot.1 = mark;
+            return;
+        }
+        self.up.push((reporter, mark));
+        while self.up.len() > MAX_REPORTERS_UP {
+            let oldest = self
+                .up
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, (_, m))| *m)
+                .map(|(i, _)| i);
+            match oldest {
+                Some(i) => {
+                    self.up.remove(i);
+                }
+                None => break,
+            }
+        }
+    }
+
+    /// Соединение закрыто: отметка снимается, наблюдения остаются (запасной вариант по TTL).
+    pub fn reporter_down(&mut self, reporter: &PairId) {
+        self.up.retain(|(p, _)| p != reporter);
+    }
+
+    /// Число отметок `reporter_up` (тесты, инварианты; адресов не раскрывает).
+    pub fn reporters_up(&self) -> usize {
+        self.up.len()
+    }
+
+    /// Наблюдение текущее: друг помечен «на связи» и наблюдение принято после последней отметки.
+    fn current(&self, o: &Obs) -> bool {
+        self.up.iter().any(|(p, m)| *p == o.reporter && o.seq > *m)
     }
 
     /// Живые IPv4-наблюдения: `now < at + TTL` и `at <= now + 60`.
@@ -297,6 +366,17 @@ impl OwnAddrs {
                 SocketAddr::V6(_) => None,
             })
             .collect()
+    }
+
+    /// Действующий набор IPv4-наблюдений: живые по TTL, а если среди них есть текущие, то
+    /// только текущие (старое мнение отключённого друга не спорит со свежим).
+    fn effective_v4(&self, now_unix: u64) -> Vec<(&Obs, SocketAddrV4)> {
+        let live = self.live_v4(now_unix);
+        if live.iter().any(|(o, _)| self.current(o)) {
+            live.into_iter().filter(|(o, _)| self.current(o)).collect()
+        } else {
+            live
+        }
     }
 
     pub fn nat_view(&self, now_unix: u64) -> NatView {
@@ -327,7 +407,7 @@ impl OwnAddrs {
         {
             return NatView::PortMapped;
         }
-        let live = self.live_v4(now_unix);
+        let live = self.effective_v4(now_unix);
         let first_ip = live.first().map(|(_, a)| *a.ip());
         if let Some(first) = first_ip
             && live.iter().any(|(_, a)| *a.ip() != first)
@@ -370,7 +450,7 @@ impl OwnAddrs {
         if !matches!(self.nat_view(now_unix), NatView::Unknown | NatView::Eim) {
             return None;
         }
-        self.live_v4(now_unix)
+        self.effective_v4(now_unix)
             .into_iter()
             .max_by_key(|(o, _)| o.at)
             .map(|(_, a)| a)
@@ -378,8 +458,9 @@ impl OwnAddrs {
 
     /// Порядок записей: (1) маршрутный глобальный IPv4, (2) проброс порта при
     /// `PortMapped`, (3) наблюдение друга с флагом `hint`, (4) глобальный IPv6 (не
-    /// EUI-64, `short_lived`), (5) только при `include_lan`: частные IPv4 и ULA. Без
-    /// повторов, не более `MAX_UPDATE_ADDRS`.
+    /// EUI-64, `short_lived`), (5) при `path_source`: только этот частный адрес пути (если
+    /// слушаем на нём или на неуказанном адресе); иначе при `include_lan`: частные IPv4 и
+    /// ULA маршрута по умолчанию. Без повторов, не более `MAX_UPDATE_ADDRS`.
     pub fn publishable(&self, ctx: PublishCtx, now_unix: u64) -> PublishSet {
         let mut out: Vec<UpdateAddr> = Vec::new();
         let Some(local) = self.local.as_ref() else {
@@ -423,7 +504,10 @@ impl OwnAddrs {
         // IP не проверен, поэтому `hint`
         if self.nat_view(now_unix) == NatView::ManualForward
             && let Some(port) = self.manual
-            && let Some((_, newest)) = self.live_v4(now_unix).into_iter().max_by_key(|(o, _)| o.at)
+            && let Some((_, newest)) = self
+                .effective_v4(now_unix)
+                .into_iter()
+                .max_by_key(|(o, _)| o.at)
         {
             push(SocketAddr::new(IpAddr::V4(*newest.ip()), port), false, true);
         }
@@ -437,8 +521,24 @@ impl OwnAddrs {
         {
             push(SocketAddr::new(IpAddr::V6(ip), p), true, false);
         }
-        // (5)
-        if ctx.include_lan {
+        // (5) на пути частного соединения: только наш адрес на этом пути (`local_addr`
+        // сокета), и только если слушаем на нём или на неуказанном адресе того же семейства
+        if let Some(src) = ctx.path_source {
+            let src = normalize(SocketAddr::new(src, 0)).ip();
+            let src_ok = classify(src) == AddrClass::Private
+                && match src {
+                    IpAddr::V4(_) => true,
+                    IpAddr::V6(v6) => !is_eui64(&v6),
+                };
+            let listen = local.listen.iter().find(|a| {
+                a.is_ipv4() == src.is_ipv4()
+                    && a.port() != 0
+                    && (a.ip().is_unspecified() || a.ip() == src)
+            });
+            if src_ok && let Some(l) = listen {
+                push(SocketAddr::new(src, l.port()), src.is_ipv6(), false);
+            }
+        } else if ctx.include_lan {
             if let (Some(ip), Some(p)) = (route_v4, p4)
                 && class_v4(ip) == AddrClass::Private
             {
@@ -451,5 +551,39 @@ impl OwnAddrs {
             }
         }
         PublishSet { addrs: out }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seq_saturates() {
+        let who = PairId::from_bytes([1; 16]);
+        let mut o = OwnAddrs::new();
+        o.set_local(LocalSnapshot {
+            route: RouteSources {
+                v4: Some(Ipv4Addr::new(192, 168, 1, 2)),
+                v6: None,
+            },
+            listen: vec![SocketAddr::from(([0, 0, 0, 0], 4000))],
+        });
+        o.seq = u64::MAX - 1;
+        o.reporter_up(who);
+        assert_eq!(o.seq, u64::MAX);
+        let via = SocketAddr::from(([8, 8, 8, 8], 5000));
+        let seen = SocketAddr::from(([9, 9, 9, 9], 6000));
+        // счётчик на пределе: паники нет, наблюдение принято
+        assert_eq!(o.observe(who, via, seen, 100), ObserveOutcome::Accepted);
+        assert_eq!(o.seq, u64::MAX);
+        o.reporter_up(who);
+        assert_eq!(o.seq, u64::MAX);
+        assert_eq!(o.reporters_up(), 1);
+        // наблюдение не новее отметки: нетекущее, но запасной вариант по TTL его отдаёт
+        assert_eq!(
+            o.observed_v4(100),
+            Some(SocketAddrV4::new(Ipv4Addr::new(9, 9, 9, 9), 6000))
+        );
     }
 }

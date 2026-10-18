@@ -52,7 +52,13 @@ fn rich_set() -> PublishSet {
         sa("9.9.9.9:6000"),
         NOW,
     );
-    o.publishable(PublishCtx { include_lan: true }, NOW)
+    o.publishable(
+        PublishCtx {
+            include_lan: true,
+            path_source: None,
+        },
+        NOW,
+    )
 }
 
 fn empty_set() -> PublishSet {

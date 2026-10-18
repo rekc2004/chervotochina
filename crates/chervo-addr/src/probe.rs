@@ -6,7 +6,7 @@
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 
-use crate::class::{AddrClass, classify};
+use crate::class::{AddrClass, classify, normalize};
 
 /// 192.0.2.1:9 (TEST-NET-1, RFC 5737).
 pub const PROBE_V4: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 9);
@@ -36,6 +36,18 @@ fn source_for(bind: SocketAddr, target: SocketAddr) -> Option<IpAddr> {
         AddrClass::Unspecified | AddrClass::Loopback => None,
         _ => Some(ip),
     }
+}
+
+/// Адрес-источник на маршруте к `target` (после `normalize`): bind неуказанного адреса его
+/// семейства, UDP `connect`, `local_addr`. Петлевой, неуказанный адрес и любая ошибка дают
+/// `None`. Ничего не отправляет.
+pub fn route_source_for(target: SocketAddr) -> Option<IpAddr> {
+    let target = normalize(target);
+    let bind = match target {
+        SocketAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+        SocketAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+    };
+    source_for(bind, target)
 }
 
 /// bind `0.0.0.0:0` / `[::]:0`, `connect(PROBE_*)`, `local_addr().ip()`. Любая ошибка
