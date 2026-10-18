@@ -1,6 +1,6 @@
 # SPEC 16: Network tests (netns, nftables, tc netem)          criticality: P0 CRITICAL (token API), rest NORMAL (test stand)
 
-Author: combine-architect (opus), 2026-10-18, revision 1; Rev. 2 addendum 2026-10-18 after the full run (section 20). Labels: [P] verified by me in the repository source (file:line); [C] confirmed by the conductor on the Linux box, not by me; [V] architect's inference from code; [NP] not verified. **Nothing was run by me.** No new external packages. One new internal dev-edge: `chervo-transfer` (dev) -> `chervo-upnp` (path crate).
+Author: combine-architect (opus), 2026-10-18, revision 1; Rev. 2 addendum 2026-10-18 after the full run (section 20); Rev. 3 note 2026-10-18 after the rerun (section 21). Labels: [P] verified by me in the repository source (file:line); [C] confirmed by the conductor on the Linux box, not by me; [V] architect's inference from code; [NP] not verified. **Nothing was run by me.** No new external packages. One new internal dev-edge: `chervo-transfer` (dev) -> `chervo-upnp` (path crate).
 
 Goal (TASK stage 16): netns/netem stand for the BRIEF section 10 scenario; the same NATs via rendezvous; speed table (LAN, IPv6, UPnP, hole punch) with CPU; generated report "which pairs did not connect and why"; separate line "not verified: real operators, TSPU".
 
@@ -288,3 +288,17 @@ Analysis: `docs/reports/NETTEST-2026-10-18.md` section 12. Rule D8 holds: an exp
 
 ### 20.4 Acceptance
 Rows of 20.1-20.2 rerun on the Linux box. Section 15 "no open FAIL in guard" stays: C06 and C20 close only after 16а, or the conductor carries them into 16а with the owner's consent.
+
+## 21. Rev. 3 note (2026-10-18, after the rerun on stand 0d2713e)
+Analysis: `docs/reports/NETTEST-2026-10-18.md` section 13.2. Only the way G7-DROP15 counts connections changes; the meaning of the 20.1 expectation (the 15 s outage causes no reconnect and no pause) stays.
+
+**Резюме (русский).** Строка «обрыв 15 с» считала все соединения с момента запуска. Лишнее соединение при старте — штатный дубль одновременного набора, оно появляется до обрыва. Теперь считаются только соединения после начала обрыва.
+
+- **Fact [P].** A simultaneous mutual dial at start can give two `EVENT connected` on one node with no `disconnected` between them. The transport keeps one connection by the caller-key rule and closes the other (chervo-transport-quinn/src/registry.rs:65-124, :207-213). The engine replaces the live entry and emits `Connected` again (chervo-connect/src/engine.rs:465-501). Rerun: the second `connected` came at t≈2.1 s, before the drop [C].
+- **S4 (builder).** In `g7_run` take marks `lines_of sa1` and `lines_of rb1` right before `drop_on` (DROP15 and DROP45). DROP15 passes when all hold:
+  - `cnt_after` of `^EVENT connected pair=` and of `^EVENT disconnected pair=` after the mark is 0 on both nodes;
+  - `paused = 0` and `max_stall_s <= 30`;
+  - the transfer completed and cmp is equal.
+
+  The note prints `connections=<total> conn_after_event=<n> disc_after_event=<n>`. Section 9 "1 = migration, >= 2 = reconnect" and the report16.sh footnote now refer to connections after the event. DROP45 and the other rows are unchanged.
+- Rerun: G7-DROP15 only (HOSTSAFE of that command recorded).
