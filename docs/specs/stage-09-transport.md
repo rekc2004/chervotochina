@@ -104,7 +104,7 @@ impl QuinnTransport {
     /// Требует работающий tokio runtime. Одно гнездо для приёма и звонков.
     pub fn bind(addr: SocketAddr, cfg: QuinnConfig, filter: Arc<dyn PeerFilter>) -> Result<Self, TransportError>;
     pub fn from_socket(sock: std::net::UdpSocket, cfg: QuinnConfig, filter: Arc<dyn PeerFilter>) -> Result<Self, TransportError>;
-    pub fn set_peers(&self, peers: Vec<KxPeer>);              // атомарная замена набора пар
+    pub fn set_peers(&self, peers: Vec<KxPeer>) -> Result<(), DuplicatePairError>;   // атомарная замена набора пар; повтор PairId отвергается целиком, прежний набор остаётся
     pub fn rebind(&self, sock: std::net::UdpSocket) -> Result<(), TransportError>;
     pub fn events(&self) -> tokio::sync::broadcast::Receiver<TransportEvent>;
     pub fn stats(&self) -> TransportStats;
