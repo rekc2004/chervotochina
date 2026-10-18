@@ -35,8 +35,22 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      # TODO pin version: cargo search недоступен при скелете, версии не закреплены
-      - run: cargo install cargo-audit --locked
+      - run: cargo install --locked --version =0.22.2 cargo-audit
       - run: cargo audit --deny warnings
-      - run: cargo install cargo-deny --locked
-      - run: cargo deny check licenses sources
+      - run: cargo install --locked --version =0.20.2 cargo-deny
+      - run: cargo deny check advisories bans licenses sources
+  sbom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.99.1 --profile minimal
+      - run: cargo install --locked --version =0.5.9 cargo-cyclonedx
+      - run: cargo cyclonedx --format json --override-filename sbom
+      # SHA pinning of actions is stage 19.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ github.sha }}
+          path: "**/sbom.json"
+          if-no-files-found: error

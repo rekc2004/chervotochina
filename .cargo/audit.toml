@@ -3,5 +3,5 @@
 # RUSTSEC-2026-0370/0371/0372: zvariant, zbus_names, zvariant_derive 5.x are "unmaintained" (merged into
 # zbus 6.0.0 as the `wire` module), not a vulnerability. Pulled only by the Linux Secret Service store:
 # chervo-identity -> zbus-secret-service-keyring-store 1.0.1 -> secret-service 5.2.0 -> zbus 5.19.0.
-# No secret-service release on zbus 6 yet. Remove when one exists; at the latest at stage 17.
+# No secret-service release on zbus 6 yet. Owner: own Secret Service client in stage 17a; exception stays until then.
 ignore = ["RUSTSEC-2026-0370", "RUSTSEC-2026-0371", "RUSTSEC-2026-0372"]
