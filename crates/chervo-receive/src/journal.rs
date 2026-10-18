@@ -118,6 +118,17 @@ pub(crate) fn read_dirs(
     count: usize,
 ) -> Option<Vec<(u16, u64)>> {
     let raw = read_bounded(&dirs_path(dir, hex), MAX_DIRS_LEN)?;
+    decode_dirs(&raw, key, digest, count)
+}
+
+/// Чистый разбор уже прочитанных байт `.dirs` (без файловой системы): годность ключа, плана и
+/// числа каталогов, как в `read_dirs`. Вынесено отдельно для фаззинга (этап 17, decision 7).
+pub fn decode_dirs(
+    raw: &[u8],
+    key: &TransferKey,
+    digest: &[u8; 32],
+    count: usize,
+) -> Option<Vec<(u16, u64)>> {
     let body_len = raw.len().checked_sub(32)?;
     let (body, trailer) = raw.split_at_checked(body_len)?;
     if sha256(&[body]).as_slice() != trailer {
@@ -197,7 +208,7 @@ fn check_of(index: u32, k: u16) -> u16 {
 }
 
 /// Разбор `.placed`: последняя годная запись каждого индекса и число байт годного префикса.
-pub(crate) fn parse_placed(bytes: &[u8]) -> (HashMap<u32, u16>, usize) {
+pub fn parse_placed(bytes: &[u8]) -> (HashMap<u32, u16>, usize) {
     let mut last = HashMap::new();
     let mut valid = 0usize;
     for rec in bytes.as_chunks::<REC_LEN>().0 {

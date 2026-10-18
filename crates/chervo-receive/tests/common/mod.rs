@@ -23,7 +23,18 @@ pub struct Tmp(PathBuf);
 impl Tmp {
     pub fn new(tag: &str) -> Self {
         let n = SEQ.fetch_add(1, Ordering::SeqCst);
-        let p = std::env::temp_dir().join(format!("chervo-rcv-{tag}-{}-{n}", std::process::id()));
+        // PID может повторно использоваться между запусками (Windows): к счётчику внутри
+        // процесса добавлены наносекунды, а уже существующий каталог с этим же путём (остаток
+        // от прежнего процесса с тем же PID) удаляется перед созданием.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let p = std::env::temp_dir().join(format!(
+            "chervo-rcv-{tag}-{}-{n}-{nanos:x}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).expect("create tmp");
         #[cfg(unix)]
         {

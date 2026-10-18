@@ -92,7 +92,18 @@ struct TestDir(PathBuf);
 impl TestDir {
     fn new() -> Arc<Self> {
         let n = DIR_SEQ.fetch_add(1, Ordering::SeqCst);
-        let p = std::env::temp_dir().join(format!("chervo-xfer-net-{}-{n}", std::process::id()));
+        // PID может повторно использоваться между запусками (Windows): к счётчику внутри
+        // процесса добавлены наносекунды, а уже существующий каталог с этим же путём (остаток
+        // от прежнего процесса с тем же PID) удаляется перед созданием.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let p = std::env::temp_dir().join(format!(
+            "chervo-xfer-net-{}-{n}-{nanos:x}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
         Arc::new(Self(p))
     }

@@ -16,6 +16,10 @@ chervo-token = { path = "../crates/chervo-token" }
 chervo-timesync = { path = "../crates/chervo-timesync" }
 chervo-transfer = { path = "../crates/chervo-transfer" }
 chervo-receive = { path = "../crates/chervo-receive" }
+# Stage 17 (B6): newly reachable entry points (doc(hidden) pub, no behaviour change).
+chervo-identity = { path = "../crates/chervo-identity" }
+chervo-upnp = { path = "../crates/chervo-upnp" }
+chervo-transport-quinn = { path = "../crates/chervo-transport-quinn" }
 
 [workspace]
 members = ["."]
@@ -89,6 +93,71 @@ bench = false
 [[bin]]
 name = "sntp"
 path = "fuzz_targets/sntp.rs"
+test = false
+doc = false
+bench = false
+
+# Stage 17 (B6): targets added once the owning crate got a doc(hidden) pub entry point.
+
+[[bin]]
+name = "upnp_desc"
+path = "fuzz_targets/upnp_desc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "upnp_http"
+path = "fuzz_targets/upnp_http.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "upnp_ssdp"
+path = "fuzz_targets/upnp_ssdp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "upnp_soap"
+path = "fuzz_targets/upnp_soap.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "upnp_url"
+path = "fuzz_targets/upnp_url.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "knock_check"
+path = "fuzz_targets/knock_check.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "receive_dirs"
+path = "fuzz_targets/receive_dirs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "receive_placed"
+path = "fuzz_targets/receive_placed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transfer_names_file"
+path = "fuzz_targets/transfer_names_file.rs"
 test = false
 doc = false
 bench = false

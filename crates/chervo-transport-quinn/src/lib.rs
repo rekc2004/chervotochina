@@ -39,6 +39,9 @@ use tokio::sync::{Semaphore, broadcast, mpsc};
 
 pub use chervo_transport::{DuplicatePairError, TransportEvent};
 pub use conn::{QuinnConn, QuinnRecv, QuinnSend};
+/// Этап 17, B6/C04: только для фаззинга (`fuzz/`, вне рабочего пространства), не для продукта.
+#[doc(hidden)]
+pub use knock::fuzz_knock_admits;
 pub use knock::window_at;
 
 use knock::{KnockSocket, KnockState};

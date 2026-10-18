@@ -127,7 +127,13 @@ struct Dir(PathBuf);
 
 impl Dir {
     fn new() -> Self {
-        let p = std::env::temp_dir().join(format!("chervo-jfuzz-{}", std::process::id()));
+        // PID может повторно использоваться между запусками (Windows): наносекунды в суффиксе
+        // плюс удаление уже существующего каталога с этим же путём перед созданием.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let p = std::env::temp_dir().join(format!("chervo-jfuzz-{}-{nanos:x}", std::process::id()));
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).unwrap();
         Self(p)

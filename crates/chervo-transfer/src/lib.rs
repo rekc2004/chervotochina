@@ -68,7 +68,7 @@ pub use placement::{
 };
 pub use policy::{AcceptPolicy, AskAlways, InboundReservation, OfferView, PolicyVerdict};
 #[doc(hidden)]
-pub use state::{RecvState, decode_state, encode_state};
+pub use state::{RecvState, decode_names, decode_state, encode_state};
 pub use state::{StateError, encode_hashes, parse_hashes, state_dir_name};
 pub use texts::{
     DAMAGED_TEXT, DECLINED_TEXT, DISK_FULL_TEXT, EXPIRED_TEXT, PEER_CANCELLED_TEXT,
