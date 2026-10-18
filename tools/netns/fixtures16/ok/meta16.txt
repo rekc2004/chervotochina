@@ -1,0 +1,14 @@
+date=2026-10-18 (фикстура)
+commit=fixture
+kernel=6.8.0-fixture
+nproc=4
+cpu=Fixture CPU @ 2.0GHz
+virt=none
+nft=nftables v1.0.9 (Old Doric #3)
+tc=tc utility, iproute2-6.1.0
+iproute2=ip utility, iproute2-6.1.0
+miniupnpd=2.3.4
+rustc=rustc 1.99.1
+nice=10
+repeats=3
+clk_tck=100

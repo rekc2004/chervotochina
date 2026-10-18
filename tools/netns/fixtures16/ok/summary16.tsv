@@ -1,0 +1,15 @@
+NATCHECK	ctl	PASS	-	фикстура: все 7 контролей прошли	-	-	-	-	-	-	фикстура, не результат прогона
+C01	conn	INCONCLUSIVE	-	приглашение не принято	-	-	-	-	-	-	-
+C03	conn	PASS	yes	yes	-	none	-	none	Lan	4	tokens: none; nat_view_x=Public;
+C06	conn	PASS	yes	yes	-	none	-	none	SimultaneousOpen	31	tokens: ha>hb:ok hb>ha:ok ; nat_view_x=Eim;
+C07	conn	PASS	no	no	NeedToken	NeedToken	NeedToken	NeedToken	-	-	tokens: none; nat_view_x=Eim;
+C11	conn	MISMATCH	no	no	SymmetricNat	SymmetricNat	NeedToken	Unknown	-	-	tokens: hb>ha:ok ha>hb:failed(NoAddresses) ; reason Y;
+C13	conn	PASS	yes, then unreachable	yes, then unreachable	BehindCgnat+rv	BehindCgnat+rv	-	none	Direct	12	tokens: none;
+C19	conn	FAIL	no (after block)	yes	UdpBlockedSuspected	NeedToken	-	none	-	-	guard: other@ha=3;
+G7-BASE	g7	PASS	completes, cmp equal	completed	-	-	-	-	-	41	event: none; путь через 11.0.0.50 ; connections=1 paused=0 resumed=0 max_stall_s=0.6 total_s=41 cmp=ok
+G7-CALLEE	g7	PASS	completes, cmp equal	completed	-	-	-	-	-	58	event: IP wb changed; connections=2 paused=1 resumed=1 max_stall_s=11.2 total_s=58 cmp=ok
+C20	g7	FAIL	paused, resumed, cmp equal, stale first token rejected	see note	-	-	-	-	-	300	observed address not refreshed after NAT rebinding;
+X01	extra	PASS	-	udp-пакетов ha: 1200, все к WA, WB, NAT-B WAN или партнёру по связке	-	-	-	-	-	-	pcap не сохраняется
+X02	extra	NOTRUN	-	-	-	-	-	-	-	-	поток не определён однозначно
+S-WHITE-N0	speed	PASS	справочно	median 410.00 MiB/s	-	-	-	-	-	-	под nice 10;
+HOSTSAFE	ctl	PASS	-	до и после 3 команд без изменений	-	-	-	-	-	-	-
