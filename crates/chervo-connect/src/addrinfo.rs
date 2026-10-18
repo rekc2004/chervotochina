@@ -16,7 +16,66 @@ use chervo_token::addr_flow::{PeerAddrInfo, exchange_addr_info};
 use chervo_transport::{Connection, ManagedTransport};
 use tokio::time::Instant;
 
-use crate::engine::{Inner, State};
+use crate::engine::{ConnectError, Engine, Inner, State};
+
+/// Предел длины вставленного текста токена обновления, байт. Самый длинный токен
+/// (8 записей IPv6, 235 байт) в тексте занимает менее 400 байт; всё длиннее отвергается
+/// без разбора.
+const MAX_MANUAL_TOKEN_TEXT_LEN: usize = 1024;
+
+impl<T, S> Engine<T, S>
+where
+    T: ManagedTransport,
+    T::Conn: Clone,
+    S: SecretStore + ListKeyStore + 'static,
+{
+    /// Действие пользователя «отправить токен адреса этому другу». Только `Active`. Адреса:
+    /// `own.publishable(PublishCtx { include_lan }, now)` (частные адреса только по явному
+    /// выбору). Номер сохраняется на диск до подписи (`FriendBook::issue_addr_update`).
+    /// Пустой набор: `NoAddresses`, номер не тратится. Возвращает текст `CHA1`, в журнал
+    /// ничего не пишется. Запись `last_sent` для ADDR_INFO не трогается.
+    pub fn issue_addr_update_text(
+        &self,
+        pair: &PairId,
+        include_lan: bool,
+    ) -> Result<String, ConnectError> {
+        let inner = &self.inner;
+        if inner.is_shut() {
+            return Err(ConnectError::Shutdown);
+        }
+        let unix = inner.clock.now_unix();
+        let mut st = inner.lock();
+        if st.book.get(pair).is_none() {
+            return Err(ConnectError::UnknownPair);
+        }
+        if !st.book.is_active(pair) {
+            return Err(ConnectError::NotActive);
+        }
+        let set = st.own.publishable(PublishCtx { include_lan }, unix);
+        if set.is_empty() {
+            return Err(ConnectError::NoAddresses);
+        }
+        match st.book.issue_addr_update(&*inner.store, pair, &set, unix) {
+            Ok(token) => Ok(token.text()),
+            Err(FriendsError::NoAddresses) => Err(ConnectError::NoAddresses),
+            Err(e) => Err(ConnectError::Friends(e)),
+        }
+    }
+
+    /// Действие пользователя «вставить токен адреса». Текст длиннее 1024 байт:
+    /// `Friends(BadAddrUpdate)` без разбора. Иначе применение через `update_book` (публикация
+    /// пар, сброс ограничителя адресов этого друга); подпись проверяется до любого доверия
+    /// содержимому. Возвращает пару. Не набирает: вызывающий сам зовёт `connect_now`.
+    pub fn apply_addr_update_text(&self, text: &str) -> Result<PairId, ConnectError> {
+        if text.len() > MAX_MANUAL_TOKEN_TEXT_LEN {
+            return Err(ConnectError::Friends(FriendsError::BadAddrUpdate));
+        }
+        let unix = self.inner.clock.now_unix();
+        let text = text.trim();
+        self.inner
+            .update_book(|book, store| book.apply_addr_update_text(store, text, unix))
+    }
+}
 
 impl<T, S> Inner<T, S>
 where

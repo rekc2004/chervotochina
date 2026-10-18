@@ -17,6 +17,7 @@ mod inbox;
 mod invite;
 mod kit;
 mod limiter;
+mod manual_token;
 mod publish;
 mod src_guard;
 mod texts;
