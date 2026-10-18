@@ -891,7 +891,7 @@ g7_run() { # id тип
   local id="$1" kind="$2" r s lab t0 v=PASS ports="" ev="" exp="completes, cmp equal" i rbnv=""
   XA=(); RX=(); SX=(); AX=(); BX=(); XA_EXTRA=(); WHY=""; TOKRES=""
   case "$kind" in
-    DROP15) exp="completes without pause, cmp equal, connections=1, paused=0, max_stall_s<=30" ;;
+    DROP15) exp="completes without pause, cmp equal, no connection events after the drop, paused=0, max_stall_s<=30" ;;
     DROP45) exp="paused, resumed, cmp equal" ;;
     REBIND) exp="completes, cmp equal, HA nat_view not Conflicting 60 s after NAT-A WAN change" ;;
   esac
@@ -914,7 +914,11 @@ g7_run() { # id тип
     if wait_pct rb1 30 200; then
       case "$kind" in
         CALLEE) ipn wb addr add "$CORE.52/24" dev wan; ipn wb addr del "$CORE.51/24" dev wan; ev="IP wb changed" ;;
-        DROP15) drop_on wa "$CORE.51"; sleep 15; drop_off wa; ev="UDP dropped 15 s" ;;
+        DROP15)
+          # Rev. 3 (S4): события соединения считаются только после метки перед обрывом
+          # (дубль одновременного открытия на старте в счёт не идёт)
+          G7_MARK="$(( $(cntl sa1 '^EVENT (connected|disconnected) pair=') + $(cntl rb1 '^EVENT (connected|disconnected) pair=') ))"
+          drop_on wa "$CORE.51"; sleep 15; drop_off wa; ev="UDP dropped 15 s" ;;
         DROP45) drop_on wa "$CORE.51"; sleep 45; drop_off wa; ev="UDP dropped 45 s" ;;
         REBIND)
           ipn na addr add "$CORE.11/24" dev wan
@@ -940,8 +944,11 @@ g7_run() { # id тип
   if [[ "$X_CMP" != ok && "$v" == PASS ]]; then v=FAIL; fi
   # Rev. 2 (S3): простой QUIC 30 с, keep-alive 10 с: обрыв 15 с не закрывает соединение (пауз нет), обрыв 45 с закрывает.
   if [[ "$kind" == DROP15 && "$v" == PASS ]]; then
-    if (( G7_CONNS != 1 || G7_PZ != 0 )) || ! awk -v s="$G7_STALL" 'BEGIN { exit (s + 0 <= 30) ? 0 : 1 }'; then
-      v=FAIL; G7_NOTE+="expected connections=1 paused=0 max_stall_s<=30; "
+    local after
+    after=$(( $(cntl sa1 '^EVENT (connected|disconnected) pair=') + $(cntl rb1 '^EVENT (connected|disconnected) pair=') - ${G7_MARK:-0} ))
+    G7_NOTE+="conn_events_after_drop=$after; "
+    if (( after != 0 || G7_PZ != 0 )) || ! awk -v s="$G7_STALL" 'BEGIN { exit (s + 0 <= 30) ? 0 : 1 }'; then
+      v=FAIL; G7_NOTE+="expected conn_events_after_drop=0 paused=0 max_stall_s<=30; "
     fi
   fi
   if [[ "$kind" == DROP45 && "$v" == PASS ]] && ! (( G7_PZ > 0 && G7_RS > 0 )); then v=FAIL; G7_NOTE+="no paused/resumed; "; fi
