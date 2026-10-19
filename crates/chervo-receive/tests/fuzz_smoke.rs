@@ -457,13 +457,16 @@ fn fuzz_smoke_plan() {
             // Рев. 3, F3: `suspicious` остаётся только из-за не-ASCII в расширении
             // (то есть в последнем компоненте), не из-за невидимых символов. Рев. 6, M1: или
             // из-за хвостовых `.` и пробелов перед суффиксом (`x.exe .gz`).
+            // Снятие нескольких суффиксов: хвостовые `.`/пробелы у любой снятой основы
+            // (`x.exe .gz.gz`) тоже дают `suspicious`.
             assert!(
                 !b.flags.suspicious
-                    || b.path.components().last().is_some_and(|c| {
-                        !c.is_ascii()
-                            || c.rsplit_once('.')
-                                .is_some_and(|(s, _)| s.ends_with(['.', ' ']))
-                    })
+                    || b.path
+                        .components()
+                        .last()
+                        .is_some_and(|c| { !c.is_ascii() || has_trimmed_peel(c) }),
+                "suspicious without reason: {:?}",
+                b.path.components()
             );
         }
     }
@@ -476,6 +479,50 @@ fn is_compression(ext: &str) -> bool {
         fold(ext).as_str(),
         "gz" | "xz" | "bz2" | "zst" | "lz" | "lz4" | "z"
     )
+}
+
+/// Независимая копия правила `peel_compression`: у какой-либо основы перед суффиксом сжатия
+/// есть хвостовые `.` или пробелы.
+fn has_trimmed_peel(last: &str) -> bool {
+    let mut cur = last;
+    while let Some((stem, ext)) = cur.rsplit_once('.') {
+        if !is_compression(ext) {
+            return false;
+        }
+        let clean = stem.trim_end_matches(['.', ' ']);
+        if clean.len() != stem.len() {
+            return true;
+        }
+        if !clean.contains('.') {
+            return false;
+        }
+        cur = clean;
+    }
+    false
+}
+
+#[test]
+fn fuzz_smoke_trimmed_peel_regression() {
+    assert!(has_trimmed_peel("x.exe .gz.gz"));
+    assert!(has_trimmed_peel("x.exe..gz"));
+    assert!(!has_trimmed_peel("x.exe.gz.gz"));
+    assert!(!has_trimmed_peel("x.gz"));
+    let l = ReceiveLimits::default();
+    let names = ["x.exe .gz.gz", "x.exe..xz.gz", "a/x.iso .zst.gz"];
+    for n in names {
+        let files = [OfferedFile {
+            name: UntrustedName::new(n).expect("valid"),
+            size: 1,
+        }];
+        let p1 = plan_offer(&files, &l).expect("plan");
+        let second = [OfferedFile {
+            name: UntrustedName::new(&p1.files[0].path.display()).expect("valid"),
+            size: 1,
+        }];
+        let p2 = plan_offer(&second, &l).expect("replan");
+        assert_eq!(p1.files[0].path, p2.files[0].path, "{n}");
+        assert!(p2.files[0].flags.suspicious, "{n}");
+    }
 }
 
 fn single(name: &str, l: &ReceiveLimits) -> Option<SafeRelPath> {
