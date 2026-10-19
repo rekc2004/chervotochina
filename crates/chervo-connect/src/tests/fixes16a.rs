@@ -432,6 +432,36 @@ async fn remote_change_sends_addr_info() {
     assert_eq!(c.opened(), 2, "the pending one goes out after the interval");
 }
 
+/// Этап 17, повторная проверка 3, п. 1: `Contact` друга берётся с адреса установки соединения.
+/// Адрес, на который путь мигрировал (проверка пути могла быть не закончена, источник мог быть
+/// подменён), в `Contact` не попадает ни событием смены адреса, ни продлением частных адресов.
+#[tokio::test(start_paused = true)]
+async fn migrated_remote_not_noted_as_contact() {
+    let mut pre = Pre::new();
+    let p = pre.solo_friend(vec![inv("192.168.1.9:4000")]);
+    let n = Node::start(pre, ConnectConfig::default());
+    let c = up(&n, p, "192.168.1.9");
+    tokio::time::sleep(secs(1)).await;
+    c.set_remote(addr("192.168.1.10:4000"));
+    n.t.emit(TransportEvent::RemoteAddrChanged { pair: p });
+    // дольше `CONTACT_REFRESH_SECS` и периода `run_expire`: срабатывает и продление
+    tokio::time::sleep(secs(400)).await;
+    let known = n
+        .engine
+        .read_book(|b| b.get(&p).unwrap().known_addrs.clone());
+    assert!(
+        known
+            .iter()
+            .any(|k| k.source == chervo_addr::AddrSource::Contact
+                && k.addr == addr("192.168.1.9:4000")),
+        "Contact of the established address"
+    );
+    assert!(
+        !known.iter().any(|k| k.addr == addr("192.168.1.10:4000")),
+        "migrated address must not become a known address"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn remote_change_not_own_event() {
     let mut pre = Pre::new();

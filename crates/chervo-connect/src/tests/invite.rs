@@ -478,6 +478,100 @@ async fn confirm_and_cancel_errors() {
     ));
 }
 
+/// Повторная проверка 3, п. 1: путь гостевой сессии мигрировал (подмена адреса источника) до
+/// решения SAS; в `Contact` у обоих идёт адрес установки соединения, а не текущий.
+#[tokio::test(start_paused = true)]
+async fn contact_uses_established_addr_not_migrated() {
+    const SPOOF: &str = "203.0.113.9:7777";
+    let mut d = duo(300);
+    let links = link_nodes(&d.b, d.pb, A_ADDR, &d.a, d.pa, B_ADDR);
+    assert!(
+        wait_event(&mut d.a.events, secs(30), is_sas)
+            .await
+            .is_some()
+    );
+    assert!(
+        wait_event(&mut d.b.events, secs(30), is_sas)
+            .await
+            .is_some()
+    );
+    {
+        let l = links.lock().unwrap();
+        // `.0` конец B (видит A), `.1` конец A (видит B)
+        l[0].0.set_remote(addr(SPOOF));
+        l[0].1.set_remote(addr(SPOOF));
+    }
+    d.a.engine.confirm_sas(&d.pa, true, "Борис").unwrap();
+    d.b.engine.confirm_sas(&d.pb, true, "Анна").unwrap();
+    for n in [&mut d.a, &mut d.b] {
+        assert_eq!(
+            outcome(wait_event(&mut n.events, secs(30), finished).await),
+            Some(InviteOutcome::Added)
+        );
+    }
+    for (n, pair, real) in [(&d.a, d.pa, B_ADDR), (&d.b, d.pb, A_ADDR)] {
+        let known = n
+            .engine
+            .read_book(|b| b.get(&pair).unwrap().known_addrs.clone());
+        assert!(
+            known
+                .iter()
+                .any(|k| k.source == chervo_addr::AddrSource::Contact && k.addr == addr(real)),
+            "Contact of the established address"
+        );
+        assert!(
+            !known.iter().any(|k| k.addr == addr(SPOOF)),
+            "migrated address must not be noted"
+        );
+    }
+}
+
+/// Повторная проверка 3, п. 3: гость стал другом, полная публикация не удалась (хранилище ключей).
+/// Гостевая запись транспорта (ключ `guest_public`, секрет которого знает держатель токена) не
+/// должна оставаться: допущенной остаётся только запись с `friend_x` друга, а пока её нет в
+/// наборе, пары нет и в разрешениях. В старом коде гостевая запись оставалась до успешного
+/// повтора.
+#[tokio::test(start_paused = true)]
+async fn guest_key_dropped_when_publish_fails_after_becoming_friend() {
+    let mut d = duo(300);
+    let _ = reach_sas(&mut d).await;
+    for (n, pair) in [(&d.a, d.pa), (&d.b, d.pb)] {
+        // до решения пара-гость опубликована
+        assert!(n.t.last_peers().contains(&pair));
+        assert!(n.allow.is_allowed(&pair));
+        n.store.set_fail_reads(true);
+    }
+    d.a.engine.confirm_sas(&d.pa, true, "Борис").unwrap();
+    d.b.engine.confirm_sas(&d.pb, true, "Анна").unwrap();
+    for n in [&mut d.a, &mut d.b] {
+        assert_eq!(
+            outcome(wait_event(&mut n.events, secs(30), finished).await),
+            Some(InviteOutcome::Added)
+        );
+    }
+    assert!(d.a.engine.read_book(|b| b.get(&d.pa).is_some()));
+    // у пригласившего гостевая запись (ключ собеседника `guest_public`) снята сразу: ни в наборе
+    // транспорта, ни в разрешениях; соединение с гостевым ключом не принимается
+    assert!(
+        !d.a.t.last_peers().contains(&d.pa),
+        "guest key still published after the pair became a friend"
+    );
+    assert!(!d.a.allow.is_allowed(&d.pa));
+    // у приглашённого запись остаётся: её ключ собеседника это `friend_x` (ключ пригласившего)
+    assert!(d.b.engine.read_book(|b| b.get(&d.pb).is_some()));
+    assert!(d.b.t.last_peers().contains(&d.pb));
+    // хранилище вернулось: повтор публикует запись с ключом друга
+    for (n, pair) in [(&d.a, d.pa), (&d.b, d.pb)] {
+        n.store.set_fail_reads(false);
+        tokio::time::sleep(secs(12)).await;
+        let friend_x = n.engine.read_book(|b| b.get(&pair).unwrap().friend_x);
+        let last = n.t.peers_calls.lock().unwrap().last().unwrap().clone();
+        assert_eq!(last.len(), 1);
+        assert_eq!((last[0].0, last[0].2), (pair, friend_x));
+        assert!(n.allow.is_allowed(&pair));
+    }
+}
+
 /// Этап 17, S2: приглашённый записывает адрес проверенной гостевой сессии как `Contact` (как и
 /// пригласивший); иначе у него остаются только строгие адреса токена и первый звонок другу
 /// ждёт строгого окна.

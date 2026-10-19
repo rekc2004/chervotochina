@@ -88,6 +88,8 @@ pub struct QuinnConn {
     pub(crate) conn: quinn::Connection,
     pub(crate) pair: PairId,
     pub(crate) initiator: bool,
+    /// Адрес собеседника, снятый сразу после QUIC-рукопожатия, до KK; миграция не меняет.
+    pub(crate) established: SocketAddr,
 }
 
 impl fmt::Debug for QuinnConn {
@@ -135,6 +137,10 @@ impl Connection for QuinnConn {
 
     fn remote_addr(&self) -> SocketAddr {
         self.conn.remote_address()
+    }
+
+    fn established_addr(&self) -> SocketAddr {
+        self.established
     }
 
     async fn open_bi(&self) -> Result<(Self::Tx, Self::Rx), TransportError> {

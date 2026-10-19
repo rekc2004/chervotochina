@@ -653,7 +653,7 @@ where
                     } => {
                         let unix = self.clock.now_unix();
                         let mut addrs = Vec::new();
-                        note_contact(&mut addrs, conn.remote_addr(), unix);
+                        note_contact(&mut addrs, conn.established_addr(), unix);
                         self.complete_friend(
                             pair,
                             NewFriend {
@@ -719,9 +719,11 @@ where
                         let unix = self.clock.now_unix();
                         // этап 17, S2: адрес проверенной гостевой сессии это `Contact` (как у
                         // пригласившего); адреса токена строгие (слова пригласившего), и без
-                        // `Contact` первый звонок другу ждал бы строгого окна
+                        // `Contact` первый звонок другу ждал бы строгого окна. Адрес берётся с
+                        // момента установки соединения, а не текущий `remote_addr()`: его могла
+                        // изменить ещё не проверенная миграция пути
                         let mut addrs = from_invite(&seed.token_addrs, unix);
-                        note_contact(&mut addrs, conn.remote_addr(), unix);
+                        note_contact(&mut addrs, conn.established_addr(), unix);
                         self.complete_friend(
                             pair,
                             NewFriend {

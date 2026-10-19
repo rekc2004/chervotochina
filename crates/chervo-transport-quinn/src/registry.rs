@@ -32,6 +32,8 @@ struct Entry {
     id: u64,
     conn: quinn::Connection,
     initiator: bool,
+    /// Адрес собеседника после QUIC-рукопожатия (`QuinnConn::established_addr`).
+    established: std::net::SocketAddr,
     /// Публичный ключ X25519 звонящего в этом соединении.
     caller_pub: [u8; 32],
     /// Публичный X25519 этой стороны и собеседника: тройка `(пара, ours, theirs)` должна
@@ -53,6 +55,7 @@ pub(crate) enum Verdict {
         winner: quinn::Connection,
         winner_id: u64,
         winner_initiator: bool,
+        winner_established: std::net::SocketAddr,
     },
 }
 
@@ -67,12 +70,14 @@ impl Registry {
     ///
     /// Порядок замков: реестр, затем набор пар. Членство тройки в текущем наборе проверяется
     /// под замком реестра, тем же, под которым `replace_peers` меняет набор.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn admit(
         &self,
         peers: &Mutex<Arc<Vec<KxPeer>>>,
         pair: PairId,
         conn: quinn::Connection,
         initiator: bool,
+        established: std::net::SocketAddr,
         ours_pub: [u8; 32],
         theirs_pub: [u8; 32],
     ) -> Verdict {
@@ -81,6 +86,7 @@ impl Registry {
             id: next_conn_id(),
             conn,
             initiator,
+            established,
             caller_pub,
             ours_pub,
             theirs_pub,
@@ -115,6 +121,7 @@ impl Registry {
                         winner: old.conn.clone(),
                         winner_id: old.id,
                         winner_initiator: old.initiator,
+                        winner_established: old.established,
                     };
                     list.push(old);
                     verdict
@@ -187,6 +194,7 @@ pub(crate) fn promote(
     conn: quinn::Connection,
     pair: PairId,
     initiator: bool,
+    established: std::net::SocketAddr,
     ours_pub: [u8; 32],
     theirs_pub: [u8; 32],
 ) -> Promoted {
@@ -197,6 +205,7 @@ pub(crate) fn promote(
         pair,
         conn.clone(),
         initiator,
+        established,
         ours_pub,
         theirs_pub,
     ) {
@@ -217,12 +226,14 @@ pub(crate) fn promote(
                 conn,
                 pair,
                 initiator,
+                established,
             })
         }
         Verdict::Lose {
             winner,
             winner_id,
             winner_initiator,
+            winner_established,
         } => {
             close_duplicate(&conn);
             inner
@@ -234,6 +245,7 @@ pub(crate) fn promote(
                 conn: winner,
                 pair,
                 initiator: winner_initiator,
+                established: winner_established,
             })
         }
     }

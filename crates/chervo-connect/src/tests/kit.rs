@@ -300,6 +300,8 @@ async fn wait_true(mut rx: watch::Receiver<bool>) {
 pub struct ConnInner {
     pair: PairId,
     remote: Mutex<SocketAddr>,
+    /// Адрес при установке соединения: `set_remote` (миграция) его не меняет.
+    established: SocketAddr,
     id: u64,
     initiator: bool,
     closed: Arc<watch::Sender<bool>>,
@@ -328,6 +330,7 @@ impl FakeConn {
         let a = FakeConn(Arc::new(ConnInner {
             pair: pair_a,
             remote: Mutex::new(remote_a),
+            established: remote_a,
             id: CONN_ID.fetch_add(1, Ordering::SeqCst),
             initiator: a_initiator,
             closed: closed.clone(),
@@ -340,6 +343,7 @@ impl FakeConn {
         let b = FakeConn(Arc::new(ConnInner {
             pair: pair_b,
             remote: Mutex::new(remote_b),
+            established: remote_b,
             id: CONN_ID.fetch_add(1, Ordering::SeqCst),
             initiator: !a_initiator,
             closed,
@@ -398,6 +402,10 @@ impl Connection for FakeConn {
 
     fn remote_addr(&self) -> SocketAddr {
         *self.0.remote.lock().unwrap()
+    }
+
+    fn established_addr(&self) -> SocketAddr {
+        self.0.established
     }
 
     fn open_bi(&self) -> impl Future<Output = Result<(FakeTx, FakeRx), TransportError>> + Send {

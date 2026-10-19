@@ -119,6 +119,13 @@ pub trait Connection: Send + Sync {
     /// Пара, подтверждённая Noise KK внутри канала; никогда не со слов собеседника.
     fn remote_pair(&self) -> PairId;
     fn remote_addr(&self) -> SocketAddr;
+    /// Адрес собеседника в момент установки соединения (до аутентификации пары), не меняется
+    /// миграцией пути. Его записывают как `Contact`: текущий `remote_addr()` мог смениться
+    /// пакетом с подменённого адреса источника, путь которого ещё не проверен. Реализация по
+    /// умолчанию возвращает `remote_addr()` (для соединений, не знающих разницы).
+    fn established_addr(&self) -> SocketAddr {
+        self.remote_addr()
+    }
     fn open_bi(&self) -> impl Future<Output = Result<(Self::Tx, Self::Rx), TransportError>> + Send;
     fn accept_bi(
         &self,

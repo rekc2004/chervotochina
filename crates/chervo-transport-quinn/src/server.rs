@@ -165,6 +165,9 @@ async fn serve(
             return;
         }
     };
+    // адрес, снятый сразу после QUIC-рукопожатия, до KK: ему доверяет `Contact`, а не позднему
+    // `remote_address()`, который мог смениться миграцией пути
+    let established = conn.remote_address();
     let result = timeout_at(
         deadline,
         callee_handshake(&inner, &conn, msg1_deadline, deadline),
@@ -201,6 +204,7 @@ async fn serve(
         conn.clone(),
         authed.pair,
         false,
+        established,
         authed.ours_pub,
         authed.theirs_pub,
     ) {

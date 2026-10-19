@@ -146,7 +146,7 @@ pub(crate) async fn connect(
                 inner.test_pause_before_promote().await;
                 // `auth_ok` только после допуска реестром; иначе `auth_not_admitted`
                 outcome = Some(
-                    match promote(inner, conn.clone(), pair, true, ours, theirs) {
+                    match promote(inner, conn.clone(), pair, true, est.addr, ours, theirs) {
                         Promoted::Winner(c) | Promoted::Lost(c) => {
                             Counters::bump(&inner.counters.auth_ok);
                             Ok(c)
@@ -211,6 +211,8 @@ fn map_fail(f: Fail) -> TransportError {
 /// без него пакеты адреса не пройдут в гнездо.
 struct Established {
     conn: quinn::Connection,
+    /// Адрес собеседника, снятый сразу после QUIC-рукопожатия.
+    addr: SocketAddr,
     _pin: Pin,
 }
 
@@ -283,7 +285,11 @@ async fn dial_one(
         }
     };
     match outcome {
-        Some(Ok(conn)) => Ok(Established { conn, _pin: pin }),
+        Some(Ok(conn)) => Ok(Established {
+            addr: conn.remote_address(),
+            conn,
+            _pin: pin,
+        }),
         Some(Err(_)) => {
             let silent = !pin.heard();
             if silent {

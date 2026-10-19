@@ -299,9 +299,12 @@ wait_nat_view() { # label seconds
 }
 # The node's last STATE line lists every active friend as friend:L=[addr,addr,...]; true when "addr" (IP:port) is in a list.
 wait_friend_addr() { # label addr seconds
-  local i
+  local i esc
+  # the STATE line lists addresses as `friend#N=[a,b,c]`: the address must be a whole element
+  # (left boundary `[` or `,`, right boundary `,` or `]`), not the tail of a longer address
+  esc="$(printf '%s' "$2" | sed 's/[][\.*^$+?(){}|]/\\&/g')"
   for i in $(seq 1 "$(( $3 * 2 ))"); do
-    grep '^STATE ' "$(lgf "$1")" 2>/dev/null | tail -n1 | grep -Fq -e "$2," -e "$2]" && return 0
+    grep '^STATE ' "$(lgf "$1")" 2>/dev/null | tail -n1 | grep -Eq "[[,]${esc}[],]" && return 0
     over_cap && return 1
     sleep 0.5
   done

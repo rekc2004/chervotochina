@@ -347,6 +347,7 @@ where
         let conns: Vec<T::Conn> = {
             let mut st = self.lock();
             st.inflight.clear();
+            st.published.clear();
             let drained: Vec<(PairId, LiveConn<T::Conn>)> = st.live.drain().collect();
             for (pair, _) in &drained {
                 st.own.reporter_down(pair);
@@ -386,14 +387,21 @@ where
     /// Убрать из набора транспорта и из разрешений пары, переставшие быть допущенными (блок,
     /// удаление, отзыв), по набору, принятому транспортом в последний раз: ключи не
     /// загружаются, хранилище не нужно. Неудача транспорта оставляет всё как есть.
+    ///
+    /// Запись активного друга остаётся, только если её ключ собеседника это `friend_x` друга из
+    /// книги. Гостевая запись той же пары (`guest_public`, секрет которого знает держатель
+    /// токена) после превращения гостя в друга не остаётся: иначе она принимала бы такого
+    /// держателя как друга, пока полная публикация не удалась.
     fn drop_stale_pairs(&self, st: &mut State<T::Conn>) {
         let kept: Vec<KxPeer> = st
             .published
             .iter()
             .filter(|p| {
                 let pair = p.pair();
-                st.book.is_active(&pair)
-                    || (st.book.get(&pair).is_none() && st.guests.contains_key(&pair))
+                match st.book.get(&pair) {
+                    Some(f) => st.book.is_active(&pair) && p.theirs() == f.friend_x,
+                    None => st.guests.contains_key(&pair),
+                }
             })
             .cloned()
             .collect();
@@ -583,9 +591,11 @@ where
                     events.push(EngineEvent::Disconnected { pair: victim });
                 }
             }
+            // `Contact` берётся с адреса установки соединения: текущий `remote_addr()` мог
+            // смениться миграцией пути, которая ещё не проверена
             let _ = st
                 .book
-                .note_contact(&*self.store, &pair, conn.remote_addr(), unix);
+                .note_contact(&*self.store, &pair, conn.established_addr(), unix);
             let rt = st.friends.entry(pair).or_default();
             rt.last_conn_at = Some(now);
             rt.consecutive_fails = 0;
@@ -912,7 +922,9 @@ where
                 TransportEvent::RemoteAddrChanged { pair } => {
                     let unix = self.clock.now_unix();
                     let mut st = self.lock();
-                    let addr = st.live.get(&pair).map(|l| l.conn.remote_addr());
+                    // quinn не сообщает, проверен ли новый путь: в `Contact` идёт адрес
+                    // установки, а не текущий `remote_addr()` (его мог подменить источник)
+                    let addr = st.live.get(&pair).map(|l| l.conn.established_addr());
                     if let Some(addr) = addr {
                         let _ = st.book.note_contact(&*self.store, &pair, addr, unix);
                         // F3: другу сообщаем, как мы видим его теперь; не чаще
@@ -976,7 +988,7 @@ where
             .live
             .iter()
             .filter(|(pair, _)| st.book.is_active(pair))
-            .map(|(pair, l)| (*pair, l.conn.remote_addr()))
+            .map(|(pair, l)| (*pair, l.conn.established_addr()))
             .filter(|(_, remote)| classify(normalize(*remote).ip()) == AddrClass::Private)
             .collect();
         for (pair, remote) in private {

@@ -219,6 +219,18 @@ async fn blocked_friend_dropped_from_transport_while_store_fails() {
     assert_eq!(n.t.peers_call_count(), calls);
 }
 
+/// Повторная проверка 3, п. 4: остановка очищает зеркало набора транспорта (общие ссылки на
+/// ключи не живут дольше движка).
+#[tokio::test(start_paused = true)]
+async fn shutdown_clears_published_mirror() {
+    let mut pre = Pre::new();
+    let _x = pre.solo_friend(vec![inv("5.6.7.8:4000")]);
+    let n = Node::start(pre, ConnectConfig::default());
+    assert_eq!(n.engine.inner.lock().published.len(), 1);
+    n.engine.shutdown();
+    assert!(n.engine.inner.lock().published.is_empty());
+}
+
 /// S2, L4 (остаток): повтор каждые 5 с не засыпает событиями `Internal`: одно на серию неудач.
 #[tokio::test(start_paused = true)]
 async fn failed_publish_emits_internal_once_per_streak() {
