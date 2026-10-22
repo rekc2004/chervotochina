@@ -1,5 +1,7 @@
 # SPEC 17a: own Secret Service client (Linux)          criticality: CRITICAL
 
+Ревизии: ред. 1: исходная спецификация. ред. 2: правки по P0 (Unlock принимает путь коллекции, а не строку "default"; полные ключи свойств в CreateItem; структура Secret `(oayays)` без двойных скобок; проверка сигнатуры тела в тестах на поддельном сервисе).
+
 Goal: on Linux, `OsKeyStore` talks to the Secret Service over D-Bus with our own minimal client on zbus 6.0.0, behind the same traits (`SecretStore`, `ListKeyStore`, `EpochStore`); entries written by the old client are read unchanged; `secret-service`, `zbus-secret-service-keyring-store`, zbus 5 and zvariant 5 leave `Cargo.lock`; the RUSTSEC-2026-0370/0371/0372 exception is removed.
 
 Owner decision: `docs/OWNER_DECISIONS.md:134` (Q3, 2026-10-18). Task line: `docs/TASK.md:96`.
@@ -24,6 +26,8 @@ Read (nothing else needs searching): this file; `crates/chervo-identity/src/{os.
 
 **Проверки.** Тесты протокола на поддельном сервисе (работают в CI без gnome-keyring), отдельная задача CI с настоящим gnome-keyring, ручные тесты на вашей Linux-машине (в том числе без рабочего стола и после перезагрузки). Затем два ревью безопасности.
 
+**Сверка с официальной спецификацией (ред. 2).** Шаг P0 открыл спецификацию freedesktop Secret Service (черновик 0.2) и подтвердил все протокольные допущения. Исправлены три ошибки в тексте: разблокировка передаёт путь коллекции, а не слово "default"; ключи свойств при создании записи полные; структура секрета записана без лишних скобок. Не проверено запуском: что gnome-keyring отвечает «заблокировано» на чтение заблокированной записи (известно только по его исходникам), и что у свежего gnome-keyring в CI есть псевдоним `default` (если нет, это условие остановки).
+
 **Вопросы к вам:** В1 (plain или DH), В2 (окно разблокировки только по кнопке). Рекомендации в разделе 9.
 
 ---
@@ -46,7 +50,11 @@ F6 [П] Secret encoding: the value bytes are the caller's bytes, no base64 or te
 
 F7 [П] Old error mapping: `Locked`, `NoResult`, `Prompt` → `NoStorageAccess` (`errors.rs:11-18`) → `StorageLocked` (`os.rs:50`); no service or bus → `Unavailable` → `PlatformFailure` (`util.rs:151-159`) → `StorageUnavailable` (`os.rs:60`).
 
-F8 [П] D-Bus names and signatures used: bus name `org.freedesktop.secrets`, path `/org/freedesktop/secrets` (`ss.rs:4`, `proxy/service.rs:13-17`); algorithms `plain` and `dh-ietf1024-sha256-aes128-cbc-pkcs7` (`ss.rs:11-12`); item property keys `org.freedesktop.Secret.Item.Label`, `org.freedesktop.Secret.Item.Attributes` (`ss.rs:7-8`); Secret struct `(oayays)` = session, parameters, value, content_type (`proxy/mod.rs:9-15`); method signatures in `proxy/service.rs:18-44`, `proxy/collection.rs:18-29`, `proxy/item.rs:15-21`, `proxy/prompt.rs:14-21`. The freedesktop specification itself was **not** opened (no web tool here) [НП]: see step P0.
+F8 [П] D-Bus names and signatures used: bus name `org.freedesktop.secrets`, path `/org/freedesktop/secrets` (`ss.rs:4`, `proxy/service.rs:13-17`); algorithms `plain` and `dh-ietf1024-sha256-aes128-cbc-pkcs7` (`ss.rs:11-12`); item property keys `org.freedesktop.Secret.Item.Label`, `org.freedesktop.Secret.Item.Attributes` (`ss.rs:7-8`); Secret struct `(oayays)` = session, parameters, value, content_type (`proxy/mod.rs:9-15`); method signatures in `proxy/service.rs:18-44`, `proxy/collection.rs:18-29`, `proxy/item.rs:15-21`, `proxy/prompt.rs:14-21`.
+
+F8a [П by P0, web] The freedesktop Secret Service API specification (draft 0.2, https://specifications.freedesktop.org/secret-service/latest/) was checked by step P0 against section 3. All protocol assumptions were confirmed. Three text errors of rev. 1 were fixed in rev. 2: (A) `Service.Unlock` takes `ao` object paths, so the collection path from `ReadAlias("default")` is passed, never the string `"default"`; (B) `CreateItem` property keys are the full names; (C) the Secret struct is `(oayays)`, a single struct argument, not `((oayays))`.
+
+F8b [НП, runtime] `Item.GetSecret` on a locked item returns `org.freedesktop.Secret.Error.IsLocked`: known from gnome-keyring source only, not observed at runtime. A freshly started gnome-keyring may have no `default` alias: not observed; remains a CI stop condition (section 8).
 
 F9 [П] zbus 6.0.0 has **no blocking API**: `src/lib.rs:56-150` has no `blocking` module. `zbus::block_on` with the `tokio` feature **panics inside a Tokio task** (`src/utils.rs:148-151`). Without `default-rt`, a connection built where no Tokio runtime is current fails with `Error::Unsupported` (`src/runtime/mod.rs:80-93`, `src/connection/builder.rs:487-492`).
 
@@ -95,7 +103,7 @@ D5. **No implicit prompt.** `get`, `set` and `delete` never call `Prompt.Prompt`
 
 D6. **`None` only when certain.** `read` returns `Ok(None)` only if `SearchItems` returned zero items AND (alias `default` is `/` OR the default collection's `Locked` property is `false`). Zero items with a locked default collection → `StorageLocked`.
 
-D7. **No collection creation, no fallback.** We never call `CreateCollection` (it prompts) and never use any other storage. No default collection on write → `StorageUnavailable`.
+D7. **No collection creation, no fallback.** We never call `CreateCollection` (it prompts) and never use any other storage. No default collection on write or unlock (`ReadAlias("default")` returns `/`) → `StorageUnavailable`.
 
 D8. **Timeouts.** `CALL_TIMEOUT = 5 s` (connection `method_timeout`), `OP_TIMEOUT = 10 s` (`tokio::time::timeout` around the whole job in the worker, connect and retry included), `CALLER_TIMEOUT = 12 s` (`recv_timeout`). Unlock wait is given by the caller and clamped to `1..=300 s`; the caller waits `wait + 2 s`. Tests inject smaller values through a `pub(crate) Timeouts` struct.
 
@@ -105,27 +113,29 @@ D10. **keyring-core** moves to `cfg(any(target_os = "macos", target_os = "window
 
 ---
 
-## 3. D-Bus subset (exact)
+## 3. D-Bus subset (exact; checked against the freedesktop spec 0.2 by P0)
 
-Destination `org.freedesktop.secrets` for every call. `Variant` means zbus 6 `zbus::Variant`.
+Destination `org.freedesktop.secrets` for every call. `Variant` means zbus 6 `zbus::Variant`. "Body signature" is the D-Bus signature of the whole message body. The Secret struct is a single argument of type `(oayays)` = (session, parameters, value, content_type); there is no outer tuple, so `((oayays))` is wrong everywhere.
 
-| Call | Path | Interface.Member | In | Out |
+| Call | Path | Interface.Member | In (body signature) | Out (body signature) |
 |---|---|---|---|---|
-| open session | `/org/freedesktop/secrets` | `org.freedesktop.Secret.Service.OpenSession` | `(s "plain", v <s "">)` | `(v output, o session)`; output ignored |
-| search | same | `...Service.SearchItems` | `a{ss}` = D4 attributes | `(ao unlocked, ao locked)` |
-| default alias | same | `...Service.ReadAlias` | `s "default"` | `o` (`/` = none) |
-| unlock (only `request_unlock`) | same | `...Service.Unlock` | `ao [default]` | `(ao unlocked, o prompt)` |
-| locked? | collection path | `org.freedesktop.DBus.Properties.Get` | `(s "org.freedesktop.Secret.Collection", s "Locked")` | `v <b>` |
-| create | collection path | `org.freedesktop.Secret.Collection.CreateItem` | `(a{sv} {Label: v<s>, Attributes: v<a{ss}>}, (oayays) (session, [], value, "application/octet-stream"), b true)` | `(o item, o prompt)` |
-| get | item path | `org.freedesktop.Secret.Item.GetSecret` | `o session` | `((oayays))` |
-| set | item path | `...Item.SetSecret` | `((oayays))` | `()` |
-| delete | item path | `...Item.Delete` | `()` | `o prompt` |
-| prompt (only `request_unlock`) | prompt path | `org.freedesktop.Secret.Prompt.Prompt` | `s ""` | `()`; then signal `Completed(b dismissed, v result)` |
-| dismiss | prompt path | `...Prompt.Dismiss` | `()` | `()` |
+| open session | `/org/freedesktop/secrets` | `org.freedesktop.Secret.Service.OpenSession` | `sv`: `s "plain"`, `v <s "">` | `vo`: output (ignored), session |
+| search | same | `...Service.SearchItems` | `a{ss}` = D4 attributes | `aoao`: unlocked, locked |
+| default alias | same | `...Service.ReadAlias` | `s "default"` | `o` (`/` = no default collection) |
+| unlock (only `request_unlock`) | same | `...Service.Unlock` | `ao`: `[<collection path returned by ReadAlias("default")>]`; never the string `"default"`; called only after ReadAlias returned a path other than `/` | `aoo`: unlocked, prompt |
+| locked? | collection path | `org.freedesktop.DBus.Properties.Get` | `ss`: `"org.freedesktop.Secret.Collection"`, `"Locked"` | `v <b>` |
+| create | collection path | `org.freedesktop.Secret.Collection.CreateItem` | `a{sv}(oayays)b`: `{"org.freedesktop.Secret.Item.Label": v<s>, "org.freedesktop.Secret.Item.Attributes": v<a{ss}>}`, `(session, [], value, "application/octet-stream")`, `true` | `oo`: item, prompt |
+| get | item path | `org.freedesktop.Secret.Item.GetSecret` | `o` session | `(oayays)` |
+| set | item path | `...Item.SetSecret` | `(oayays)` | empty |
+| delete | item path | `...Item.Delete` | empty | `o` prompt |
+| prompt (only `request_unlock`) | prompt path | `org.freedesktop.Secret.Prompt.Prompt` | `s ""` | empty; then signal `Completed` with body `bv` (dismissed, result) |
+| dismiss | prompt path | `...Prompt.Dismiss` | empty | empty |
 
-Property keys inside `CreateItem`: `org.freedesktop.Secret.Item.Label`, `org.freedesktop.Secret.Item.Attributes` (F8).
+Property keys inside `CreateItem` are the full names `org.freedesktop.Secret.Item.Label` and `org.freedesktop.Secret.Item.Attributes` (F8, P0); short names `Label`/`Attributes` are wrong.
 
-Error names from the spec (from memory; P0 confirms): `org.freedesktop.Secret.Error.IsLocked`, `.NoSession`, `.NoSuchObject`.
+`Service.GetSecrets` (reply `a{o(oayays)}`) is not used.
+
+Error names (confirmed by P0): `org.freedesktop.Secret.Error.IsLocked`, `.NoSession`, `.NoSuchObject`.
 
 ---
 
@@ -135,15 +145,15 @@ Common first step S (all three operations): ensure connection and session (conne
 
 **get(service, account) → Option<Zeroizing<Vec<u8>>>**
 1. `n > 1` → `StorageInconsistent`.
-2. `n == 0` → `ReadAlias("default")`: `/` → `Ok(None)`; else `Locked` on it: `true` → `StorageLocked`, `false` → `Ok(None)`.
+2. `n == 0` → `ReadAlias("default")`: `/` → `Ok(None)`; else `Locked` on the returned collection path: `true` → `StorageLocked`, `false` → `Ok(None)`.
 3. `locked.len() == 1` → `StorageLocked`.
-4. `GetSecret(session)` on `unlocked[0]`. Wrap `value` in `Zeroizing` **before** any check. Then: `parameters` not empty → `StorageInconsistent`; `value.len() > MAX_SECRET_LEN` (4096) → `StorageInconsistent`. Content type and the returned session path are ignored.
-5. Item errors: `IsLocked` → `StorageLocked`; `NoSuchObject` → `StorageInconsistent` (raced with a delete; never `None`).
+4. `GetSecret(session)` on `unlocked[0]`; the reply body must have signature `(oayays)`, anything else → `StorageUnavailable`. Wrap `value` in `Zeroizing` **before** any check. Then: `parameters` not empty → `StorageInconsistent`; `value.len() > MAX_SECRET_LEN` (4096) → `StorageInconsistent`. Content type and the returned session path are ignored.
+5. Item errors: `IsLocked` → `StorageLocked` (that gnome-keyring returns it here is known from its source only, F8b); `NoSuchObject` → `StorageInconsistent` (raced with a delete; never `None`).
 
 **set(service, account, secret)**
 1. `n > 1` → `StorageInconsistent`; `locked.len() == 1` → `StorageLocked`.
-2. `unlocked.len() == 1` → `SetSecret` on it (`IsLocked` → Locked; `NoSuchObject` → Inconsistent).
-3. `n == 0` → `ReadAlias("default")`: `/` → `StorageUnavailable`. `Locked` → `StorageLocked`. Otherwise `CreateItem` (D4). Results:
+2. `unlocked.len() == 1` → `SetSecret` on it with one argument `(oayays)` = `(session, [], secret, "application/octet-stream")` (`IsLocked` → Locked; `NoSuchObject` → Inconsistent).
+3. `n == 0` → `ReadAlias("default")`: `/` → `StorageUnavailable` (D7). `Locked` on the returned collection path → `StorageLocked`. Otherwise `CreateItem` on that path (D4, full property keys, section 3). Results:
    - `prompt != "/"` → `Dismiss`, then `StorageLocked`;
    - `item == "/"` and `prompt == "/"` → `StorageUnavailable`;
    - otherwise `Ok`.
@@ -153,13 +163,13 @@ Common first step S (all three operations): ensure connection and session (conne
 2. `Item.Delete`: prompt `/` → `Ok`; otherwise `Dismiss`, then `StorageLocked`; `NoSuchObject` → `Ok`.
 
 **request_unlock(wait)** (Linux-only inherent method; the only place where `Unlock` and `Prompt` are called)
-1. `ReadAlias("default")`: `/` → `StorageUnavailable`. Not locked → `Ok`.
-2. `Unlock([alias])`: alias in `unlocked` → `Ok`. If `prompt == "/"`, re-read `Locked` and map it.
+1. `ReadAlias("default")` → collection path `C`. `C == "/"` → `StorageUnavailable` (no default collection, D7). `Locked` on `C` is `false` → `Ok`.
+2. `Unlock([C])` (argument `ao` with the object path `C`, never the string `"default"`): `C` in `unlocked` → `Ok`. If `prompt == "/"`, re-read `Locked` on `C` and map it.
 3. **Before** calling `Prompt("")`, subscribe with `MessageStream::for_match_rule` (signal, path = prompt, interface `org.freedesktop.Secret.Prompt`, member `Completed`). Then wait with `tokio::time::timeout(wait)`. Outcomes:
    - timeout → `Dismiss`, then `StorageLocked`;
    - stream ended → `StorageUnavailable`;
    - `dismissed == true` → `StorageLocked`;
-   - otherwise re-read `Locked` on the alias: `false` → `Ok`, `true` → `StorageLocked`.
+   - otherwise re-read `Locked` on `C`: `false` → `Ok`, `true` → `StorageLocked`.
 
    The decision rests on the `Locked` property, never on the signal alone, so a forged `Completed` from another same-user process changes nothing.
 4. While an unlock runs, the worker is busy. Other jobs wait in the queue and may hit `CALLER_TIMEOUT` → `StorageUnavailable`. Accepted: stage 11 Н1 shows locked and unavailable the same way.
@@ -171,7 +181,8 @@ Common first step S (all three operations): ensure connection and session (conne
 | no bus address, connect/auth failure, `Handshake`, `InputOutput`, `Connection`, op/caller timeout, queue full, worker gone | `StorageUnavailable` |
 | FDO `ServiceUnknown`, `NameHasNoOwner`, `NoReply`, `Timeout`, `TimedOut`, `Disconnected`, `NotSupported` (plain refused), `UnknownMethod`, `UnknownObject`, `UnknownInterface`, `SpawnFailed`/`Spawn*` | `StorageUnavailable` |
 | FDO `AccessDenied`, `Secret.Error.IsLocked`, any prompt outside `request_unlock` | `StorageLocked` |
-| reply of wrong signature or undecodable | `StorageUnavailable` |
+| reply of wrong body signature or undecodable | `StorageUnavailable` |
+| `ReadAlias("default")` returns `/` on set or `request_unlock` | `StorageUnavailable` |
 | `>1` match, oversized secret, non-empty parameters, `NoSuchObject` on get/set | `StorageInconsistent` |
 | `Secret.Error.NoSession` | reconnect once (D9), then `StorageUnavailable` |
 | any other `MethodError` | `StorageUnavailable` |
@@ -196,7 +207,7 @@ impl SecretStore + ListKeyStore + EpochStore for OsKeyStore // accounts: pair.ac
 ```
 Internal layout (Linux only):
 - `src/secret_service/mod.rs`: `pub(crate) struct SsClient`, `pub(crate) struct Timeouts { call, op, caller }`, methods `connect_session(Timeouts)`, `#[cfg(test)] connect_p2p(UnixStream, Timeouts)`, `get`, `set`, `delete`, `request_unlock`.
-- `proto.rs`: names and constants from section 3, `MAX_SECRET_LEN = 4096`, `QUEUE = 8`, `LABEL_PREFIX = "keyring:"`, `CONTENT_TYPE`.
+- `proto.rs`: names and constants from section 3 (including the full property keys and the expected body signatures), `MAX_SECRET_LEN = 4096`, `QUEUE = 8`, `LABEL_PREFIX = "keyring:"`, `CONTENT_TYPE`.
 - `worker.rs`: thread, runtime, job loop, reconnect.
 - `errors.rs`: zbus error → `IdentityError`.
 - `tests.rs`: fake service and unit tests.
@@ -240,14 +251,7 @@ Expected to disappear (report the actual diff, not a criterion): `aes`, `cbc`, `
 
 ## 7. Work split
 
-P0 (`combine-scout`, web, medium, ≤30 lines): open the freedesktop Secret Service API spec (latest) and confirm, with quotes, every row of section 3:
-- error names;
-- `plain` input is an empty-string variant;
-- `CreateItem`/`Delete`/`Unlock` return semantics for `/`;
-- `SearchItems` puts items of locked collections in `locked`;
-- prompt `Completed` signature.
-
-Any difference → stop, architect revises.
+P0 (`combine-scout`, web, medium, ≤30 lines) — **done** (ред. 2): the freedesktop Secret Service API spec (draft 0.2) confirmed section 3: error names; `plain` input is an empty-string variant; `CreateItem`/`Delete`/`Unlock` return `/` when no prompt is needed; `SearchItems` puts items of locked collections in `locked`; prompt `Completed` is `(b dismissed, v result)`. Text errors A-C found and fixed in this revision (F8a). Not verified at runtime: F8b.
 
 B0 (`combine-builder`, sonnet/medium; **before** B1, on the old client):
 - add `#[ignore]` tests `ss_migration_write_old` and `os_epoch_roundtrip_manual` (Linux-only, `tests/identity.rs`). The write test uses service `chervotochina-migration-17a`, pair `PairId::from_bytes([0x17; 16])` with blob `[2] + [0x11; 128]`, list key `[0x5A; 32]`, epoch `0x1717`, written through the trait methods; no cleanup;
@@ -275,19 +279,20 @@ Then: `combine-security` ×2 (independent, fresh context) on the B1+B2+B3 diff a
 Fake service (unit, `#[cfg(all(test, target_os = "linux"))]`):
 - a raw `MessageStream` loop on the server end of `UnixStream::pair()` (`Builder::unix_stream(s0).server(Guid::generate()).p2p()`), replying with `Message::method_return`/`Message::error`;
 - in-memory collections and items with fault knobs and call counters (records every member called);
+- **body signature check:** for every incoming call the fake service asserts the encoded body signature against section 3 (in particular `CreateItem` = `a{sv}(oayays)b`, `SetSecret` = `(oayays)`, `Unlock` = `ao`) and records a mismatch as a test failure; every reply it sends uses the section 3 out signature (`GetSecret` reply `(oayays)`). A client that encodes `((oayays))` must fail T1-T3;
 - the server runs on its own thread and current-thread runtime;
 - if zbus rejects the `destination` header on p2p, the client sends `destination: None` only under `cfg(test)`; report it as a deviation.
 
 Test timeouts: call 200 ms, op 500 ms, caller 800 ms. Bounds are asserted as elapsed < 2 s.
 
-T1 `ss_fake_roundtrip` (set/get/overwrite/delete/get=None) · T2 `ss_fake_create_exact_props` (attributes == exactly D4, label, content type, `replace = true`, collection = alias target) · T3 `ss_fake_existing_uses_setsecret` (no `CreateItem`) · T4 `ss_fake_two_matches_inconsistent` (get/set/delete) · T5 `ss_fake_locked_item_locked_no_prompt` (get/set/delete → Locked; counters: `Unlock` = `Prompt` = 0) · T6 `ss_fake_empty_default_locked_is_locked` · T7 `ss_fake_no_default_alias` (get → None, set → Unavailable) · T8 `ss_fake_create_prompt_dismissed` (Dismiss = 1, Prompt = 0, Locked) · T9 `ss_fake_delete_prompt_locked` · T10 `ss_fake_is_locked_and_access_denied_map_locked` · T11 `ss_fake_service_unknown_unavailable` · T12 `ss_fake_plain_not_supported_unavailable` · T13 `ss_fake_never_replies_bounded` · T14 `ss_fake_silent_peer_no_auth_bounded` (raw socket, never writes) · T15 `ss_fake_bad_signature_unavailable` · T16 `ss_fake_oversized_secret_inconsistent` · T17 `ss_fake_nonempty_parameters_inconsistent` · T18 `ss_fake_no_session_reconnects_once` (once OK; twice → Unavailable) · T19 `ss_fake_item_vanished` (get → Inconsistent, delete → Ok) · T20 `ss_fake_queue_full_unavailable` (immediate) · T21 `ss_fake_server_gone_unavailable_bounded` · T22 `ss_fake_osstore_list_key_and_epoch` (through `OsKeyStore` over the fake; epoch with a 7-byte value → Inconsistent) · T23 `ss_src_guard` (in `src/secret_service/`: no `std::fs`/`File::`/`OpenOptions`, no `block_on`; member strings `"Prompt"`/`"Unlock"` only in the unlock function's file; no `derive(Debug)`) · T24 `ss_fake_unlock_ok` · T25 `ss_fake_unlock_dismissed_locked` · T26 `ss_fake_unlock_timeout_dismisses_bounded` · T27 `ss_fake_unlock_forged_completed_rechecks` (signal says not dismissed, collection still locked → Locked).
+T1 `ss_fake_roundtrip` (set/get/overwrite/delete/get=None; body signatures of `CreateItem`, `SetSecret` and the `GetSecret` reply asserted as above) · T2 `ss_fake_create_exact_props` (property dict keys are exactly `org.freedesktop.Secret.Item.Label` and `org.freedesktop.Secret.Item.Attributes`; attributes == exactly D4, label, content type, `replace = true`, collection = alias target path) · T3 `ss_fake_existing_uses_setsecret` (no `CreateItem`; `SetSecret` body signature `(oayays)`) · T4 `ss_fake_two_matches_inconsistent` (get/set/delete) · T5 `ss_fake_locked_item_locked_no_prompt` (get/set/delete → Locked; counters: `Unlock` = `Prompt` = 0) · T6 `ss_fake_empty_default_locked_is_locked` · T7 `ss_fake_no_default_alias` (ReadAlias → `/`: get → None, set → Unavailable) · T8 `ss_fake_create_prompt_dismissed` (Dismiss = 1, Prompt = 0, Locked) · T9 `ss_fake_delete_prompt_locked` · T10 `ss_fake_is_locked_and_access_denied_map_locked` · T11 `ss_fake_service_unknown_unavailable` · T12 `ss_fake_plain_not_supported_unavailable` · T13 `ss_fake_never_replies_bounded` · T14 `ss_fake_silent_peer_no_auth_bounded` (raw socket, never writes) · T15 `ss_fake_bad_signature_unavailable` (includes a `GetSecret` reply encoded as `((oayays))`) · T16 `ss_fake_oversized_secret_inconsistent` · T17 `ss_fake_nonempty_parameters_inconsistent` · T18 `ss_fake_no_session_reconnects_once` (once OK; twice → Unavailable) · T19 `ss_fake_item_vanished` (get → Inconsistent, delete → Ok) · T20 `ss_fake_queue_full_unavailable` (immediate) · T21 `ss_fake_server_gone_unavailable_bounded` · T22 `ss_fake_osstore_list_key_and_epoch` (through `OsKeyStore` over the fake; epoch with a 7-byte value → Inconsistent) · T23 `ss_src_guard` (in `src/secret_service/`: no `std::fs`/`File::`/`OpenOptions`, no `block_on`; member strings `"Prompt"`/`"Unlock"` only in the unlock function's file; no `derive(Debug)`) · T24 `ss_fake_unlock_ok` (the `Unlock` argument is `ao` containing exactly the collection path the fake returned from `ReadAlias("default")`, which the fake makes differ from `/org/freedesktop/secrets/aliases/default`; a string `"default"` fails the test) · T25 `ss_fake_unlock_dismissed_locked` · T26 `ss_fake_unlock_timeout_dismisses_bounded` · T27 `ss_fake_unlock_forged_completed_rechecks` (signal says not dismissed, collection still locked → Locked) · T28 `ss_fake_unlock_no_default_alias` (ReadAlias → `/`: `request_unlock` → Unavailable; counters: `Unlock` = `Prompt` = 0).
 
-Live (ignored, CI job `secret-service-live` only): L1 `ss_live_roundtrip` (pair, list key, epoch, delete) · L2 `ss_live_attributes_exact` (read back `Attributes`/`Label` via a `cfg(test)` helper; allowed extra key only `xdg:schema` if the daemon adds it [НП]) · L3 `ss_live_locked_bounded` (test helper calls `Service.Lock` on default; get/set/delete → Locked < 2 s each; `request_unlock(2 s)` → Locked < 5 s; runs last).
+Live (ignored, CI job `secret-service-live` only): L1 `ss_live_roundtrip` (pair, list key, epoch, delete) · L2 `ss_live_attributes_exact` (read back `Attributes`/`Label` via a `cfg(test)` helper; allowed extra key only `xdg:schema` if the daemon adds it [НП]) · L3 `ss_live_locked_bounded` (test helper calls `Service.Lock` on the default collection path; get/set/delete → Locked < 2 s each, which is also the first runtime observation of `IsLocked`/`locked` behaviour (F8b); `request_unlock(2 s)` → Locked < 5 s; runs last).
 
 Acceptance (each by command, actual output in the report):
 - [ ] Windows: `cargo build --workspace --locked`; `cargo test --workspace --locked`; `cargo clippy --workspace --all-targets --locked -- -D warnings`; `cargo fmt --all -- --check`.
 - [ ] Linux type check from Windows, only if the target is already installed (installing it is the owner's call): `cargo clippy -p chervo-identity --target x86_64-unknown-linux-gnu --all-targets --locked -- -D warnings`.
-- [ ] CI `test (ubuntu-latest)`: T1-T27 pass, `public_debug_redacted` passes. CI `test (windows, macos)` green and unchanged.
+- [ ] CI `test (ubuntu-latest)`: T1-T28 pass, `public_debug_redacted` passes. CI `test (windows, macos)` green and unchanged.
 - [ ] CI `secret-service-live`: L1-L3 pass (log excerpt).
 - [ ] `cargo audit --deny warnings` and `cargo deny check advisories bans licenses sources` with the exception removed.
 - [ ] `cargo tree --locked -i <name>` reports "did not match" for each must-disappear name. `Cargo.lock` has exactly one `name = "zbus"` (6.0.0). `cargo tree -p chervo-identity --target x86_64-unknown-linux-gnu -e features -i zbus` shows no `tracing`/`default-rt`/`unixexec`/`ibus` in the normal tree.
@@ -299,7 +304,7 @@ Manual tests on the owner's Linux machine (`combine-verifier` or the dirigent ru
 - M3, locked after reboot (or daemon replaced without unlock): any op → `StorageLocked` within 12 s, no dialog, no hang. Then unlock over ssh with the candidate procedure [НП]: `loginctl enable-linger $USER` once; after login `read -rs P; printf '%s' "$P" | gnome-keyring-daemon --replace --unlock --components=secrets >/dev/null; unset P`. Repeat M2. Record which command actually worked.
 - M4: `DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent cargo test ... -- --ignored os_store_roundtrip_manual` fails fast with `StorageUnavailable` (no hang).
 
-Stop conditions: P0 contradicts section 3; a zbus 6 API cited here differs; a new package other than the four in section 6; `unsafe` needed; gnome-keyring in CI has no `default` alias or does not report locked items in `locked`; M1 fails; any timeout bound cannot be met. Stop and report, do not work around. Limit: 2 rounds of "fix after review", then report.
+Stop conditions: section 3 contradicts the freedesktop spec or the daemon; a zbus 6 API cited here differs; a new package other than the four in section 6; `unsafe` needed; gnome-keyring in CI has no `default` alias (a fresh daemon may lack it, F8b) or does not report locked items in `locked`; M1 fails; any timeout bound cannot be met. Stop and report, do not work around (in particular, do not create a collection or set the alias in CI without an architect revision). Limit: 2 rounds of "fix after review", then report.
 
 Report (≤25 lines per builder part): files changed; commands with their last output lines; lock diff (added/removed names); what was not done; deviations.
 
@@ -313,11 +318,11 @@ Q2. Read/write never show a password dialog; unlocking only by an explicit butto
 
 1. No fallback storage on any path; no `std::fs` in `secret_service/`.
 2. `Ok(None)` only per D6. Every other branch is an error; no branch turns Locked or Unavailable into `None`.
-3. `Prompt`/`Unlock` only in `request_unlock`; returned prompts elsewhere are dismissed and give Locked; unlock success is decided by the `Locked` property.
+3. `Prompt`/`Unlock` only in `request_unlock`; `Unlock` receives the collection object path from `ReadAlias("default")` (never `"default"`, never `/`); returned prompts elsewhere are dismissed and give Locked; unlock success is decided by the `Locked` property.
 4. Every await is bounded (call/op/caller). No `block_on` on caller threads. The queue is bounded with `try_send`. Worker death or panic → Unavailable, no hang. `Drop` does not block.
 5. Zeroization: secrets live only in `Zeroizing` (job, reply, decoded value wrapped before checks); no `clone`/`to_vec` outside `Zeroizing`. Residual documented: zbus/dbus-daemon buffers.
 6. Redaction: no Debug or Display of secrets, service, account or zbus errors; `OsKeyStore` Debug is `OsKeyStore(..)`.
-7. Compatibility contract D4 exact; one entry per pair; no friend name or keys in attributes or label.
+7. Compatibility contract D4 exact (full property keys, Secret struct `(oayays)`); one entry per pair; no friend name or keys in attributes or label.
 8. Hostile replies (wrong types, sizes, counts, `/` paths, forged signals, silence) → fixed errors, no panic.
 9. Features: zbus without default features and without `tracing`; `p2p` only in dev; no child process spawning (`unixexec`/`ibus` off).
 10. Supply chain: lock diff matches section 6; exception removed; bans present; licences MIT; `unsafe` counts in zbus 6 and zruntime recorded (F16).
