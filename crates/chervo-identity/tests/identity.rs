@@ -1026,3 +1026,40 @@ fn os_list_key_roundtrip_manual() {
     assert!(first.read_list_key().unwrap().is_none());
     second.delete_list_key().unwrap();
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "трогает реальное хранилище ОС; запускает владелец вручную"]
+fn os_epoch_roundtrip_manual() {
+    use chervo_identity::{EpochStore, OsKeyStore};
+
+    let mut r = [0u8; 8];
+    getrandom::fill(&mut r).unwrap();
+    let hex: String = r.iter().map(|b| format!("{b:02x}")).collect();
+    let service = format!("chervotochina-test-{hex}");
+    assert_ne!(service, DEFAULT_SERVICE);
+
+    let first = OsKeyStore::open_with_service(&service).unwrap();
+    assert!(first.read_epoch().unwrap().is_none());
+    first.write_epoch(0x0102_0304_0506_0708).unwrap();
+    let second = OsKeyStore::open_with_service(&service).unwrap();
+    assert_eq!(second.read_epoch().unwrap(), Some(0x0102_0304_0506_0708));
+    second.write_epoch(5).unwrap();
+    assert_eq!(first.read_epoch().unwrap(), Some(5));
+}
+
+/// M1, этап 17a: запись тремя методами старого клиента Secret Service. Без очистки:
+/// читает `ss_migration_read_new` на итоговом коммите.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "трогает реальное хранилище ОС; запускает владелец вручную"]
+fn ss_migration_write_old() {
+    use chervo_identity::{EpochStore, OsKeyStore};
+
+    let store = OsKeyStore::open_with_service("chervotochina-migration-17a").unwrap();
+    let mut blob = vec![2u8];
+    blob.extend_from_slice(&[0x11; 128]);
+    store.write(&PairId::from_bytes([0x17; 16]), &blob).unwrap();
+    store.write_list_key(&[0x5A; LIST_KEY_LEN]).unwrap();
+    store.write_epoch(0x1717).unwrap();
+}
