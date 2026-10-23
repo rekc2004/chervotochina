@@ -101,6 +101,32 @@ enum PromptMode {
     Silent,
     /// 50 malformed `Completed` signals before the reply and 50 after it, then nothing.
     Flood,
+    /// The user enters the password: unlocks, reply, the genuine `Completed(false, ..)`, and at
+    /// once 20 more signals (the final `Locked` check must not wait behind them).
+    FloodAfter,
+    /// Unlocks; then a `Completed(true, ..)` from another sender, a `Completed(true, ..)` of
+    /// another prompt path, and only then the genuine `Completed(false, ..)`.
+    ForgedThenReal,
+    /// Unlocks, but the only signal is a `Completed(false, ..)` from another sender.
+    ForgedOnly,
+    /// The user cancels: reply, `Completed(true, ..)`, and at once 20 more signals.
+    FloodDismissed,
+}
+
+/// The unique name the fake service sends from when `State::sender` is set (else no sender, as on
+/// a peer-to-peer connection).
+const SERVICE_UNIQUE: &str = ":1.42";
+const FORGER_UNIQUE: &str = ":1.666";
+const OTHER_PROMPT: &str = "/org/freedesktop/secrets/prompt/p2";
+
+fn with_sender<'a>(
+    b: zbus::message::Builder<'a>,
+    sender: Option<&'static str>,
+) -> zbus::message::Builder<'a> {
+    match sender {
+        Some(name) => b.sender(name),
+        None => b,
+    }
 }
 
 #[derive(Clone)]
@@ -141,6 +167,8 @@ struct State {
     delete_prompt: bool,
     unlock_mode: UnlockMode,
     prompt_mode: PromptMode,
+    /// Sender header of the `Unlock` and `Prompt` replies and of the genuine signals.
+    sender: Option<&'static str>,
     /// Object paths received by `Unlock`, one list per call.
     unlock_args: Vec<Vec<String>>,
     calls: Vec<Call>,
@@ -164,6 +192,7 @@ impl State {
             delete_prompt: false,
             unlock_mode: UnlockMode::Direct,
             prompt_mode: PromptMode::Complete,
+            sender: None,
             unlock_args: Vec::new(),
             calls: Vec::new(),
             mismatches: Vec::new(),
@@ -592,42 +621,74 @@ fn handle(shared: &Shared, msg: &Message) -> Disp {
                     st.collection_locked = false;
                     ok!(hdr, &(vec![obj(COLLECTION)], obj("/")))
                 }
-                UnlockMode::Prompt => ok!(hdr, &(Vec::<ObjectPath<'_>>::new(), obj(PROMPT))),
+                UnlockMode::Prompt => Disp::Send(
+                    with_sender(Message::method_return(&hdr), st.sender)
+                        .build(&(Vec::<ObjectPath<'_>>::new(), obj(PROMPT)))
+                        .expect("build reply"),
+                ),
             }
         }
         "Prompt" => {
-            let dismissed = match st.prompt_mode {
-                PromptMode::Complete => {
-                    st.collection_locked = false;
-                    Some(false)
-                }
-                PromptMode::Dismissed => Some(true),
-                PromptMode::Forged => Some(false),
-                PromptMode::Silent | PromptMode::Flood => None,
-            };
-            let reply = Message::method_return(&hdr)
+            let name = st.sender;
+            let reply = with_sender(Message::method_return(&hdr), name)
                 .build(&())
                 .expect("build reply");
-            if st.prompt_mode == PromptMode::Flood {
-                // Right path, interface and member, a body of the wrong shape.
-                let junk = || {
-                    Message::signal(path.as_str(), "org.freedesktop.Secret.Prompt", "Completed")
-                        .build(&7u32)
-                        .expect("build signal")
-                };
-                let mut out: Vec<Message> = (0..50).map(|_| junk()).collect();
-                out.push(reply);
-                out.extend((0..50).map(|_| junk()));
-                return Disp::SendAll(out);
-            }
-            let mut out = vec![reply];
-            if let Some(d) = dismissed {
-                out.push(
-                    Message::signal(path.as_str(), "org.freedesktop.Secret.Prompt", "Completed")
-                        .build(&(d, Variant::from("")))
-                        .expect("build signal"),
-                );
-            }
+            let signal = |p: &str, from: Option<&'static str>, dismissed: bool| {
+                with_sender(
+                    Message::signal(p, "org.freedesktop.Secret.Prompt", "Completed"),
+                    from,
+                )
+                .build(&(dismissed, Variant::from("")))
+                .expect("build signal")
+            };
+            // Right path, interface and member, a body of the wrong shape.
+            let junk = || {
+                with_sender(
+                    Message::signal(path.as_str(), "org.freedesktop.Secret.Prompt", "Completed"),
+                    name,
+                )
+                .build(&7u32)
+                .expect("build signal")
+            };
+            let out = match st.prompt_mode {
+                PromptMode::Flood => {
+                    let mut out: Vec<Message> = (0..50).map(|_| junk()).collect();
+                    out.push(reply);
+                    out.extend((0..50).map(|_| junk()));
+                    out
+                }
+                PromptMode::FloodAfter => {
+                    st.collection_locked = false;
+                    let mut out = vec![reply, signal(&path, name, false)];
+                    out.extend((0..20).map(|_| junk()));
+                    out
+                }
+                PromptMode::FloodDismissed => {
+                    let mut out = vec![reply, signal(&path, name, true)];
+                    out.extend((0..20).map(|_| junk()));
+                    out
+                }
+                PromptMode::ForgedThenReal => {
+                    st.collection_locked = false;
+                    vec![
+                        reply,
+                        signal(&path, Some(FORGER_UNIQUE), true),
+                        signal(OTHER_PROMPT, name, true),
+                        signal(&path, name, false),
+                    ]
+                }
+                PromptMode::ForgedOnly => {
+                    st.collection_locked = false;
+                    vec![reply, signal(&path, Some(FORGER_UNIQUE), false)]
+                }
+                PromptMode::Complete => {
+                    st.collection_locked = false;
+                    vec![reply, signal(&path, name, false)]
+                }
+                PromptMode::Dismissed => vec![reply, signal(&path, name, true)],
+                PromptMode::Forged => vec![reply, signal(&path, name, false)],
+                PromptMode::Silent => vec![reply],
+            };
             Disp::SendAll(out)
         }
         _ => fail!(hdr, "org.freedesktop.DBus.Error.UnknownMethod"),
@@ -1293,6 +1354,100 @@ fn ss_fake_unlock_signal_flood_bounded() {
     assert_eq!(value(c.get(SVC, ACC)), Ok(None));
     assert_eq!(fake.shared.connections.load(Ordering::SeqCst), 1);
     fake.assert_signatures();
+}
+
+/// A fake with a locked collection, a prompt mode and the unique name of the service.
+fn prompt_fake(mode: PromptMode, sender: Option<&'static str>) -> (Fake, SsClient) {
+    let fake = Fake::start();
+    let c = fake.client();
+    fake.with(|s| {
+        s.collection_locked = true;
+        s.unlock_mode = UnlockMode::Prompt;
+        s.prompt_mode = mode;
+        s.sender = sender;
+    });
+    (fake, c)
+}
+
+#[test]
+fn ss_fake_unlock_forged_sender_ignored_real_honoured() {
+    // Before the genuine `Completed(false)`: a `Completed(true)` from another unique name and one
+    // with another path. If either were believed, the result would be "locked".
+    let (fake, c) = prompt_fake(PromptMode::ForgedThenReal, Some(SERVICE_UNIQUE));
+    let start = Instant::now();
+    assert_eq!(c.request_unlock(WAIT), Ok(()));
+    assert_fast(start);
+    assert_eq!(fake.count("Prompt"), 1);
+    assert_eq!(fake.count("Dismiss"), 0);
+    assert!(!fake.with(|s| s.collection_locked));
+    fake.assert_signatures();
+}
+
+#[test]
+fn ss_fake_unlock_forged_sender_alone_is_not_enough() {
+    // The collection is unlocked, but the only `Completed(false)` is from another sender: it is
+    // ignored, the wait ends at the limit as "locked" and the prompt is dismissed.
+    let (fake, c) = prompt_fake(PromptMode::ForgedOnly, Some(SERVICE_UNIQUE));
+    let start = Instant::now();
+    assert_eq!(c.request_unlock(WAIT), Err(LOCKED));
+    let took = start.elapsed();
+    assert!(took >= WAIT, "forged signal ended the wait: {took:?}");
+    assert_fast(start);
+    assert_eq!(fake.count("Dismiss"), 1);
+    fake.assert_signatures();
+}
+
+#[test]
+fn ss_fake_unlock_signals_queued_before_locked_check() {
+    // The genuine `Completed(false)` is followed at once by 20 signals. The `Locked` check runs
+    // with the signal stream gone: queued signals cannot block the socket reader (queue is 4),
+    // so the answer is "unlocked", not "unavailable".
+    let (fake, c) = prompt_fake(PromptMode::FloodAfter, Some(SERVICE_UNIQUE));
+    let start = Instant::now();
+    assert_eq!(c.request_unlock(WAIT), Ok(()));
+    assert_fast(start);
+    assert_eq!(fake.count("Prompt"), 1);
+    assert_eq!(fake.count("Dismiss"), 0);
+    assert_eq!(fake.shared.connections.load(Ordering::SeqCst), 1);
+    fake.assert_signatures();
+}
+
+#[test]
+fn ss_fake_unlock_signals_queued_before_dismiss() {
+    // The user cancels (`Completed(true)`) and 20 signals follow. `Dismiss` is sent and answered
+    // with the stream gone, and the connection stays usable. No sender at all, as on p2p.
+    let (fake, c) = prompt_fake(PromptMode::FloodDismissed, None);
+    let start = Instant::now();
+    assert_eq!(c.request_unlock(WAIT), Err(LOCKED));
+    assert_fast(start);
+    assert_eq!(fake.count("Prompt"), 1);
+    assert_eq!(fake.count("Dismiss"), 1);
+    fake.with(|s| s.collection_locked = false);
+    assert_eq!(value(c.get(SVC, ACC)), Ok(None));
+    assert_eq!(fake.shared.connections.load(Ordering::SeqCst), 1);
+    fake.assert_signatures();
+}
+
+#[test]
+fn ss_unlock_from_service_comparison() {
+    use super::unlock::from_service;
+    let p = PROMPT;
+    // The service of a bus: sender and path match.
+    assert!(from_service(Some(":1.42"), Some(p), Some(":1.42"), p));
+    // Another unique name, no sender where one is expected, a sender where none is expected.
+    assert!(!from_service(Some(":1.666"), Some(p), Some(":1.42"), p));
+    assert!(!from_service(None, Some(p), Some(":1.42"), p));
+    assert!(!from_service(Some(":1.42"), Some(p), None, p));
+    // Another path, no path.
+    assert!(!from_service(
+        Some(":1.42"),
+        Some(OTHER_PROMPT),
+        Some(":1.42"),
+        p
+    ));
+    assert!(!from_service(Some(":1.42"), None, Some(":1.42"), p));
+    // Peer-to-peer: no reply sender, only signals without a sender.
+    assert!(from_service(None, Some(p), None, p));
 }
 
 #[test]
