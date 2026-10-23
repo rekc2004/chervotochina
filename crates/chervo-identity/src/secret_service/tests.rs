@@ -99,6 +99,8 @@ enum PromptMode {
     Forged,
     /// No signal at all (the user does not answer).
     Silent,
+    /// 50 malformed `Completed` signals before the reply and 50 after it, then nothing.
+    Flood,
 }
 
 #[derive(Clone)]
@@ -132,6 +134,8 @@ struct State {
     collection_locked: bool,
     once: HashMap<String, VecDeque<Action>>,
     always: HashMap<String, Action>,
+    /// Pause before the call of this member is handled (the whole connection waits).
+    delays: HashMap<String, Duration>,
     get_mode: GetMode,
     create_prompt: bool,
     delete_prompt: bool,
@@ -154,6 +158,7 @@ impl State {
             collection_locked: false,
             once: HashMap::new(),
             always: HashMap::new(),
+            delays: HashMap::new(),
             get_mode: GetMode::Normal,
             create_prompt: false,
             delete_prompt: false,
@@ -598,11 +603,23 @@ fn handle(shared: &Shared, msg: &Message) -> Disp {
                 }
                 PromptMode::Dismissed => Some(true),
                 PromptMode::Forged => Some(false),
-                PromptMode::Silent => None,
+                PromptMode::Silent | PromptMode::Flood => None,
             };
             let reply = Message::method_return(&hdr)
                 .build(&())
                 .expect("build reply");
+            if st.prompt_mode == PromptMode::Flood {
+                // Right path, interface and member, a body of the wrong shape.
+                let junk = || {
+                    Message::signal(path.as_str(), "org.freedesktop.Secret.Prompt", "Completed")
+                        .build(&7u32)
+                        .expect("build signal")
+                };
+                let mut out: Vec<Message> = (0..50).map(|_| junk()).collect();
+                out.push(reply);
+                out.extend((0..50).map(|_| junk()));
+                return Disp::SendAll(out);
+            }
             let mut out = vec![reply];
             if let Some(d) = dismissed {
                 out.push(
@@ -638,6 +655,13 @@ async fn serve(shared: Arc<Shared>, stream: UnixStream, mut kill: watch::Receive
         }
         if msg.message_type() != MsgType::MethodCall {
             continue;
+        }
+        let delay = msg
+            .header()
+            .member()
+            .and_then(|m| shared.state.lock().unwrap().delays.get(m.as_str()).copied());
+        if let Some(d) = delay {
+            tokio::time::sleep(d).await;
         }
         match handle(&shared, &msg) {
             Disp::Send(reply) => {
@@ -1151,6 +1175,8 @@ fn ss_fake_unlock_dismissed_locked() {
     assert_eq!(c.request_unlock(WAIT), Err(LOCKED));
     assert_fast(start);
     assert_eq!(fake.count("Prompt"), 1);
+    // The prompt is closed on every outcome but success.
+    assert_eq!(fake.count("Dismiss"), 1);
     assert!(fake.with(|s| s.collection_locked));
     // The store still reports "locked", no prompt on its own.
     assert_eq!(value(c.get(SVC, ACC)), Err(LOCKED));
@@ -1195,6 +1221,7 @@ fn ss_fake_unlock_forged_completed_rechecks() {
     assert_eq!(c.request_unlock(WAIT), Err(LOCKED));
     assert_fast(start);
     assert_eq!(fake.count("Prompt"), 1);
+    assert_eq!(fake.count("Dismiss"), 1);
     assert!(fake.with(|s| s.collection_locked));
     fake.assert_signatures();
 }
@@ -1233,10 +1260,186 @@ fn ss_fake_unlock_hostile_replies_bounded() {
     fake.always("Prompt", Action::Error(SERVICE_UNKNOWN));
     assert_eq!(c.request_unlock(WAIT), Err(UNAVAILABLE));
     assert_eq!(fake.count("Prompt"), 1);
+    assert_eq!(fake.count("Dismiss"), 1);
     // An access-denied answer to `Unlock` is "locked".
     fake.with(|s| s.always.clear());
     fake.always("Unlock", Action::Error(ACCESS_DENIED));
     assert_eq!(c.request_unlock(WAIT), Err(LOCKED));
+    fake.assert_signatures();
+}
+
+#[test]
+fn ss_fake_unlock_signal_flood_bounded() {
+    // 100 well-addressed signals with a body of the wrong shape, half of them before the reply to
+    // `Prompt`. The queue of the signal stream holds 4: without draining, the socket reader would
+    // wait for room and the reply to `Prompt` would never be dispatched.
+    let fake = Fake::start();
+    let c = fake.client();
+    fake.with(|s| {
+        s.collection_locked = true;
+        s.unlock_mode = UnlockMode::Prompt;
+        s.prompt_mode = PromptMode::Flood;
+    });
+    let start = Instant::now();
+    assert_eq!(c.request_unlock(WAIT), Err(LOCKED));
+    let took = start.elapsed();
+    assert!(took >= WAIT, "returned before the wait: {took:?}");
+    assert_fast(start);
+    assert_eq!(fake.count("Prompt"), 1);
+    assert_eq!(fake.count("Dismiss"), 1);
+    assert!(fake.with(|s| s.collection_locked));
+    // The connection is still usable (no stuck reader, no reconnect needed).
+    fake.with(|s| s.collection_locked = false);
+    assert_eq!(value(c.get(SVC, ACC)), Ok(None));
+    assert_eq!(fake.shared.connections.load(Ordering::SeqCst), 1);
+    fake.assert_signatures();
+}
+
+#[test]
+fn ss_unlock_completed_rule_names_the_service() {
+    let prompt: OwnedObjectPath = obj(PROMPT).into();
+    let rule = super::unlock::completed_rule(&prompt)
+        .ok()
+        .expect("rule")
+        .to_string();
+    for part in [
+        "type='signal'",
+        "sender='org.freedesktop.secrets'",
+        "interface='org.freedesktop.Secret.Prompt'",
+        "member='Completed'",
+        "path='/org/freedesktop/secrets/prompt/p1'",
+    ] {
+        assert!(rule.contains(part), "{part} missing in {rule}");
+    }
+}
+
+// ---------- a job is never applied after its caller gave up ----------
+
+/// Wide call and job limits, a short caller wait: only the deadline of the caller stops a job.
+fn late_timeouts() -> Timeouts {
+    Timeouts {
+        call: Duration::from_secs(3),
+        op: Duration::from_secs(5),
+        caller: Duration::from_millis(600),
+    }
+}
+
+fn late_client(fake: &Fake) -> SsClient {
+    SsClient::connect_p2p(fake.connector(), late_timeouts()).expect("client connects")
+}
+
+const OTHER: &str = "pair-v1-ffffffffffffffffffffffffffffffff";
+
+/// No write, create or delete reached the fake, and the stored data is untouched.
+fn assert_untouched(fake: &Fake) {
+    assert_eq!(fake.count("SetSecret"), 0);
+    assert_eq!(fake.count("CreateItem"), 0);
+    assert_eq!(fake.count("Delete"), 0);
+    let items = fake.with(|s| s.items.iter().map(|i| i.secret.clone()).collect::<Vec<_>>());
+    assert_eq!(items, vec![b"old".to_vec()]);
+}
+
+#[test]
+fn ss_fake_queued_jobs_of_gone_callers_never_run() {
+    let fake = Fake::start();
+    fake.add_item(ACC, b"old");
+    let c = Arc::new(late_client(&fake));
+    // The first job holds the worker for 1 s, longer than any caller waits (600 ms).
+    fake.with(|s| {
+        s.delays
+            .insert("SearchItems".to_owned(), Duration::from_millis(1000));
+    });
+    let slow = {
+        let c = c.clone();
+        std::thread::spawn(move || value(c.get(SVC, ACC)))
+    };
+    // Its job is queued (and started) before the others are submitted.
+    std::thread::sleep(Duration::from_millis(100));
+    let queued: Vec<_> = [0u8, 1, 2]
+        .into_iter()
+        .map(|which| {
+            let c = c.clone();
+            std::thread::spawn(move || match which {
+                0 => c.set(SVC, ACC, b"new"),
+                1 => c.set(SVC, OTHER, b"new"),
+                _ => c.delete(SVC, ACC),
+            })
+        })
+        .collect();
+    assert_eq!(slow.join().unwrap(), Err(UNAVAILABLE));
+    for t in queued {
+        assert_eq!(t.join().unwrap(), Err(UNAVAILABLE));
+    }
+    // The slow job ends at about 1 s; the queued ones come after it. Flush the queue.
+    fake.with(|s| s.delays.clear());
+    assert_eq!(value(c.get(SVC, ACC)), Ok(Some(b"old".to_vec())));
+    assert_untouched(&fake);
+    // Only the slow job and the flush ran a search: the three queued jobs never started.
+    assert_eq!(fake.count("SearchItems"), 2);
+    fake.assert_signatures();
+}
+
+#[test]
+fn ss_fake_job_past_its_deadline_sends_no_mutation() {
+    let fake = Fake::start();
+    fake.add_item(ACC, b"old");
+    let c = SsClient::connect_p2p(
+        fake.connector(),
+        Timeouts {
+            call: Duration::from_secs(3),
+            op: Duration::from_secs(5),
+            caller: Duration::from_millis(400),
+        },
+    )
+    .expect("client connects");
+    // Each job starts in time, but its search answers after the caller has given up.
+    fake.with(|s| {
+        s.delays
+            .insert("SearchItems".to_owned(), Duration::from_millis(500));
+    });
+    assert_eq!(c.set(SVC, ACC, b"new"), Err(UNAVAILABLE)); // SetSecret path
+    assert_eq!(c.set(SVC, OTHER, b"new"), Err(UNAVAILABLE)); // CreateItem path
+    assert_eq!(c.delete(SVC, ACC), Err(UNAVAILABLE));
+    // Let the worker finish the last job, then flush the queue.
+    std::thread::sleep(Duration::from_millis(800));
+    fake.with(|s| s.delays.clear());
+    assert_eq!(value(c.get(SVC, ACC)), Ok(Some(b"old".to_vec())));
+    assert_untouched(&fake);
+    // Each of the three jobs did start (it searched) and then stopped before the mutation.
+    assert_eq!(fake.count("SearchItems"), 4);
+    fake.assert_signatures();
+}
+
+#[test]
+fn ss_fake_unlock_past_its_deadline_sends_no_unlock() {
+    let fake = Fake::start();
+    let c = SsClient::connect_p2p(
+        fake.connector(),
+        Timeouts {
+            call: Duration::from_secs(3),
+            op: Duration::from_secs(5),
+            caller: Duration::from_millis(400),
+        },
+    )
+    .expect("client connects");
+    fake.with(|s| {
+        s.collection_locked = true;
+        s.unlock_mode = UnlockMode::Prompt;
+        s.prompt_mode = PromptMode::Complete;
+        // The caller of `request_unlock(300 ms)` waits 2.3 s; the alias answers after 2.6 s.
+        s.delays
+            .insert("ReadAlias".to_owned(), Duration::from_millis(2600));
+    });
+    let start = Instant::now();
+    assert_eq!(c.request_unlock(WAIT), Err(UNAVAILABLE));
+    assert!(start.elapsed() < Duration::from_millis(2500));
+    std::thread::sleep(Duration::from_millis(800));
+    fake.with(|s| s.delays.clear());
+    assert_eq!(value(c.get(SVC, ACC)), Err(LOCKED));
+    // The job went on after the caller left, but sent neither `Unlock` nor `Prompt`.
+    assert_eq!(fake.count("Unlock"), 0);
+    assert_eq!(fake.count("Prompt"), 0);
+    assert!(fake.with(|s| s.collection_locked));
     fake.assert_signatures();
 }
 

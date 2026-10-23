@@ -14,6 +14,12 @@ const MAX_SERVICE_LEN: usize = 255;
 
 /// Linux key store: Secret Service over D-Bus through our own minimal client
 /// (`secret_service`, spec 17a). Entries are compatible with the previous client.
+///
+/// Every call blocks the calling thread until the Secret Service answers, up to 12 s
+/// (`request_unlock`: up to `wait` + 2 s). Async code must call it through `spawn_blocking` (or an
+/// own thread), never directly on an executor thread. The worker does not start a write or delete
+/// whose caller has already stopped waiting (a request already sent to the service before the
+/// limit may still take effect).
 pub struct OsKeyStore {
     client: SsClient,
     service: String,

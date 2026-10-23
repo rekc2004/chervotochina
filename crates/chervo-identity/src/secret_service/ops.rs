@@ -5,6 +5,7 @@
 //! after their body signature was compared with the one of section 3.
 
 use std::collections::BTreeMap;
+use std::time::Instant;
 
 use zbus::wire::DynamicDeserialize;
 use zbus::{Connection, Message, OwnedObjectPath, OwnedVariant, Signature, Variant};
@@ -69,6 +70,16 @@ where
     msg.body()
         .deserialize::<T>()
         .map_err(|_| SsError::UNAVAILABLE)
+}
+
+/// A call that changes something (or shows a prompt) is sent only while the caller still waits:
+/// a result that was reported as a failure must not be applied later.
+pub(super) fn before(deadline: Instant) -> OpResult<()> {
+    if Instant::now() < deadline {
+        Ok(())
+    } else {
+        Err(SsError::UNAVAILABLE)
+    }
 }
 
 pub(super) fn is_none_path(p: &OwnedObjectPath) -> bool {
@@ -197,27 +208,36 @@ pub(super) async fn get(
         M_GET_SECRET,
         &c.session
     ))?;
-    let (_session, parameters, value, _content_type): (OwnedObjectPath, Vec<u8>, Vec<u8>, String) =
-        decode(&msg, SIG_SECRET)?;
-    // Wrapped before any check.
-    let value = Zeroizing::new(value);
+    check_signature(&msg, SIG_SECRET)?;
+    // `value` and `parameters` borrow from the message: the secret is copied exactly once, into
+    // a buffer that is wiped on drop, and only after the length check.
+    let body = msg.body();
+    let (_session, parameters, value, _content_type): (OwnedObjectPath, &[u8], &[u8], &str) =
+        body.deserialize().map_err(|_| SsError::UNAVAILABLE)?;
     if !parameters.is_empty() || value.len() > MAX_SECRET_LEN {
         return Err(SsError::INCONSISTENT);
     }
-    Ok(Some(value))
+    Ok(Some(Zeroizing::new(value.to_vec())))
 }
 
 fn vanished_on_err(r: OpResult<Message>) -> OpResult<Message> {
     r.map_err(vanished)
 }
 
-pub(super) async fn set(c: &Conn, service: &str, account: &str, secret: &[u8]) -> OpResult<()> {
+pub(super) async fn set(
+    c: &Conn,
+    service: &str,
+    account: &str,
+    secret: &[u8],
+    deadline: Instant,
+) -> OpResult<()> {
     let (unlocked, locked) = search(c, service, account).await?;
     match classify(&unlocked, &locked)? {
         Found::Locked => Err(SsError::LOCKED),
         Found::Unlocked(item) => {
             // SetSecret takes ONE argument, the Secret struct: a one-element tuple around it.
             let body = (secret_struct(&c.session, secret),);
+            before(deadline)?;
             let msg = vanished_on_err(rpc!(
                 c.connection,
                 item.as_str(),
@@ -227,11 +247,17 @@ pub(super) async fn set(c: &Conn, service: &str, account: &str, secret: &[u8]) -
             ))?;
             check_signature(&msg, SIG_EMPTY)
         }
-        Found::None => create(c, service, account, secret).await,
+        Found::None => create(c, service, account, secret, deadline).await,
     }
 }
 
-async fn create(c: &Conn, service: &str, account: &str, secret: &[u8]) -> OpResult<()> {
+async fn create(
+    c: &Conn,
+    service: &str,
+    account: &str,
+    secret: &[u8],
+    deadline: Instant,
+) -> OpResult<()> {
     let collection = read_alias(c).await?;
     if is_none_path(&collection) {
         // No default collection: we never create one and never fall back (D7).
@@ -249,6 +275,7 @@ async fn create(c: &Conn, service: &str, account: &str, secret: &[u8]) -> OpResu
     properties.insert(PROP_ITEM_ATTRIBUTES, Variant::from(attrs));
     // Three arguments: a{sv}, (oayays), b.
     let body = (properties, secret_struct(&c.session, secret), true);
+    before(deadline)?;
     let msg = rpc!(
         c.connection,
         collection.as_str(),
@@ -267,13 +294,19 @@ async fn create(c: &Conn, service: &str, account: &str, secret: &[u8]) -> OpResu
     Ok(())
 }
 
-pub(super) async fn delete(c: &Conn, service: &str, account: &str) -> OpResult<()> {
+pub(super) async fn delete(
+    c: &Conn,
+    service: &str,
+    account: &str,
+    deadline: Instant,
+) -> OpResult<()> {
     let (unlocked, locked) = search(c, service, account).await?;
     let item = match classify(&unlocked, &locked)? {
         Found::None => return Ok(()),
         Found::Locked => return Err(SsError::LOCKED),
         Found::Unlocked(item) => item,
     };
+    before(deadline)?;
     let msg = match rpc!(c.connection, item.as_str(), IFACE_ITEM, M_DELETE, &()) {
         Ok(m) => m,
         Err(SsError::NoSuchObject) => return Ok(()),

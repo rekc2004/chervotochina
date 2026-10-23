@@ -14,7 +14,7 @@ mod worker;
 mod tests;
 
 use std::sync::mpsc::{RecvTimeoutError, sync_channel};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::Sender;
 use zeroize::Zeroizing;
@@ -74,12 +74,19 @@ impl SsClient {
     }
 
     /// Queue a job (never blocks) and wait for the answer with a plain blocking timeout, which
-    /// is safe on any thread, Tokio workers included.
+    /// is safe on any thread, Tokio workers included. The job carries the end of this wait as its
+    /// deadline: after it the worker neither starts the job nor changes anything for it.
     fn submit(&self, kind: JobKind, wait: Duration) -> Reply {
         let unavailable = IdentityError::StorageUnavailable;
         let (reply, answer) = sync_channel::<Reply>(1);
+        // Taken before the wait starts, so it is never later than the moment the caller gives up.
+        let deadline = Instant::now().checked_add(wait).ok_or(unavailable)?;
         self.queue
-            .try_send(Job { kind, reply })
+            .try_send(Job {
+                kind,
+                reply,
+                deadline,
+            })
             .map_err(|_| unavailable)?;
         match answer.recv_timeout(wait) {
             Ok(r) => r,

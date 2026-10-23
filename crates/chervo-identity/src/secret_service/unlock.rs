@@ -3,20 +3,26 @@
 //!
 //! Success is decided by the `Locked` property of the default collection, never by the `Completed`
 //! signal alone: a same-user process can forge a signal, it cannot change the property.
+//!
+//! Signal floods: zbus 6.0.0 gives a `MessageStream` a bounded queue and no overflow mode; the
+//! socket reader waits for room in it, and so also stops delivering method replies. Therefore the
+//! stream is drained while the `Prompt` call is in flight and while we wait for `Completed`, and
+//! it is dropped (which releases a waiting reader) before anything else is called.
 
-use std::future::poll_fn;
+use std::future::{Future, poll_fn};
 use std::num::NonZeroUsize;
-use std::pin::Pin;
-use std::time::Duration;
+use std::pin::{Pin, pin};
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 use futures_core::Stream;
 use zbus::message::Type as MsgType;
-use zbus::{AsyncDrop, MatchRule, MessageStream, OwnedObjectPath, OwnedVariant};
+use zbus::{MatchRule, Message, MessageStream, OwnedObjectPath, OwnedVariant};
 
 use super::errors::{SsError, map_call_error};
 use super::ops::{
-    Conn, OpResult, check_signature, collection_locked, decode, dismiss, is_none_path, mapped,
-    read_alias, rpc,
+    Conn, OpResult, before, check_signature, collection_locked, decode, dismiss, is_none_path,
+    mapped, read_alias, rpc,
 };
 use super::proto::{
     BUS_NAME, IFACE_PROMPT, IFACE_SERVICE, SERVICE_PATH, SIG_COMPLETED, SIG_EMPTY, SIG_UNLOCK_OUT,
@@ -28,8 +34,10 @@ const M_COMPLETED: &str = "Completed";
 /// Queue of the signal stream: one signal is expected.
 const SIGNAL_QUEUE: usize = 4;
 
-/// Unlock the default collection. `wait` bounds only the wait for the user at the prompt.
-pub(super) async fn request_unlock(c: &Conn, wait: Duration) -> OpResult<()> {
+/// Unlock the default collection. `wait` bounds only the wait for the user at the prompt;
+/// `deadline` is the moment the caller stops waiting: no `Unlock` and no `Prompt` is sent after
+/// it, and the wait at the prompt ends before it.
+pub(super) async fn request_unlock(c: &Conn, wait: Duration, deadline: Instant) -> OpResult<()> {
     let collection = read_alias(c).await?;
     if is_none_path(&collection) {
         // No default collection: we never create one (D7). No Unlock, no Prompt.
@@ -41,6 +49,7 @@ pub(super) async fn request_unlock(c: &Conn, wait: Duration) -> OpResult<()> {
     // `ao` with the object path from ReadAlias, never the string "default".
     // A Vec (a fixed-size array is sent as separate arguments, so its signature would be `o`).
     let targets: Vec<&OwnedObjectPath> = vec![&collection];
+    before(deadline)?;
     let msg = rpc!(
         c.connection,
         SERVICE_PATH,
@@ -55,7 +64,7 @@ pub(super) async fn request_unlock(c: &Conn, wait: Duration) -> OpResult<()> {
     if is_none_path(&prompt) {
         return still_locked(c, &collection).await;
     }
-    prompt_and_wait(c, &collection, &prompt, wait).await
+    prompt_and_wait(c, &collection, &prompt, wait, deadline).await
 }
 
 /// The decision: `Locked` is `false` -> success.
@@ -67,62 +76,110 @@ async fn still_locked(c: &Conn, collection: &OwnedObjectPath) -> OpResult<()> {
     }
 }
 
+/// Run the prompt. On every outcome but success the prompt is dismissed, best effort (the dialog
+/// must not stay open when we have stopped waiting for it, or after any error).
 async fn prompt_and_wait(
     c: &Conn,
     collection: &OwnedObjectPath,
     prompt: &OwnedObjectPath,
     wait: Duration,
+    deadline: Instant,
 ) -> OpResult<()> {
-    // Subscribe BEFORE the prompt starts, so that a fast `Completed` is not lost.
-    let rule = MatchRule::builder()
+    // The signal stream lives inside `prompt_flow` and is gone when it returns.
+    let result = prompt_flow(c, collection, prompt, wait, deadline).await;
+    if result.is_err() {
+        dismiss(c, prompt).await;
+    }
+    result
+}
+
+/// The rule of the `Completed` signal of one prompt. The sender is the well-known name of the
+/// service: the bus delivers only what its owner sent. zbus cannot check a well-known sender
+/// itself (messages carry unique names), so on a peer-to-peer connection without a bus the rule
+/// matches by path, interface and member only.
+pub(super) fn completed_rule(prompt: &OwnedObjectPath) -> OpResult<MatchRule<'_>> {
+    MatchRule::builder()
         .msg_type(MsgType::Signal)
+        .sender(BUS_NAME)
         .path(prompt.as_str())
         .interface(IFACE_PROMPT)
         .member(M_COMPLETED)
         .build()
-        .map_err(|_| SsError::UNAVAILABLE)?;
+        .map_err(|_| SsError::UNAVAILABLE)
+}
+
+async fn prompt_flow(
+    c: &Conn,
+    collection: &OwnedObjectPath,
+    prompt: &OwnedObjectPath,
+    wait: Duration,
+    deadline: Instant,
+) -> OpResult<()> {
+    // Subscribe BEFORE the prompt starts, so that a fast `Completed` is not lost.
+    let rule = completed_rule(prompt)?;
     let mut stream =
         MessageStream::for_match_rule(rule, &c.connection, NonZeroUsize::new(SIGNAL_QUEUE))
             .await
             .map_err(|e| map_call_error(&e))?;
 
-    let started = rpc!(c.connection, prompt.as_str(), IFACE_PROMPT, M_PROMPT, &"");
-    let outcome = match started {
-        Ok(reply) => match check_signature(&reply, SIG_EMPTY) {
-            Ok(()) => tokio::time::timeout(wait, completed(&mut stream))
+    before(deadline)?;
+    // While the call is in flight the stream is drained, so that a flood cannot block the reader.
+    let mut first: Option<bool> = None;
+    let mut open = true;
+    let mut started =
+        pin!(async { rpc!(c.connection, prompt.as_str(), IFACE_PROMPT, M_PROMPT, &"") });
+    let reply = poll_fn(|cx| {
+        if open {
+            open = drain(&mut stream, cx, &mut first);
+        }
+        started.as_mut().poll(cx)
+    })
+    .await?;
+    check_signature(&reply, SIG_EMPTY)?;
+
+    let dismissed = match first {
+        Some(d) => d,
+        None if !open => return Err(SsError::UNAVAILABLE),
+        None => {
+            // The wait never reaches past the moment the caller gives up.
+            let wait = wait.min(deadline.saturating_duration_since(Instant::now()));
+            // The user did not answer in time: the collection stays locked.
+            tokio::time::timeout(wait, completed(&mut stream))
                 .await
-                .map_err(|_| Elapsed),
-            Err(e) => {
-                stream.async_drop().await;
-                return Err(e);
-            }
-        },
-        Err(e) => {
-            stream.async_drop().await;
-            return Err(e);
+                .map_err(|_| SsError::LOCKED)??
         }
     };
-    // Deregister the match rule at once.
-    stream.async_drop().await;
+    if dismissed {
+        return Err(SsError::LOCKED);
+    }
+    // The signal says "not dismissed": believe only the property.
+    still_locked(c, collection).await
+}
 
-    match outcome {
-        // The user did not answer in time: close the prompt, the collection stays locked.
-        Err(Elapsed) => {
-            dismiss(c, prompt).await;
-            Err(SsError::LOCKED)
+/// `Some(dismissed)` for a well-formed `Completed` body; a body of any other shape is ignored.
+fn completed_flag(msg: &Message) -> Option<bool> {
+    check_signature(msg, SIG_COMPLETED).ok()?;
+    let (dismissed, _result) = msg.body().deserialize::<(bool, OwnedVariant)>().ok()?;
+    Some(dismissed)
+}
+
+/// Take what is queued on the stream without waiting; the first well-formed `Completed` is kept,
+/// everything else is dropped. `false`: the stream has ended.
+fn drain(stream: &mut MessageStream, cx: &mut Context<'_>, first: &mut Option<bool>) -> bool {
+    loop {
+        match Pin::new(&mut *stream).poll_next(cx) {
+            Poll::Pending => return true,
+            Poll::Ready(Some(Ok(msg))) => {
+                if first.is_none() {
+                    *first = completed_flag(&msg);
+                }
+            }
+            Poll::Ready(None | Some(Err(_))) => return false,
         }
-        Ok(Err(e)) => Err(e),
-        Ok(Ok(true)) => Err(SsError::LOCKED),
-        // The signal says "not dismissed": believe only the property.
-        Ok(Ok(false)) => still_locked(c, collection).await,
     }
 }
 
-/// Marker of the prompt wait running out of time.
-struct Elapsed;
-
-/// Wait for the `Completed` signal of this prompt: `Ok(dismissed)`. A signal with a body of the
-/// wrong shape is ignored. The caller bounds the wait.
+/// Wait for the `Completed` signal of this prompt: `Ok(dismissed)`. The caller bounds the wait.
 async fn completed(stream: &mut MessageStream) -> OpResult<bool> {
     loop {
         let next = poll_fn(|cx| Pin::new(&mut *stream).poll_next(cx)).await;
@@ -130,10 +187,7 @@ async fn completed(stream: &mut MessageStream) -> OpResult<bool> {
             // The connection ended while we waited.
             None | Some(Err(_)) => return Err(SsError::UNAVAILABLE),
             Some(Ok(msg)) => {
-                if check_signature(&msg, SIG_COMPLETED).is_err() {
-                    continue;
-                }
-                if let Ok((dismissed, _result)) = msg.body().deserialize::<(bool, OwnedVariant)>() {
+                if let Some(dismissed) = completed_flag(&msg) {
                     return Ok(dismissed);
                 }
             }
