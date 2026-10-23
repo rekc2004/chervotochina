@@ -82,6 +82,34 @@ async fn wait_stalled(ev: &mut TransferEvents, seen: &mut Vec<TransferEvent>) ->
     false
 }
 
+/// Ждёт `Preparing` с `hashed >= at_least` по реальному времени (до 60 с); виртуальные часы
+/// при этом стоят. `false` и при паузе: роста после неё не будет.
+async fn until_preparing(
+    ev: &mut TransferEvents,
+    seen: &mut Vec<TransferEvent>,
+    at_least: u64,
+) -> bool {
+    let t0 = std::time::Instant::now();
+    while t0.elapsed() < Duration::from_secs(60) {
+        seen.extend(drain(ev).await);
+        if seen
+            .iter()
+            .any(|e| matches!(e, TransferEvent::Paused { .. }))
+        {
+            return false;
+        }
+        if seen
+            .iter()
+            .any(|e| matches!(e, TransferEvent::Preparing { hashed, .. } if *hashed >= at_least))
+        {
+            return true;
+        }
+        tokio::task::yield_now().await;
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    false
+}
+
 /// Ждёт паузу «обрыв связи» по реальному времени (до 30 с); виртуальные часы при этом стоят.
 /// Обрыв замечается задачами приёмника, и под нагрузкой это отстаёт от тиков.
 async fn wait_disconnected(ev: &mut TransferEvents, seen: &mut Vec<TransferEvent>) {
@@ -195,7 +223,7 @@ async fn raw(files: Vec<FakeFile>, tweak: impl FnOnce(&mut TransferConfig)) -> R
     let peer = conn.peer();
     let fake = Fake::new(pair, files);
     let (tx, rx) = fake.offer(&peer).await;
-    let key = key_of(&wait_ev(&mut p.ev, 10, is_offer()).await);
+    let key = key_of(&wait_ev(&mut p.ev, 60, is_offer()).await);
     Raw {
         p,
         fake,
@@ -210,8 +238,10 @@ impl Raw {
     /// Принять и запустить обслуживание потоков данных (поток управления ведёт тест).
     async fn accept(&mut self) {
         self.p.tr.respond(&self.key, true).unwrap();
+        // DECISION уходит после блокирующей записи каталога и состояния: под сильной нагрузкой
+        // это дольше 10 с реального времени. Срок только от зависания, на проверку не влияет.
         assert_eq!(
-            Fake::decision(&mut self.rx, 10).await,
+            Fake::decision(&mut self.rx, 60).await,
             Some(Verdict::Accept)
         );
         self.fake.run(self.peer.clone(), None);
@@ -331,10 +361,18 @@ async fn slow_hash_longer_than_stall_completes() {
     let kb = key_of(&wait_ev(&mut rig.b.ev, 10, is_offer()).await);
     rig.b.tr.respond(&kb, true).unwrap();
     let mut seen: Vec<TransferEvent> = Vec::new();
-    for _ in 0..20 {
+    for i in 0..20u64 {
         tick(stall / 2).await;
+        // часы двигаются дальше, только когда получатель увидел рост от прошлого шага: иначе
+        // под нагрузкой его отставание (блокирующая запись при принятии, задачи) складывалось
+        // бы с виртуальными секундами, и он видел бы молчание, которого у отправителя не было
+        if i > 0 {
+            assert!(
+                until_preparing(&mut rig.b.ev, &mut seen, i * MIB).await,
+                "receiver did not see {i} MiB hashed: {seen:?}"
+            );
+        }
         gate.release().await;
-        seen.extend(drain(&mut rig.b.ev).await);
     }
     // остальные блоки хэшируются без задержки, но в реальном времени, зависящем от нагрузки:
     // часы стоят, пока отправитель не сообщит, что захэшировал всё (иначе молчание считалось бы
@@ -555,11 +593,11 @@ async fn hash_progress_across_resume() {
     // хэширование держится на блоке 5 (блоки 0..4 готовы)
     let gate = HashGate::install(&rig.a.hook, 5, 6, 20);
     let key = rig.a.tr.send(&rig.pa, files).unwrap();
-    let kb = key_of(&wait_ev(&mut rig.b.ev, 10, is_offer()).await);
+    let kb = key_of(&wait_ev(&mut rig.b.ev, 60, is_offer()).await);
     rig.b.tr.respond(&kb, true).unwrap();
     let before = wait_ev(
         &mut rig.b.ev,
-        20,
+        60,
         |e| matches!(e, TransferEvent::Preparing { hashed, .. } if *hashed >= 5 * MIB),
     )
     .await;
@@ -568,21 +606,21 @@ async fn hash_progress_across_resume() {
     };
     // обрыв, пока хэширование стоит
     rig.cur.0.close();
-    wait_ev(&mut rig.b.ev, 30, |e| {
+    wait_ev(&mut rig.b.ev, 60, |e| {
         matches!(e, TransferEvent::Paused { .. })
     })
     .await;
-    wait_ev(&mut rig.a.ev, 30, |e| {
+    wait_ev(&mut rig.a.ev, 60, |e| {
         matches!(e, TransferEvent::Paused { .. })
     })
     .await;
     rig.cur = rig.link().await;
-    wait_ev(&mut rig.b.ev, 30, |e| {
+    wait_ev(&mut rig.b.ev, 60, |e| {
         matches!(e, TransferEvent::Resumed { .. })
     })
     .await;
     // первый кадр новой попытки не меньше прежнего значения (иначе получатель отменил бы)
-    let after = wait_ev(&mut rig.b.ev, 30, |e| {
+    let after = wait_ev(&mut rig.b.ev, 60, |e| {
         matches!(e, TransferEvent::Preparing { .. })
     })
     .await;
@@ -776,8 +814,9 @@ impl Raw {
     /// Принять предложение, но потоки данных и поток управления ведёт тест.
     async fn respond_only(&mut self) {
         self.p.tr.respond(&self.key, true).unwrap();
+        // срок как в `accept`
         assert_eq!(
-            Fake::decision(&mut self.rx, 10).await,
+            Fake::decision(&mut self.rx, 60).await,
             Some(Verdict::Accept)
         );
     }
@@ -793,18 +832,35 @@ impl Raw {
 /// Двигает часы шагами, пока не появится `Paused{Stalled}` или не пройдёт `limit`. Возвращает
 /// виртуальное время, прошедшее с `t0`.
 async fn until_stalled_within(
-    ev: &mut TransferEvents,
+    r: &mut Raw,
     t0: tokio::time::Instant,
     limit: Duration,
     seen: &mut Vec<TransferEvent>,
 ) -> Option<Duration> {
     while t0.elapsed() < limit {
         tick(Duration::from_millis(100)).await;
-        if stalled_seen(ev, seen).await {
+        // конец попытки уже назван, а уборка за ней (ожидание её задач и записи состояния) идёт
+        // в реальном времени; решение о паузе принимается после уборки. Пока она идёт, часы
+        // стоят: иначе под нагрузкой пауза приходила бы на тики позже своего срока
+        assert!(
+            until(|| !attempt_tearing_down(r)).await,
+            "attempt teardown stuck"
+        );
+        if stalled_seen(&mut r.p.ev, seen).await {
             return Some(t0.elapsed());
         }
     }
     None
+}
+
+/// Попытка получателя закончена (`finish`), но ещё не убрана из сессии.
+fn attempt_tearing_down(r: &Raw) -> bool {
+    r.p.tr.inner().find_inb(&r.key).is_some_and(|s| {
+        crate::shared::lock(&s.core)
+            .att
+            .as_ref()
+            .is_some_and(|a| a.is_over())
+    })
 }
 
 #[tokio::test(start_paused = true)]
@@ -825,7 +881,7 @@ async fn restarting_attempts_with_repeated_progress_end_stalled() {
     let attempts = restarting_sender(r.peer.clone(), r.key, 1, total, hold, |_| 1000);
     r.first_attempt(1000, hold).await;
     let mut seen = Vec::new();
-    let at = until_stalled_within(&mut r.p.ev, t0, Duration::from_secs(60), &mut seen).await;
+    let at = until_stalled_within(&mut r, t0, Duration::from_secs(60), &mut seen).await;
     let at = at.expect("restarting the control stream must not reset the timers");
     // молчание считается от первого роста (сессия), а не от начала каждой попытки
     assert!(
@@ -858,7 +914,7 @@ async fn restarting_attempts_with_tiny_growth_end_stalled_by_rate() {
     let attempts = restarting_sender(r.peer.clone(), r.key, 1, total, hold, |k| u64::from(k) + 1);
     r.first_attempt(1, hold).await;
     let mut seen = Vec::new();
-    let at = until_stalled_within(&mut r.p.ev, t0, Duration::from_secs(90), &mut seen).await;
+    let at = until_stalled_within(&mut r, t0, Duration::from_secs(90), &mut seen).await;
     let at = at.expect("tiny growth with restarts must end Stalled");
     let bound = stall + Duration::from_secs(8);
     assert!(
@@ -883,7 +939,7 @@ async fn restarting_attempts_without_blocks_end_stalled() {
     let attempts = restarting_sender(r.peer.clone(), r.key, 1, total, hold, move |_| total);
     r.first_attempt(total, hold).await;
     let mut seen = Vec::new();
-    let at = until_stalled_within(&mut r.p.ev, t0, Duration::from_secs(120), &mut seen).await;
+    let at = until_stalled_within(&mut r, t0, Duration::from_secs(120), &mut seen).await;
     assert!(at.is_some(), "attempts without progress must end Stalled");
     let n = attempts.load(Ordering::SeqCst);
     assert!((8..=16).contains(&n), "{n} attempts before the pause");
