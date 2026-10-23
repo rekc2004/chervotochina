@@ -1063,3 +1063,30 @@ fn ss_migration_write_old() {
     store.write_list_key(&[0x5A; LIST_KEY_LEN]).unwrap();
     store.write_epoch(0x1717).unwrap();
 }
+
+/// M1, этап 17a: чтение новым клиентом записей, созданных `ss_migration_write_old` старым
+/// клиентом (запущенным на коммите B0). Побайтное совпадение, затем удаление и повторное чтение.
+/// Запись эпохи удалить нельзя (в `EpochStore` нет удаления): она остаётся, это 8 байт без секрета.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "трогает реальное хранилище ОС; запускает владелец вручную"]
+fn ss_migration_read_new() {
+    use chervo_identity::{EpochStore, OsKeyStore};
+
+    let store = OsKeyStore::open_with_service("chervotochina-migration-17a").unwrap();
+    let pair = PairId::from_bytes([0x17; 16]);
+    let mut blob = vec![2u8];
+    blob.extend_from_slice(&[0x11; 128]);
+
+    assert_eq!(store.read(&pair).unwrap().unwrap().as_slice(), &blob[..]);
+    assert_eq!(
+        store.read_list_key().unwrap().unwrap().as_slice(),
+        &[0x5A; LIST_KEY_LEN]
+    );
+    assert_eq!(store.read_epoch().unwrap(), Some(0x1717));
+
+    store.delete(&pair).unwrap();
+    store.delete_list_key().unwrap();
+    assert!(store.read(&pair).unwrap().is_none());
+    assert!(store.read_list_key().unwrap().is_none());
+}

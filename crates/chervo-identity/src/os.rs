@@ -9,7 +9,8 @@ use crate::{
     PairId, SecretStore,
 };
 
-/// Хранилище ОС: Credential Manager, login keychain, Secret Service.
+/// Хранилище ОС: Credential Manager, login keychain. Linux: свой клиент Secret Service
+/// (`os_linux.rs`).
 /// Создаётся явным конструктором платформенного крейта, глобальное хранилище не используется.
 pub struct OsKeyStore {
     store: Arc<CredentialStore>,
@@ -32,13 +33,6 @@ fn platform_store() -> keyring_core::Result<Arc<CredentialStore>> {
 #[cfg(target_os = "windows")]
 fn platform_store() -> keyring_core::Result<Arc<CredentialStore>> {
     let s = windows_native_keyring_store::Store::new()?;
-    let s: Arc<CredentialStore> = s;
-    Ok(s)
-}
-
-#[cfg(target_os = "linux")]
-fn platform_store() -> keyring_core::Result<Arc<CredentialStore>> {
-    let s = zbus_secret_service_keyring_store::Store::new()?;
     let s: Arc<CredentialStore> = s;
     Ok(s)
 }

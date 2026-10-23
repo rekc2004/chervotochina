@@ -19,8 +19,12 @@ mod keys;
 mod kk;
 mod knock;
 mod kx;
-#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 mod os;
+#[cfg(target_os = "linux")]
+mod os_linux;
+#[cfg(target_os = "linux")]
+mod secret_service;
 mod store;
 
 pub use error::IdentityError;
@@ -33,8 +37,10 @@ pub use kk::{
 };
 pub use knock::{KNOCK_ID_LABEL, KNOCK_KDF_LABEL, KNOCK_LEN, KNOCK_TAG_LABEL, KnockKeys};
 pub use kx::{KxPublicKey, PairKx};
-#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub use os::OsKeyStore;
+#[cfg(target_os = "linux")]
+pub use os_linux::OsKeyStore;
 pub use store::{EpochStore, ListKeyStore, SecretStore, UnavailableKeyStore, create, load, rekey};
 
 /// Версия формата записи ключа.
