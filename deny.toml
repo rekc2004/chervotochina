@@ -1,11 +1,6 @@
 [advisories]
-# Mirror of .cargo/audit.toml; keep the two lists identical.
-# Temporary exceptions, owner decision 2026-10-17 (docs/OWNER_DECISIONS.md, "Зависимости: zvariant").
-# RUSTSEC-2026-0370/0371/0372: zvariant, zbus_names, zvariant_derive 5.x are "unmaintained" (merged into
-# zbus 6.0.0 as the `wire` module), not a vulnerability. Pulled only by the Linux Secret Service store:
-# chervo-identity -> zbus-secret-service-keyring-store 1.0.1 -> secret-service 5.2.0 -> zbus 5.19.0.
-# Owner: own Secret Service client in stage 17a; exception stays until then.
-ignore = ["RUSTSEC-2026-0370", "RUSTSEC-2026-0371", "RUSTSEC-2026-0372"]
+# No exceptions. The RUSTSEC-2026-0370/0371/0372 ignores (zvariant 5.x via the old Secret Service
+# client) were removed in stage 17a together with the crates.
 
 [bans]
 multiple-versions = "warn"
@@ -14,6 +9,14 @@ deny = [
   { name = "igd-next" },
   { name = "keyring" },
   { name = "keyutils" },
+  # Stage 17a: the old Secret Service client and its zbus 5 / zvariant 5 tree must not come back.
+  # zbus 5 requires zvariant, so banning zvariant keeps zbus 5 out as well.
+  { name = "secret-service" },
+  { name = "zbus-secret-service-keyring-store" },
+  { name = "zvariant" },
+  { name = "zvariant_derive" },
+  { name = "zvariant_utils" },
+  { name = "zbus_names" },
 ]
 
 [licenses]

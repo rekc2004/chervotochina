@@ -62,10 +62,22 @@ pub(super) const SIG_VARIANT: &str = "v";
 #[cfg(test)]
 pub(super) const SIG_CREATE_ITEM_IN: &str = "a{sv}(oayays)b";
 pub(super) const SIG_CREATE_ITEM_OUT: &str = "oo";
+pub(super) const SIG_UNLOCK_OUT: &str = "aoo";
+/// Body of the prompt signal `Completed`: dismissed flag and a result variant.
+pub(super) const SIG_COMPLETED: &str = "bv";
+#[cfg(test)]
+pub(super) const SIG_UNLOCK_IN: &str = "ao";
+#[cfg(test)]
+pub(super) const SIG_PROMPT_IN: &str = "s";
 pub(super) const SIG_SECRET: &str = "(oayays)";
 pub(super) const SIG_EMPTY: &str = "";
 
 /// Largest accepted secret, bytes (our records are at most 129 bytes).
 pub(crate) const MAX_SECRET_LEN: usize = 4096;
+/// Bounds of the wait for an unlock prompt, seconds (spec D8).
+pub(crate) const UNLOCK_WAIT_MIN_SECS: u64 = 1;
+pub(crate) const UNLOCK_WAIT_MAX_SECS: u64 = 300;
+/// Extra time a caller of `request_unlock` waits beyond the prompt wait, seconds.
+pub(super) const UNLOCK_CALLER_SLACK_SECS: u64 = 2;
 /// Capacity of the job queue.
 pub(super) const QUEUE: usize = 8;

@@ -25,7 +25,7 @@ pub(super) struct Conn {
     pub(super) session: OwnedObjectPath,
 }
 
-type OpResult<T> = Result<T, SsError>;
+pub(super) type OpResult<T> = Result<T, SsError>;
 
 /// Map the result of a call: errors are mapped, zbus error text is dropped here.
 pub(super) fn mapped(r: zbus::Result<Message>) -> OpResult<Message> {
@@ -71,7 +71,7 @@ where
         .map_err(|_| SsError::UNAVAILABLE)
 }
 
-fn is_none_path(p: &OwnedObjectPath) -> bool {
+pub(super) fn is_none_path(p: &OwnedObjectPath) -> bool {
     p.as_str() == NO_OBJECT
 }
 
@@ -95,7 +95,7 @@ async fn search(
 }
 
 /// `Service.ReadAlias("default")`: path of the default collection, `/` if there is none.
-async fn read_alias(c: &Conn) -> OpResult<OwnedObjectPath> {
+pub(super) async fn read_alias(c: &Conn) -> OpResult<OwnedObjectPath> {
     let msg = rpc!(
         c.connection,
         SERVICE_PATH,
@@ -107,7 +107,7 @@ async fn read_alias(c: &Conn) -> OpResult<OwnedObjectPath> {
 }
 
 /// `Locked` property of a collection.
-async fn collection_locked(c: &Conn, collection: &OwnedObjectPath) -> OpResult<bool> {
+pub(super) async fn collection_locked(c: &Conn, collection: &OwnedObjectPath) -> OpResult<bool> {
     let msg = rpc!(
         c.connection,
         collection.as_str(),
@@ -123,7 +123,7 @@ async fn collection_locked(c: &Conn, collection: &OwnedObjectPath) -> OpResult<b
 }
 
 /// `Prompt.Dismiss`, best effort: the result is ignored.
-async fn dismiss(c: &Conn, prompt: &OwnedObjectPath) {
+pub(super) async fn dismiss(c: &Conn, prompt: &OwnedObjectPath) {
     let _ = rpc!(c.connection, prompt.as_str(), IFACE_PROMPT, M_DISMISS, &());
 }
 

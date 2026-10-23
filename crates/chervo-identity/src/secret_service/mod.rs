@@ -7,6 +7,7 @@
 mod errors;
 mod ops;
 mod proto;
+mod unlock;
 mod worker;
 
 #[cfg(test)]
@@ -18,6 +19,8 @@ use std::time::Duration;
 use tokio::sync::mpsc::Sender;
 use zeroize::Zeroizing;
 
+use self::proto::UNLOCK_CALLER_SLACK_SECS;
+pub(crate) use self::proto::{UNLOCK_WAIT_MAX_SECS, UNLOCK_WAIT_MIN_SECS};
 use self::worker::{Connector, Job, JobKind, Reply};
 use crate::IdentityError;
 
@@ -114,6 +117,15 @@ impl SsClient {
             self.timeouts.caller,
         )
         .map(|_| ())
+    }
+
+    /// Explicit unlock of the default collection (the only call that may show a prompt).
+    /// `wait` is the time the user gets at the prompt; it is capped at 300 s here (callers apply
+    /// the lower bound). Blocks up to `wait + 2 s`.
+    pub(crate) fn request_unlock(&self, wait: Duration) -> Result<(), IdentityError> {
+        let wait = wait.min(Duration::from_secs(UNLOCK_WAIT_MAX_SECS));
+        let caller = wait.saturating_add(Duration::from_secs(UNLOCK_CALLER_SLACK_SECS));
+        self.submit(JobKind::Unlock { wait }, caller).map(|_| ())
     }
 
     /// Missing entry: `Ok(())`.

@@ -29,6 +29,17 @@ jobs:
       - run: rustup toolchain install 1.99.1 --profile minimal
       - run: cargo build --workspace --locked
       - run: cargo test --workspace --locked
+  # Stage 17a: our Secret Service client against a real gnome-keyring in a private session bus.
+  secret-service-live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.99.1 --profile minimal
+      - run: sudo apt-get update
+      - run: sudo apt-get install -y --no-install-recommends gnome-keyring dbus-daemon
+      - run: dbus-run-session -- bash scripts/ci-secret-service.sh
   supply-chain:
     runs-on: ubuntu-latest
     steps:

@@ -29,7 +29,7 @@ use zeroize::Zeroizing;
 
 use super::proto::{
     CONTENT_TYPE, MAX_SECRET_LEN, SIG_CREATE_ITEM_IN, SIG_EMPTY, SIG_OBJECT, SIG_OPEN_SESSION_IN,
-    SIG_PROP_GET_IN, SIG_READ_ALIAS_IN, SIG_SEARCH_IN, SIG_SECRET,
+    SIG_PROMPT_IN, SIG_PROP_GET_IN, SIG_READ_ALIAS_IN, SIG_SEARCH_IN, SIG_SECRET, SIG_UNLOCK_IN,
 };
 use super::{SsClient, Timeouts};
 use crate::{
@@ -79,6 +79,28 @@ enum GetMode {
     NonEmptyParameters,
 }
 
+/// What `Service.Unlock` does.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UnlockMode {
+    /// Unlocks at once: the collection is in `unlocked`, prompt `/`.
+    Direct,
+    /// Returns a prompt object; the collection stays locked until the prompt completes.
+    Prompt,
+}
+
+/// What `Prompt.Prompt` does after it was called.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PromptMode {
+    /// The user enters the password: unlocks and signals `Completed(false, ..)`.
+    Complete,
+    /// The user cancels: `Completed(true, ..)`, still locked.
+    Dismissed,
+    /// A forged `Completed(false, ..)` while the collection stays locked.
+    Forged,
+    /// No signal at all (the user does not answer).
+    Silent,
+}
+
 #[derive(Clone)]
 struct Item {
     path: String,
@@ -113,6 +135,10 @@ struct State {
     get_mode: GetMode,
     create_prompt: bool,
     delete_prompt: bool,
+    unlock_mode: UnlockMode,
+    prompt_mode: PromptMode,
+    /// Object paths received by `Unlock`, one list per call.
+    unlock_args: Vec<Vec<String>>,
     calls: Vec<Call>,
     mismatches: Vec<String>,
     creates: Vec<CreateRecord>,
@@ -131,6 +157,9 @@ impl State {
             get_mode: GetMode::Normal,
             create_prompt: false,
             delete_prompt: false,
+            unlock_mode: UnlockMode::Direct,
+            prompt_mode: PromptMode::Complete,
+            unlock_args: Vec::new(),
             calls: Vec::new(),
             mismatches: Vec::new(),
             creates: Vec::new(),
@@ -348,12 +377,16 @@ fn expected_in(member: &str) -> Option<&'static str> {
         "GetSecret" => Some(SIG_OBJECT),
         "SetSecret" => Some(SIG_SECRET),
         "Delete" | "Dismiss" => Some(SIG_EMPTY),
+        "Unlock" => Some(SIG_UNLOCK_IN),
+        "Prompt" => Some(SIG_PROMPT_IN),
         _ => None,
     }
 }
 
 enum Disp {
     Send(Message),
+    /// A reply and then signals.
+    SendAll(Vec<Message>),
     Silent,
 }
 
@@ -542,6 +575,44 @@ fn handle(shared: &Shared, msg: &Message) -> Disp {
             ok!(hdr, &obj("/"))
         }
         "Dismiss" => ok!(hdr, &()),
+        "Unlock" => {
+            let Ok(paths) = msg.body().deserialize::<Vec<OwnedObjectPath>>() else {
+                st.mismatches.push("Unlock undecodable".to_owned());
+                return fail!(hdr, "org.freedesktop.DBus.Error.InvalidArgs");
+            };
+            st.unlock_args
+                .push(paths.iter().map(|p| p.as_str().to_owned()).collect());
+            match st.unlock_mode {
+                UnlockMode::Direct => {
+                    st.collection_locked = false;
+                    ok!(hdr, &(vec![obj(COLLECTION)], obj("/")))
+                }
+                UnlockMode::Prompt => ok!(hdr, &(Vec::<ObjectPath<'_>>::new(), obj(PROMPT))),
+            }
+        }
+        "Prompt" => {
+            let dismissed = match st.prompt_mode {
+                PromptMode::Complete => {
+                    st.collection_locked = false;
+                    Some(false)
+                }
+                PromptMode::Dismissed => Some(true),
+                PromptMode::Forged => Some(false),
+                PromptMode::Silent => None,
+            };
+            let reply = Message::method_return(&hdr)
+                .build(&())
+                .expect("build reply");
+            let mut out = vec![reply];
+            if let Some(d) = dismissed {
+                out.push(
+                    Message::signal(path.as_str(), "org.freedesktop.Secret.Prompt", "Completed")
+                        .build(&(d, Variant::from("")))
+                        .expect("build signal"),
+                );
+            }
+            Disp::SendAll(out)
+        }
         _ => fail!(hdr, "org.freedesktop.DBus.Error.UnknownMethod"),
     }
 }
@@ -572,6 +643,13 @@ async fn serve(shared: Arc<Shared>, stream: UnixStream, mut kill: watch::Receive
             Disp::Send(reply) => {
                 if conn.send(&reply).await.is_err() {
                     break;
+                }
+            }
+            Disp::SendAll(all) => {
+                for m in &all {
+                    if conn.send(m).await.is_err() {
+                        return;
+                    }
                 }
             }
             Disp::Silent => {}
@@ -1011,6 +1089,366 @@ fn ss_fake_osstore_list_key_and_epoch() {
         assert_eq!(
             OsKeyStore::from_client(fake.client(), bad).err(),
             Some(UNAVAILABLE)
+        );
+    }
+}
+
+// ---------- T24-T28: explicit unlock ----------
+
+const WAIT: Duration = Duration::from_millis(300);
+/// What the old default alias path would look like: must never be sent to `Unlock`.
+const ALIAS_PATH: &str = "/org/freedesktop/secrets/aliases/default";
+
+#[test]
+fn ss_fake_unlock_ok() {
+    assert_ne!(COLLECTION, ALIAS_PATH);
+    // Already unlocked: no Unlock, no Prompt.
+    let fake = Fake::start();
+    let c = fake.client();
+    assert_eq!(c.request_unlock(WAIT), Ok(()));
+    assert_eq!(fake.count("Unlock") + fake.count("Prompt"), 0);
+
+    // Locked, the service unlocks at once (no prompt).
+    fake.with(|s| s.collection_locked = true);
+    let start = Instant::now();
+    assert_eq!(c.request_unlock(WAIT), Ok(()));
+    assert_fast(start);
+    assert_eq!(fake.count("Unlock"), 1);
+    assert_eq!(fake.count("Prompt"), 0);
+    // `ao` with exactly the path that ReadAlias returned; never "default", never "/".
+    let args = fake.with(|s| s.unlock_args.clone());
+    assert_eq!(args, vec![vec![COLLECTION.to_owned()]]);
+    assert_eq!(fake.wire_of("Unlock"), vec![Some("ao".to_owned())]);
+    assert!(!fake.with(|s| s.collection_locked));
+
+    // Locked, the service asks for a prompt and the user enters the password.
+    fake.with(|s| {
+        s.collection_locked = true;
+        s.unlock_mode = UnlockMode::Prompt;
+        s.prompt_mode = PromptMode::Complete;
+    });
+    assert_eq!(c.request_unlock(WAIT), Ok(()));
+    assert_eq!(fake.count("Unlock"), 2);
+    assert_eq!(fake.count("Prompt"), 1);
+    assert_eq!(fake.count("Dismiss"), 0);
+    assert_eq!(fake.wire_of("Prompt")[0].as_deref(), Some("s"));
+    assert!(fake.with(|s| s.unlock_args.iter().all(|a| a == &[COLLECTION.to_owned()])));
+    // The store works after the unlock.
+    assert_eq!(value(c.get(SVC, ACC)), Ok(None));
+    fake.assert_signatures();
+}
+
+#[test]
+fn ss_fake_unlock_dismissed_locked() {
+    let fake = Fake::start();
+    let c = fake.client();
+    fake.with(|s| {
+        s.collection_locked = true;
+        s.unlock_mode = UnlockMode::Prompt;
+        s.prompt_mode = PromptMode::Dismissed;
+    });
+    let start = Instant::now();
+    assert_eq!(c.request_unlock(WAIT), Err(LOCKED));
+    assert_fast(start);
+    assert_eq!(fake.count("Prompt"), 1);
+    assert!(fake.with(|s| s.collection_locked));
+    // The store still reports "locked", no prompt on its own.
+    assert_eq!(value(c.get(SVC, ACC)), Err(LOCKED));
+    assert_eq!(fake.count("Unlock"), 1);
+    assert_eq!(fake.count("Prompt"), 1);
+    fake.assert_signatures();
+}
+
+#[test]
+fn ss_fake_unlock_timeout_dismisses_bounded() {
+    let fake = Fake::start();
+    let c = fake.client();
+    fake.with(|s| {
+        s.collection_locked = true;
+        s.unlock_mode = UnlockMode::Prompt;
+        s.prompt_mode = PromptMode::Silent;
+    });
+    let start = Instant::now();
+    assert_eq!(c.request_unlock(WAIT), Err(LOCKED));
+    let took = start.elapsed();
+    assert!(took >= WAIT, "returned before the wait: {took:?}");
+    assert_fast(start);
+    assert_eq!(fake.count("Prompt"), 1);
+    assert_eq!(fake.count("Dismiss"), 1);
+    // The worker is free again afterwards.
+    fake.with(|s| s.collection_locked = false);
+    assert_eq!(value(c.get(SVC, ACC)), Ok(None));
+    fake.assert_signatures();
+}
+
+#[test]
+fn ss_fake_unlock_forged_completed_rechecks() {
+    let fake = Fake::start();
+    let c = fake.client();
+    // The signal says "not dismissed", the collection is still locked.
+    fake.with(|s| {
+        s.collection_locked = true;
+        s.unlock_mode = UnlockMode::Prompt;
+        s.prompt_mode = PromptMode::Forged;
+    });
+    let start = Instant::now();
+    assert_eq!(c.request_unlock(WAIT), Err(LOCKED));
+    assert_fast(start);
+    assert_eq!(fake.count("Prompt"), 1);
+    assert!(fake.with(|s| s.collection_locked));
+    fake.assert_signatures();
+}
+
+#[test]
+fn ss_fake_unlock_no_default_alias() {
+    let fake = Fake::start();
+    fake.with(|s| s.has_default = false);
+    let c = fake.client();
+    let start = Instant::now();
+    assert_eq!(c.request_unlock(WAIT), Err(UNAVAILABLE));
+    assert_fast(start);
+    assert_eq!(fake.count("Unlock"), 0);
+    assert_eq!(fake.count("Prompt"), 0);
+    fake.assert_signatures();
+}
+
+#[test]
+fn ss_fake_unlock_hostile_replies_bounded() {
+    let fake = Fake::start();
+    let c = fake.client();
+    fake.with(|s| s.collection_locked = true);
+    // A reply of the wrong type.
+    fake.always("Unlock", Action::BadReply);
+    assert_eq!(c.request_unlock(WAIT), Err(UNAVAILABLE));
+    // The service never answers `Unlock`.
+    fake.always("Unlock", Action::Silent);
+    let start = Instant::now();
+    assert_eq!(c.request_unlock(WAIT), Err(UNAVAILABLE));
+    assert_fast(start);
+    // The prompt call fails.
+    fake.with(|s| {
+        s.always.clear();
+        s.unlock_mode = UnlockMode::Prompt;
+    });
+    fake.always("Prompt", Action::Error(SERVICE_UNKNOWN));
+    assert_eq!(c.request_unlock(WAIT), Err(UNAVAILABLE));
+    assert_eq!(fake.count("Prompt"), 1);
+    // An access-denied answer to `Unlock` is "locked".
+    fake.with(|s| s.always.clear());
+    fake.always("Unlock", Action::Error(ACCESS_DENIED));
+    assert_eq!(c.request_unlock(WAIT), Err(LOCKED));
+    fake.assert_signatures();
+}
+
+#[test]
+fn ss_unlock_wait_is_clamped() {
+    use crate::os_linux::clamp_unlock_wait;
+    assert_eq!(clamp_unlock_wait(Duration::ZERO), Duration::from_secs(1));
+    assert_eq!(
+        clamp_unlock_wait(Duration::from_millis(1500)),
+        Duration::from_millis(1500)
+    );
+    assert_eq!(
+        clamp_unlock_wait(Duration::from_secs(86_400)),
+        Duration::from_secs(300)
+    );
+}
+
+// ---------- L1-L3: live tests against a real Secret Service (CI job `secret-service-live`) ----------
+
+/// Run only by `scripts/ci-secret-service.sh` (`-- --ignored ss_live_`), inside a private session
+/// bus with an unlocked gnome-keyring. L3 locks the default collection and so runs in its own
+/// invocation, after L1 and L2.
+mod live {
+    use super::*;
+
+    const LIVE_SERVICE: &str = "chervotochina-live-17a";
+    const SERVICE_PATH: &str = "/org/freedesktop/secrets";
+    const SERVICE_IFACE: &str = "org.freedesktop.Secret.Service";
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .unwrap()
+    }
+
+    async fn raw() -> zbus::Connection {
+        Builder::session()
+            .method_timeout(Duration::from_secs(5))
+            .build()
+            .await
+            .unwrap()
+    }
+
+    /// Item path found by the same search as the client (unlocked or locked).
+    async fn find_item(c: &zbus::Connection, account: &str) -> OwnedObjectPath {
+        let mut attrs: BTreeMap<&str, &str> = BTreeMap::new();
+        attrs.insert("service", LIVE_SERVICE);
+        attrs.insert("username", account);
+        let msg = c
+            .call_method(
+                Some("org.freedesktop.secrets"),
+                SERVICE_PATH,
+                Some(SERVICE_IFACE),
+                "SearchItems",
+                &attrs,
+            )
+            .await
+            .unwrap();
+        let (unlocked, locked): (Vec<OwnedObjectPath>, Vec<OwnedObjectPath>) =
+            msg.body().deserialize().unwrap();
+        assert_eq!(
+            unlocked.len() + locked.len(),
+            1,
+            "exactly one entry per pair"
+        );
+        unlocked.into_iter().chain(locked).next().unwrap()
+    }
+
+    async fn item_property(
+        c: &zbus::Connection,
+        item: &OwnedObjectPath,
+        name: &str,
+    ) -> OwnedVariant {
+        let msg = c
+            .call_method(
+                Some("org.freedesktop.secrets"),
+                item.as_str(),
+                Some("org.freedesktop.DBus.Properties"),
+                "Get",
+                &("org.freedesktop.Secret.Item", name),
+            )
+            .await
+            .unwrap();
+        msg.body().deserialize().unwrap()
+    }
+
+    fn open() -> OsKeyStore {
+        OsKeyStore::open_with_service(LIVE_SERVICE).expect("Secret Service on the session bus")
+    }
+
+    #[test]
+    #[ignore = "needs a session bus with an unlocked Secret Service (CI job secret-service-live)"]
+    fn ss_live_roundtrip() {
+        let store = open();
+        let pair = PairId::from_bytes([0x17; 16]);
+        let blob = [0x44u8; 129];
+        assert!(store.read(&pair).unwrap().is_none());
+        store.write(&pair, &blob).unwrap();
+        assert_eq!(store.read(&pair).unwrap().unwrap().as_slice(), &blob);
+        store.write(&pair, &[0x55u8; 129]).unwrap();
+        assert_eq!(
+            store.read(&pair).unwrap().unwrap().as_slice(),
+            &[0x55u8; 129]
+        );
+
+        assert!(store.read_list_key().unwrap().is_none());
+        store.write_list_key(&[0x5A; 32]).unwrap();
+        assert_eq!(
+            store.read_list_key().unwrap().unwrap().as_slice(),
+            &[0x5A; 32]
+        );
+
+        store.write_epoch(0x1717).unwrap();
+        assert_eq!(store.read_epoch().unwrap(), Some(0x1717));
+        store.write_epoch(0x1718).unwrap();
+        assert_eq!(store.read_epoch().unwrap(), Some(0x1718));
+
+        store.delete(&pair).unwrap();
+        store.delete_list_key().unwrap();
+        assert!(store.read(&pair).unwrap().is_none());
+        assert!(store.read_list_key().unwrap().is_none());
+        store.delete(&pair).unwrap();
+    }
+
+    #[test]
+    #[ignore = "needs a session bus with an unlocked Secret Service (CI job secret-service-live)"]
+    fn ss_live_attributes_exact() {
+        let store = open();
+        let pair = PairId::from_bytes([0x18; 16]);
+        store.write(&pair, &[0x66u8; 129]).unwrap();
+        let account = pair.account_name();
+        let (attrs, label) = runtime().block_on(async {
+            let c = raw().await;
+            let item = find_item(&c, &account).await;
+            let attrs = item_property(&c, &item, "Attributes").await;
+            let label = item_property(&c, &item, "Label").await;
+            let attrs = attrs
+                .try_clone()
+                .ok()
+                .and_then(|v| BTreeMap::<String, String>::try_from(v).ok())
+                .expect("Attributes is a{ss}");
+            let label = match &*label {
+                Variant::Str(s) => s.as_str().to_owned(),
+                _ => panic!("Label is not a string"),
+            };
+            (attrs, label)
+        });
+        let mut want = BTreeMap::new();
+        want.insert("service".to_owned(), LIVE_SERVICE.to_owned());
+        want.insert("username".to_owned(), account.clone());
+        // The daemon may add `xdg:schema` itself [not verified]; nothing else is allowed.
+        let mut got = attrs;
+        got.remove("xdg:schema");
+        assert_eq!(got, want);
+        assert_eq!(label, format!("keyring:{account}@{LIVE_SERVICE}"));
+        store.delete(&pair).unwrap();
+    }
+
+    /// Locks the default collection: nothing may run after it in the same invocation.
+    #[test]
+    #[ignore = "locks the default collection; CI job secret-service-live runs it last"]
+    fn ss_live_locked_bounded() {
+        let store = open();
+        let pair = PairId::from_bytes([0x19; 16]);
+        store.write(&pair, &[0x77u8; 129]).unwrap();
+        runtime().block_on(async {
+            let c = raw().await;
+            let msg = c
+                .call_method(
+                    Some("org.freedesktop.secrets"),
+                    SERVICE_PATH,
+                    Some(SERVICE_IFACE),
+                    "ReadAlias",
+                    &"default",
+                )
+                .await
+                .unwrap();
+            let default: OwnedObjectPath = msg.body().deserialize().unwrap();
+            assert_ne!(
+                default.as_str(),
+                "/",
+                "no default collection in this daemon"
+            );
+            let targets: Vec<&OwnedObjectPath> = vec![&default];
+            c.call_method(
+                Some("org.freedesktop.secrets"),
+                SERVICE_PATH,
+                Some(SERVICE_IFACE),
+                "Lock",
+                &targets,
+            )
+            .await
+            .unwrap();
+        });
+        // First runtime observation of the locked behaviour (F8b).
+        let start = Instant::now();
+        assert_eq!(value(store.read(&pair)), Err(LOCKED));
+        assert_fast(start);
+        let start = Instant::now();
+        assert_eq!(store.write(&pair, &[0x78u8; 129]), Err(LOCKED));
+        assert_fast(start);
+        let start = Instant::now();
+        assert_eq!(store.delete(&pair), Err(LOCKED));
+        assert_fast(start);
+        let start = Instant::now();
+        assert_eq!(store.request_unlock(Duration::from_secs(2)), Err(LOCKED));
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "took {:?}",
+            start.elapsed()
         );
     }
 }

@@ -1,8 +1,9 @@
 use std::fmt;
+use std::time::Duration;
 
 use zeroize::Zeroizing;
 
-use crate::secret_service::{SsClient, Timeouts};
+use crate::secret_service::{SsClient, Timeouts, UNLOCK_WAIT_MAX_SECS, UNLOCK_WAIT_MIN_SECS};
 use crate::{
     DEFAULT_SERVICE, EPOCH_ACCOUNT, EpochStore, IdentityError, LIST_KEY_ACCOUNT, ListKeyStore,
     PairId, SecretStore,
@@ -45,6 +46,16 @@ impl OsKeyStore {
         })
     }
 
+    /// Ask the Secret Service to unlock the default collection (may show the password dialog of
+    /// the desktop). Explicit user action only (GUI): read, write and delete never call it and
+    /// never unlock by themselves. `wait` is the time the user gets at the dialog, clamped to
+    /// 1..=300 s. Blocks up to `wait + 2 s`. Success only if the collection is unlocked after
+    /// the call; dismissed, timed out or still locked: `StorageLocked`; no Secret Service or no
+    /// default collection: `StorageUnavailable`.
+    pub fn request_unlock(&self, wait: Duration) -> Result<(), IdentityError> {
+        self.client.request_unlock(clamp_unlock_wait(wait))
+    }
+
     /// Store over a ready client (tests only).
     #[cfg(test)]
     pub(crate) fn from_client(client: SsClient, service: &str) -> Result<Self, IdentityError> {
@@ -66,6 +77,14 @@ impl OsKeyStore {
     fn delete_account(&self, account: &str) -> Result<(), IdentityError> {
         self.client.delete(&self.service, account)
     }
+}
+
+/// The wait at the unlock dialog is limited to 1..=300 s (spec D8).
+pub(crate) fn clamp_unlock_wait(wait: Duration) -> Duration {
+    wait.clamp(
+        Duration::from_secs(UNLOCK_WAIT_MIN_SECS),
+        Duration::from_secs(UNLOCK_WAIT_MAX_SECS),
+    )
 }
 
 fn check_service(service: &str) -> Result<(), IdentityError> {

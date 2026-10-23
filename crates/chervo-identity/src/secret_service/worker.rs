@@ -19,6 +19,7 @@ use super::ops::{self, Conn, decode, mapped, rpc};
 use super::proto::{
     ALGO_PLAIN, BUS_NAME, IFACE_SERVICE, M_OPEN_SESSION, QUEUE, SERVICE_PATH, SIG_OPEN_SESSION_OUT,
 };
+use super::unlock;
 use crate::IdentityError;
 
 /// Reply of a job.
@@ -41,6 +42,20 @@ pub(super) enum JobKind {
         service: String,
         account: String,
     },
+    /// Explicit unlock of the default collection; `wait` bounds the wait at the prompt.
+    Unlock {
+        wait: Duration,
+    },
+}
+
+impl JobKind {
+    /// Time limit of the whole job in the worker. An unlock may also wait for the user.
+    fn limit(&self, timeouts: Timeouts) -> Duration {
+        match self {
+            Self::Unlock { wait } => wait.saturating_add(timeouts.op),
+            _ => timeouts.op,
+        }
+    }
 }
 
 pub(super) struct Job {
@@ -90,7 +105,7 @@ async fn run(mut rx: Receiver<Job>, mut connector: Connector, timeouts: Timeouts
     while let Some(job) = rx.recv().await {
         let Job { kind, reply } = job;
         let outcome = tokio::time::timeout(
-            timeouts.op,
+            kind.limit(timeouts),
             execute(&kind, &mut connector, &mut conn, timeouts.call),
         )
         .await;
@@ -156,6 +171,7 @@ async fn run_job(kind: &JobKind, conn: &Conn) -> Result<Option<Zeroizing<Vec<u8>
         JobKind::Delete { service, account } => {
             ops::delete(conn, service, account).await.map(|()| None)
         }
+        JobKind::Unlock { wait } => unlock::request_unlock(conn, *wait).await.map(|()| None),
     }
 }
 
