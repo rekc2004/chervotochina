@@ -291,7 +291,7 @@ Order in `on_datagram` (each step is O(1) and charges before the next):
 - [ ] `bash scripts/check-forbidden.sh --self-test && bash scripts/check-forbidden.sh` (unchanged script)
 - [ ] `test "$(git diff $BASE -- Cargo.lock | grep -E '^\+name = ')" = '+name = "chervo-lan"'`
 - [ ] `cargo tree -p chervo-lan -e normal --depth 1 | grep -Ei 'tokio|quinn|rustls|hyper|mio|dns'; test $? -eq 1`
-- [ ] `cargo tree -p chervo-connect -e normal | grep -E 'chervo-lan|socket2'; test $? -eq 1`
+- [ ] `cargo tree -p chervo-connect -e normal --depth 1 | grep -E 'chervo-lan|socket2'; test $? -eq 1` (direct deps only: socket2 reaches chervo-connect transitively through tokio at baseline; conductor fix 2026-10-25)
 - [ ] `cargo tree -p chervo-identity -e normal --depth 1 | grep -c chacha20poly1305` prints 1
 - [ ] `CHERVO_FUZZ_ITERS=1000000 cargo test --release --locked -p chervo-lan fuzz_smoke -- --nocapture` (iterations per target in the output)
 - [ ] `for i in $(seq 20); do cargo test -q --locked -p chervo-lan loopback_ || exit 1; done`
