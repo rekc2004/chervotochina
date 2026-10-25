@@ -221,7 +221,7 @@ Report (≤ 25 lines): as above.
 ---
 
 ## 6. Threat model deltas (to THREAT_MODEL ред. 8, written by the architect after the 18a/18b reviews)
-- **New T17 "Local application state and UI"** (same-user scope like T10):
+- **New T18 "Local application state and UI"** (same-user scope like T10):
   - (a) The settings file is plaintext. A same-user process can change the receive root, the approved routers or the port. Mitigation: strict parser, nothing secret in it. Residual: accepted, as T4 journals.
   - (b) Instance lock: a same-user process can hold it and keep the app from starting (DoS, T10 scope). Another local user cannot (per-user dir).
   - (c) Clipboard: invite and address tokens copied to the clipboard are readable by same-user apps and may go to OS clipboard history or cloud sync. Mitigation: history exclusion where V5 shows it works, plus the IP warning. Residual otherwise.
@@ -301,4 +301,4 @@ D1 node in core (§0). D2 single instance = own `File::try_lock` in the data dir
   - доступность на Linux и системный выбор файлов могут затянуть старую версию D-Bus, которую мы запретили в 17а;
   - на чистой Windows может не хватить VC-рантайма (тогда собираем со статическим рантаймом).
 - Посредника и «локальных ключей» в GUI не будет: показываются честные тексты, кнопок согласия нет. Это отклонение от строки этапа 18 в TASK, записано (§7).
-- Новые угрозы — только локальные, от процессов под вашей учётной записью: файл настроек, буфер обмена, дерево доступности, блокировка второго экземпляра. Записаны как T17 для модели угроз ред. 8.
+- Новые угрозы — только локальные, от процессов под вашей учётной записью: файл настроек, буфер обмена, дерево доступности, блокировка второго экземпляра. Записаны как T18 для модели угроз ред. 8.
