@@ -3,6 +3,10 @@
 # --render-check under xvfb is not run here (needs apt); only build and static checks.
 name: gui-probe
 on:
+  push:
+    paths:
+      - "spikes/gui-probe/**"
+      - ".github/workflows/gui-probe.yml"
   workflow_dispatch:
 permissions:
   contents: read
