@@ -337,14 +337,37 @@ impl SendSession {
 /// Завершает передачу на стороне отправителя. Завершённая успешно остаётся в памяти на
 /// `resume_hold`: потерянный ответ DONE получатель повторит при RESUME.
 pub(crate) fn finish_send<L: Links>(inner: &Arc<Inner<L>>, s: &Arc<SendSession>, how: Finish) {
-    let att = {
+    finish_with(inner, s, false, |_| how);
+}
+
+/// Завершает передачу, только если предложение всё ещё ждёт ответа (`Offering`). Проверка и
+/// смена фазы идут под одним замком `core`, поэтому срок или предел повторов не оборвут
+/// предложение, которое в тот же миг приняли по DECISION или RESUME. `pick` вызывается под
+/// замком и видит текущую попытку. `false`: фаза уже другая, ничего не сделано.
+pub(crate) fn finish_offering<L: Links>(
+    inner: &Arc<Inner<L>>,
+    s: &Arc<SendSession>,
+    pick: impl FnOnce(Option<&SAttempt>) -> Finish,
+) -> bool {
+    finish_with(inner, s, true, pick)
+}
+
+fn finish_with<L: Links>(
+    inner: &Arc<Inner<L>>,
+    s: &Arc<SendSession>,
+    only_offering: bool,
+    pick: impl FnOnce(Option<&SAttempt>) -> Finish,
+) -> bool {
+    let (att, how) = {
         let mut c = lock(&s.core);
-        if s.phase() == SPhase::Finished {
-            return;
+        let phase = s.phase();
+        if phase == SPhase::Finished || (only_offering && phase != SPhase::Offering) {
+            return false;
         }
+        let how = pick(c.att.as_deref());
         s.phase.send_replace(SPhase::Finished);
         c.completed = how == Finish::Completed;
-        c.att.take()
+        (c.att.take(), how)
     };
     s.halt.store(true, Ordering::Relaxed);
     s.stop.stop();
@@ -373,6 +396,7 @@ pub(crate) fn finish_send<L: Links>(inner: &Arc<Inner<L>>, s: &Arc<SendSession>,
     } else {
         inner.remove_out(&s.key);
     }
+    true
 }
 
 /// Поток управления или соединение потеряны: пауза до RESUME (или отказ, если ответа на
@@ -386,7 +410,12 @@ fn attempt_lost<L: Links>(inner: &Arc<Inner<L>>, s: &Arc<SendSession>, att: &Arc
             c.att = None;
             c.paused_gen = c.paused_gen.saturating_add(1);
         }
-        (cur, c.paused_gen, s.phase())
+        let phase = s.phase();
+        // пауза ставится под тем же замком, что и `finish_send`: закончившееся не оживает
+        if cur && phase == SPhase::Accepted {
+            s.phase.send_replace(SPhase::Paused);
+        }
+        (cur, c.paused_gen, phase)
     };
     if !current {
         return;
@@ -395,7 +424,6 @@ fn attempt_lost<L: Links>(inner: &Arc<Inner<L>>, s: &Arc<SendSession>, att: &Arc
         // ответа ещё нет: то же предложение уходит по следующей рабочей связи
         SPhase::Offering => enter_relink(inner, s),
         SPhase::Accepted => {
-            s.phase.send_replace(SPhase::Paused);
             s.emit(TransferEvent::Paused {
                 key: s.key,
                 reason: PauseReason::Disconnected,
@@ -612,15 +640,17 @@ fn spawn_offer_ttl<L: Links>(inner: &Arc<Inner<L>>, s: &Arc<SendSession>) {
         let _g = g;
         tokio::select! {
             () = tokio::time::sleep(ttl) => {
-                if s2.phase() == SPhase::Offering {
-                    let attached = lock(&s2.core).att.is_some();
-                    if attached {
-                        s2.ctl_send(Message::Cancel { id: s2.key.id, reason: CancelReason::User });
-                        finish_send(&inner2, &s2, Finish::Failed(FailReason::Expired));
-                    } else {
-                        finish_send(&inner2, &s2, Finish::Failed(FailReason::Disconnected));
+                // выбор исхода (есть ли попытка) и смена фазы под одним замком, только из `Offering`
+                let _ = finish_offering(&inner2, &s2, |att| match att {
+                    Some(a) => {
+                        let _ = a.ctl.send(Message::Cancel {
+                            id: s2.key.id,
+                            reason: CancelReason::User,
+                        });
+                        Finish::Failed(FailReason::Expired)
                     }
-                }
+                    None => Finish::Failed(FailReason::Disconnected),
+                });
             }
             () = stop.stopped() => {}
         }
@@ -704,8 +734,11 @@ async fn relink_offer<L: Links>(inner: Arc<Inner<L>>, s: Arc<SendSession>) {
         let deadline = lost_at + cfg.offer_relink_grace;
         // 2. пределы
         if relinks >= MAX_OFFER_RELINKS || tokio::time::Instant::now() >= deadline {
-            finish_send(&inner, &s, Finish::Failed(FailReason::Disconnected));
-            return;
+            // только из `Offering`: принятое по RESUME или DECISION в этот миг не обрывается
+            if finish_offering(&inner, &s, |_| Finish::Failed(FailReason::Disconnected)) {
+                return;
+            }
+            continue;
         }
         // пауза между повторами растёт: получатель, который отбрасывает потоки, не сожжёт все
         // повторы за миллисекунды; первый повтор (замена связи) идёт сразу
@@ -842,7 +875,19 @@ async fn ctl_reader<L: Links, R: RecvStream>(
             (SPhase::Offering, Message::Decision { id, verdict }) if id == s.key.id => {
                 match verdict {
                     Verdict::Accept => {
-                        s.phase.send_replace(SPhase::Accepted);
+                        // под замком `core` и только из `Offering`: закончившееся не оживает,
+                        // принятое по RESUME не принимается второй раз
+                        let won = {
+                            let _c = lock(&s.core);
+                            let won = s.phase() == SPhase::Offering;
+                            if won {
+                                s.phase.send_replace(SPhase::Accepted);
+                            }
+                            won
+                        };
+                        if !won {
+                            return;
+                        }
                         s.emit(TransferEvent::OfferAnswered {
                             key: s.key,
                             accepted: true,

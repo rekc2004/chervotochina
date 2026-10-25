@@ -840,3 +840,295 @@ async fn relink_hashes_once() {
         .count();
     assert_eq!(n, blocks);
 }
+
+// ------------------------------------------------- круг правок 1 после ревью безопасности
+
+/// Сколько записей предела `ctl_in_per_min` сейчас занято у друга.
+fn ctl_used(r: &Raw) -> usize {
+    crate::shared::lock(&r.p.tr.inner().reg)
+        .ctl_recent
+        .get(&r.pair)
+        .map_or(0, std::collections::VecDeque::len)
+}
+
+/// Честные повторы (1 предложение + 8 повторов за секунды) не тратят общий предел потоков
+/// (6 в минуту): все доходят до ожидающего предложения.
+#[tokio::test]
+async fn relinks_do_not_spend_ctl_budget() {
+    let mut r = raw_receiver(|c| c.ctl_in_per_min = 6).await;
+    let f = fake_two(r.pair);
+    let (_tx0, _rx0) = f.offer(&r.peer).await;
+    let e = wait_ev(&mut r.p.ev, 10, is_offer()).await;
+    let k = key_of(&e);
+    let mut held = Vec::new();
+    for _ in 0..MAX_OFFER_RELINKS {
+        held.push(f.offer(&r.peer).await);
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    r.p.tr.respond(&k, true).unwrap();
+    // последний повтор прикреплён: ответ идёт ему
+    let (_tx, rx) = held.last_mut().unwrap();
+    assert_eq!(Fake::decision(rx, 10).await, Some(Verdict::Accept));
+    assert_eq!(ctl_used(&r), 1, "re-offers must be refunded");
+    let rest = drain(&mut r.p.ev).await;
+    assert_eq!(count_offers(&rest), 0, "{rest:?}");
+}
+
+/// Поток с неизвестным ключом возвращать нельзя: наводнение чужих ID по-прежнему упирается в
+/// предел, лишние потоки закрываются без ответа.
+#[tokio::test]
+async fn unknown_id_flood_stays_limited() {
+    let mut r = raw_receiver(|c| c.ctl_in_per_min = 6).await;
+    let mut held = Vec::new();
+    for i in 0..10u64 {
+        let f = Fake::new(r.pair, vec![FakeFile::new("a.bin", rand_bytes(i + 1, 100))]);
+        let s = f.offer(&r.peer).await;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        held.push(s);
+    }
+    wait_ev(&mut r.p.ev, 10, is_offer()).await;
+    for (i, (_tx, rx)) in held.iter_mut().enumerate() {
+        match i {
+            0 => {}
+            1..=5 => assert_eq!(Fake::decision(rx, 5).await, Some(Verdict::Busy), "{i}"),
+            _ => assert!(recv_frame(rx, 1).await.is_none(), "{i}"),
+        }
+    }
+    assert_eq!(ctl_used(&r), 6);
+    let rest = drain(&mut r.p.ev).await;
+    assert_eq!(count_offers(&rest), 0, "{rest:?}");
+}
+
+/// Ожидающее предложение, у которого ответ уже взят другим (имитация победителя гонки).
+async fn pending_with_winner() -> (
+    Raw,
+    TransferKey,
+    std::sync::Arc<crate::receiver::RecvSession>,
+    tokio::sync::oneshot::Sender<bool>,
+    (FakeTx, FakeRx),
+) {
+    let mut r = raw_receiver(|_| {}).await;
+    let f = fake_two(r.pair);
+    let ctl = f.offer(&r.peer).await;
+    let e = wait_ev(&mut r.p.ev, 10, is_offer()).await;
+    let k = key_of(&e);
+    settle().await;
+    let inner = r.p.tr.inner();
+    let s = inner.find_inb(&k).unwrap();
+    // победитель: взял ответ и записал своё надгробие, но ещё не остановил `pending_task`
+    let ans = s.take_answer().unwrap();
+    inner.remove_inb_tomb(&k, crate::inner::Tomb::Protocol);
+    (r, k, s, ans, ctl)
+}
+
+/// Проигравший конец не выдаёт события, не пишет в поток и не затирает надгробие; победитель
+/// потом спокойно закрывает задачу.
+async fn assert_loser_quiet(
+    r: &mut Raw,
+    k: &TransferKey,
+    s: &crate::receiver::RecvSession,
+    ans: tokio::sync::oneshot::Sender<bool>,
+    rx: &mut FakeRx,
+) {
+    settle().await;
+    let quiet = drain(&mut r.p.ev).await;
+    assert!(quiet.is_empty(), "loser emitted: {quiet:?}");
+    assert_eq!(
+        r.p.tr.inner().tomb_get(k),
+        Some(crate::inner::Tomb::Protocol)
+    );
+    assert!(recv_frame(rx, 0).await.is_none(), "loser wrote to the peer");
+    s.end.stop();
+    drop(ans);
+    settle().await;
+    let after = drain(&mut r.p.ev).await;
+    assert!(after.is_empty(), "{after:?}");
+    assert!(crate::shared::lock(&r.p.tr.inner().relink).get(k).is_none());
+}
+
+#[tokio::test(start_paused = true)]
+#[allow(clippy::await_holding_lock)]
+async fn deadline_loses_to_answer_winner() {
+    let _t = timing_shared();
+    let (mut r, k, s, ans, (_tx, mut rx)) = pending_with_winner().await;
+    let left = s.offer_deadline - tokio::time::Instant::now();
+    tokio::time::advance(left - Duration::from_millis(1)).await;
+    // надгробие победителя за срок устарело: победитель записывает его заново перед самым сроком
+    r.p.tr
+        .inner()
+        .remove_inb_tomb(&k, crate::inner::Tomb::Protocol);
+    tokio::time::advance(Duration::from_millis(2)).await;
+    assert_loser_quiet(&mut r, &k, &s, ans, &mut rx).await;
+}
+
+#[tokio::test(start_paused = true)]
+#[allow(clippy::await_holding_lock)]
+async fn grace_loses_to_answer_winner() {
+    let _t = timing_shared();
+    let (mut r, k, s, ans, (_tx, mut rx)) = pending_with_winner().await;
+    r.peer.close();
+    settle().await;
+    let grace = r.p.cfg.offer_relink_grace;
+    tokio::time::advance(grace + Duration::from_millis(1)).await;
+    assert_loser_quiet(&mut r, &k, &s, ans, &mut rx).await;
+}
+
+#[tokio::test(start_paused = true)]
+#[allow(clippy::await_holding_lock)]
+async fn sender_cancel_and_violation_lose_to_answer_winner() {
+    let _t = timing_shared();
+    // CANCEL от отправителя
+    let (mut r, k, s, ans, (mut tx, mut rx)) = pending_with_winner().await;
+    super::fake::cancel(&mut tx, k.id, CancelReason::User).await;
+    assert_loser_quiet(&mut r, &k, &s, ans, &mut rx).await;
+    // нарушение на потоке управления
+    let (mut r, k, s, ans, (mut tx, mut rx)) = pending_with_winner().await;
+    let other = TransferId::generate().unwrap();
+    super::fake::cancel(&mut tx, other, CancelReason::User).await;
+    assert_loser_quiet(&mut r, &k, &s, ans, &mut rx).await;
+}
+
+/// Отправитель в `Offering` с живым потоком: сырой получатель прочитал предложение целиком.
+async fn offered_sender() -> (
+    Peer,
+    TransferKey,
+    (FakeConn, std::sync::Arc<TestDir>),
+    FakeTx,
+    FakeRx,
+    std::sync::Arc<crate::sender::SendSession>,
+) {
+    let mut pre = Pre::new();
+    let pair = pre.solo_friend();
+    let node = Node::start(pre);
+    let (partial, dest) = (TestDir::new(), TestDir::new());
+    let mut cfg = small_cfg(partial.path());
+    big_cfg(&mut cfg);
+    let p = Peer::start(node, partial, dest, cfg);
+    let c0 = FakeConn::lonely(pair);
+    p.node.t.push_incoming(c0.clone());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let src = TestDir::new();
+    let key =
+        p.tr.send(
+            &pair,
+            vec![write_src(src.path(), "a.bin", &rand_bytes(3, 1000))],
+        )
+        .unwrap();
+    let t0 = c0.peer();
+    let (tx, mut rx) = t0.accept_bi().await.unwrap();
+    let mut kind = [0u8; 1];
+    rx.read(&mut kind).await.unwrap();
+    assert!(matches!(
+        recv_frame(&mut rx, 5).await,
+        Some(Message::OfferHead { .. })
+    ));
+    assert!(matches!(
+        recv_frame(&mut rx, 5).await,
+        Some(Message::OfferFiles(_))
+    ));
+    let s = p.tr.inner().find_out(&key).unwrap();
+    (p, key, (c0, src), tx, rx, s)
+}
+
+fn pick_disconnected(_: Option<&crate::sender::SAttempt>) -> crate::receiver::Finish {
+    crate::receiver::Finish::Failed(FailReason::Disconnected)
+}
+
+/// Порядок 1: принятие раньше срока. Условное завершение ничего не делает, срок предложения
+/// принятую передачу не обрывает.
+#[tokio::test(start_paused = true)]
+#[allow(clippy::await_holding_lock)]
+async fn ttl_and_limits_lose_to_accept() {
+    let _t = timing_shared();
+    let (mut p, key, _c0, mut tx, _rx, s) = offered_sender().await;
+    send_frame(
+        &mut tx,
+        &Message::Decision {
+            id: key.id,
+            verdict: Verdict::Accept,
+        },
+    )
+    .await;
+    collect_until(&mut p.ev, 10, is_started).await;
+    assert!(!crate::sender::finish_offering(
+        p.tr.inner(),
+        &s,
+        pick_disconnected
+    ));
+    assert!(!s.is_finished());
+    let ttl = p.cfg.offer_ttl + Duration::from_secs(31);
+    tokio::time::advance(ttl).await;
+    settle().await;
+    let rest = drain(&mut p.ev).await;
+    assert!(!rest.iter().any(is_failed(FailReason::Expired)), "{rest:?}");
+    assert!(
+        !rest.iter().any(is_failed(FailReason::Disconnected)),
+        "{rest:?}"
+    );
+}
+
+/// Порядок 2: срок раньше принятия. Ровно одно итоговое событие, а запоздалое принятие
+/// закончившуюся передачу не оживляет.
+#[tokio::test(start_paused = true)]
+#[allow(clippy::await_holding_lock)]
+async fn accept_loses_to_ttl_and_finished_stays_finished() {
+    let _t = timing_shared();
+    let (mut p, key, _c0, mut tx, mut rx, s) = offered_sender().await;
+    let ttl = p.cfg.offer_ttl + Duration::from_secs(31);
+    tokio::time::advance(ttl).await;
+    settle().await;
+    let ev = drain(&mut p.ev).await;
+    assert_eq!(count(&ev, is_failed(FailReason::Expired)), 1, "{ev:?}");
+    assert!(
+        recv_frame(&mut rx, 1).await.is_some_and(|m| matches!(
+            m,
+            Message::Cancel {
+                reason: CancelReason::User,
+                ..
+            }
+        )),
+        "no CANCEL(User) on the stream"
+    );
+    assert!(s.is_finished());
+    // условное завершение второй раз и запоздалое принятие ничего не меняют
+    assert!(!crate::sender::finish_offering(
+        p.tr.inner(),
+        &s,
+        pick_disconnected
+    ));
+    let mut out = Vec::new();
+    crate::encode(
+        &Message::Decision {
+            id: key.id,
+            verdict: Verdict::Accept,
+        },
+        &mut out,
+    )
+    .unwrap();
+    let _ = tx.write_all(&out).await;
+    settle().await;
+    let late = drain(&mut p.ev).await;
+    assert!(late.is_empty(), "{late:?}");
+    assert!(s.is_finished());
+}
+
+/// Условное завершение из `Offering` срабатывает ровно один раз.
+#[tokio::test(start_paused = true)]
+#[allow(clippy::await_holding_lock)]
+async fn finish_offering_wins_once() {
+    let _t = timing_shared();
+    let (mut p, key, _c0, _tx, _rx, s) = offered_sender().await;
+    assert!(crate::sender::finish_offering(
+        p.tr.inner(),
+        &s,
+        pick_disconnected
+    ));
+    assert!(!crate::sender::finish_offering(
+        p.tr.inner(),
+        &s,
+        pick_disconnected
+    ));
+    let ev = drain(&mut p.ev).await;
+    assert_eq!(count(&ev, is_failed(FailReason::Disconnected)), 1, "{ev:?}");
+    assert_eq!(key_of(ev.last().unwrap()), key);
+}

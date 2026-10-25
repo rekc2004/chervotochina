@@ -165,8 +165,19 @@ impl<L: Links> Inner<L> {
         }
     }
 
-    /// Не больше `ctl_in_per_min` потоков управления в минуту от одного друга.
-    pub(crate) fn ctl_rate_ok(&self, pair: &PairId) -> bool {
+    /// Не больше `ctl_in_per_min` потоков управления в минуту от одного друга. `Some(метка)`:
+    /// поток засчитан (метку принимает `refund_reoffer`).
+    ///
+    /// Поток считается до первого сообщения, когда ключ ещё неизвестен. Честный отправитель
+    /// после потери связи повторяет предложение до `MAX_OFFER_RELINKS` раз за секунды, и без
+    /// возврата 1 + 8 потоков не уложились бы в 6 в минуту: именно при обрывах связи повтор
+    /// молча терялся бы. Поэтому поток, чьё первое сообщение это OFFER_HEAD с ключом
+    /// существующей сессии, возвращает свою запись (`refund_reoffer`). Возврат ограничен
+    /// `MAX_OFFER_RELINKS` на сессию (счётчик в `RecvSession`), так что враждебный друг не
+    /// получает бесплатных потоков сверх 8 на каждое своё предложение, которое само занимает
+    /// слот и подчинено пределу. Потоки с неизвестными ключами и RESUME остаются под общим
+    /// пределом целиком.
+    pub(crate) fn ctl_rate_ok(&self, pair: &PairId) -> Option<Instant> {
         let cap = usize::try_from(self.sh.cfg.ctl_in_per_min).unwrap_or(usize::MAX);
         let now = Instant::now();
         let mut reg = lock(&self.reg);
@@ -178,14 +189,31 @@ impl<L: Links> Inner<L> {
             q.pop_front();
         }
         if q.len() >= cap {
-            return false;
+            return None;
         }
         q.push_back(now);
         // записи ушедших друзей не копятся
         if reg.ctl_recent.len() > 4096 {
             reg.ctl_recent.retain(|_, q| !q.is_empty());
         }
-        true
+        Some(now)
+    }
+
+    /// Первое сообщение потока это OFFER_HEAD с ключом существующей сессии: запись потока
+    /// возвращается в предел, пока не исчерпан запас сессии (см. `ctl_rate_ok`).
+    pub(crate) fn refund_reoffer(&self, key: &TransferKey, token: Instant) {
+        let mut reg = lock(&self.reg);
+        let Some(s) = reg.inb.get(key).cloned() else {
+            return;
+        };
+        if !s.take_refund() {
+            return;
+        }
+        if let Some(q) = reg.ctl_recent.get_mut(&key.pair)
+            && let Some(i) = q.iter().position(|t| *t == token)
+        {
+            q.remove(i);
+        }
     }
 }
 

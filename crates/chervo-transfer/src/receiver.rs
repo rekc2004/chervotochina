@@ -201,6 +201,9 @@ pub(crate) struct RecvSession {
     pub(crate) offer_deadline: tokio::time::Instant,
     /// Сколько повторов предложения принято (`MAX_OFFER_RELINKS`).
     relinks: AtomicU8,
+    /// Сколько потоков повтора этого предложения освобождено от общего предела `ctl_in_per_min`
+    /// (не больше `MAX_OFFER_RELINKS`).
+    refunds: AtomicU8,
 }
 
 fn share_for(sh: &Shared, sizes: &[u64]) -> Arc<Semaphore> {
@@ -273,6 +276,7 @@ impl RecvSession {
             jobs: Tracker::new(),
             offer_deadline: tokio::time::Instant::now() + offer_ttl,
             relinks: AtomicU8::new(0),
+            refunds: AtomicU8::new(0),
         })
     }
 
@@ -327,6 +331,7 @@ impl RecvSession {
             jobs: Tracker::new(),
             offer_deadline: tokio::time::Instant::now(),
             relinks: AtomicU8::new(0),
+            refunds: AtomicU8::new(0),
         })
     }
 
@@ -385,6 +390,16 @@ impl RecvSession {
             })
             .unwrap_or(u8::MAX);
         prev < MAX_OFFER_RELINKS
+    }
+
+    /// Можно ли освободить ещё один поток повтора от общего предела (не больше
+    /// `MAX_OFFER_RELINKS` за жизнь сессии).
+    pub(crate) fn take_refund(&self) -> bool {
+        self.refunds
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                (n < MAX_OFFER_RELINKS).then_some(n + 1)
+            })
+            .is_ok()
     }
 
     /// Предложение принято (ответ взят), а передача ещё не стала `Active`.
