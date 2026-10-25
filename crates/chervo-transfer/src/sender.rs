@@ -214,6 +214,11 @@ impl SendSession {
         self.phase() == SPhase::Finished
     }
 
+    #[cfg(test)]
+    pub(crate) fn current_attempt(&self) -> Option<Arc<SAttempt>> {
+        lock(&self.core).att.clone()
+    }
+
     fn file_count(&self) -> u32 {
         u32::try_from(self.files.len()).unwrap_or(u32::MAX)
     }
@@ -605,7 +610,7 @@ async fn send_offer<C: Connection>(
 
 /// Ставит попытку для предложения, если оно всё ещё ждёт ответа и другой попытки нет. `false`:
 /// поток отброшен (предложение уже принято, закончено или у него есть другая попытка).
-fn install_offer_attempt<L: Links>(
+pub(crate) fn install_offer_attempt<L: Links>(
     inner: &Arc<Inner<L>>,
     s: &Arc<SendSession>,
     conn: L::Conn,
@@ -886,6 +891,14 @@ async fn ctl_reader<L: Links, R: RecvStream>(
                             won
                         };
                         if !won {
+                            // проиграли гонку: если попытка уже не текущая, она не должна жить
+                            let current = lock(&s.core)
+                                .att
+                                .as_ref()
+                                .is_some_and(|a| Arc::ptr_eq(a, &att));
+                            if !current {
+                                att.stop.stop();
+                            }
                             return;
                         }
                         s.emit(TransferEvent::OfferAnswered {
@@ -1004,12 +1017,17 @@ pub(crate) async fn handle_resume<L: Links>(
     }
     let hold = inner.links.hold(&key.pair);
     let (att, out_rx) = SAttempt::new(conn.conn_id(), hold);
-    {
+    // пока замок был отпущен, предложение могло поставить свою попытку (`install_offer_attempt`):
+    // заменяемая попытка всегда останавливается, брошенной не остаётся
+    let replaced = {
         let mut c = lock(&s.core);
         if s.phase() == SPhase::Finished {
             return;
         }
-        c.att = Some(att.clone());
+        c.att.replace(att.clone())
+    };
+    if let Some(prev) = replaced {
+        prev.stop.stop();
     }
     let ok = reply(Message::ResumeOk {
         id: key.id,

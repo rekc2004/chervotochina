@@ -1132,3 +1132,52 @@ async fn finish_offering_wins_once() {
     assert_eq!(count(&ev, is_failed(FailReason::Disconnected)), 1, "{ev:?}");
     assert_eq!(key_of(ev.last().unwrap()), key);
 }
+
+/// Окно в `handle_resume` между снятием старой попытки и постановкой новой: попытка, которую
+/// предложение поставило в этом окне, при замене останавливается и не остаётся брошенной.
+#[tokio::test]
+async fn resume_stops_attempt_installed_in_window() {
+    let (p, key, (_c0, _src), _tx, _rx, s) = offered_sender().await;
+    let old = s.current_attempt().expect("offer attempt");
+    // держим старую попытку «занятой»: RESUME снимет её и будет ждать, окно открыто
+    let guard = old.tracker.guard();
+    let c1 = FakeConn::lonely(key.pair);
+    p.node.t.push_incoming(c1.clone());
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let t1 = c1.peer();
+    let (mut tx, mut rx) = t1.open_bi().await.unwrap();
+    tx.write_all(&[crate::STREAM_TRANSFER_CTL]).await.unwrap();
+    send_frame(&mut tx, &Message::Resume { id: key.id }).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while s.current_attempt().is_some() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "RESUME did not take"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(old.stop.is_stopped());
+    // предложение ставит свою попытку в окне
+    let cb = FakeConn::lonely(key.pair);
+    let (btx, brx) = cb.open_bi().await.unwrap();
+    assert!(crate::sender::install_offer_attempt(
+        p.tr.inner(),
+        &s,
+        cb.clone(),
+        None,
+        btx,
+        brx
+    ));
+    let mid = s.current_attempt().expect("installed");
+    assert!(!mid.stop.is_stopped());
+    drop(guard);
+    let got = recv_frame(&mut rx, 5).await;
+    assert!(
+        matches!(got, Some(Message::ResumeOk { .. })),
+        "no RESUME_OK"
+    );
+    assert!(mid.stop.is_stopped(), "replaced attempt left running");
+    let cur = s.current_attempt().expect("resume attempt");
+    assert!(!std::sync::Arc::ptr_eq(&cur, &mid));
+    assert!(!cur.stop.is_stopped());
+}
