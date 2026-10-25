@@ -5,14 +5,13 @@
 use std::collections::VecDeque;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use chervo_addr::{LAN_FOUND_MAX, LanFound, LanLink, LanPeer, LanStatus};
 use chervo_identity::PairId;
 
 use crate::core::{CoreConfig, LanCore, LanStats, Readiness};
-use crate::limits::{BEACON_LEN, BUDGET_PAUSE, JOIN_WAIT, MAX_WAIT, MIN_WAIT, REOPEN_AFTER};
+use crate::limits::{BEACON_LEN, BUDGET_PAUSE, MAX_WAIT, MIN_WAIT, REOPEN_AFTER};
 use crate::net::{Net, Recv, Sockets};
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -40,7 +39,6 @@ struct Mailbox {
 /// Production link: own thread, real multicast sockets on `wants_sockets()`.
 pub struct LanDiscovery {
     shared: Arc<Shared>,
-    handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl LanDiscovery {
@@ -63,20 +61,14 @@ impl LanDiscovery {
             cv: Condvar::new(),
         });
         let worker = Arc::clone(&shared);
+        // the thread is detached; it ends after `shutdown` and closes its sockets then
         let spawned = std::thread::Builder::new()
             .name("chervo-lan".to_owned())
             .spawn(move || run(&worker, &net, cfg, now_unix.as_ref()));
-        let handle = match spawned {
-            Ok(h) => Some(h),
-            Err(_) => {
-                lock(&shared.m).status = Some(LanStatus::Unavailable);
-                None
-            }
-        };
-        Arc::new(Self {
-            shared,
-            handle: Mutex::new(handle),
-        })
+        if spawned.is_err() {
+            lock(&shared.m).status = Some(LanStatus::Unavailable);
+        }
+        Arc::new(Self { shared })
     }
 
     pub fn stats(&self) -> LanStats {
@@ -114,19 +106,14 @@ impl LanLink for LanDiscovery {
         lock(&self.shared.m).status.unwrap_or(LanStatus::Off)
     }
 
+    /// Signals the thread to stop and returns at once (no waiting, no sleeping: the caller may be a
+    /// runtime worker). The thread notices within one receive timeout (at most `MAX_WAIT`) and
+    /// closes both sockets before it ends; the thread is detached.
     fn shutdown(&self) {
-        self.put(|m| m.stop = true);
-        let handle = lock(&self.handle).take();
-        if let Some(h) = handle {
-            let deadline = Instant::now() + JOIN_WAIT;
-            while !h.is_finished() && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            if h.is_finished() {
-                let _ = h.join();
-            }
-        }
-        lock(&self.shared.m).status = Some(LanStatus::Off);
+        self.put(|m| {
+            m.stop = true;
+            m.status = Some(LanStatus::Off);
+        });
     }
 }
 

@@ -96,8 +96,8 @@ where
     T::Conn: Clone,
     S: SecretStore + ListKeyStore + 'static,
 {
-    /// Одна синхронизация со ссылкой: найденное в подсказки, затем изменения точки входа,
-    /// набора друзей и ожидаемых пар (в таком порядке). `false`: ссылки нет или это задача
+    /// Одна синхронизация со ссылкой: найденное в подсказки, затем изменения ожидаемых пар,
+    /// набора друзей и точки входа (в таком порядке). `false`: ссылки нет или это задача
     /// прежнего подключения. Вызовы ссылки не блокируют; ключи считаются вне замка.
     pub(crate) fn lan_sync(&self, generation: Option<u64>) -> bool {
         let (link, current) = {
@@ -141,14 +141,17 @@ where
             }
             (push_local, push_peers, push_wanted)
         };
-        if push_local {
-            link.set_local(local);
+        // порядок важен: ожидаемые пары первыми, чтобы они были известны ссылке к моменту,
+        // когда набор друзей и точка входа впервые включают сокеты (иначе маяк между вызовами
+        // заморозил бы пустой набор на всю эпоху)
+        if push_wanted {
+            link.set_wanted(wanted);
         }
         if push_peers {
             link.set_peers(self.lan_peers(&fps));
         }
-        if push_wanted {
-            link.set_wanted(wanted);
+        if push_local {
+            link.set_local(local);
         }
         true
     }
@@ -311,7 +314,7 @@ where
     S: SecretStore + ListKeyStore + 'static,
 {
     /// Подключает поиск в LAN. Второй вызов: `Internal`; после остановки: `Shutdown`. Сам
-    /// ввода-вывода не делает: передаёт ссылке точку входа, друзей, ожидаемые пары, затем
+    /// ввода-вывода не делает: передаёт ссылке ожидаемые пары, друзей, точку входа, затем
     /// `trigger()`, и запускает задачу (период `cfg.tick`).
     pub fn attach_lan(&self, link: Arc<dyn LanLink>) -> Result<(), ConnectError> {
         if self.inner.is_shut() {

@@ -75,9 +75,10 @@ fn unicast_link(
 }
 
 fn engage(l: &LanDiscovery, quic: u16, peer: LanPeer, wanted: PairId) {
-    l.set_local(Some(lo(quic)));
-    l.set_peers(vec![peer]);
+    // the order the engine uses: wanted first, so it is known when the sockets are first wanted
     l.set_wanted(vec![wanted]);
+    l.set_peers(vec![peer]);
+    l.set_local(Some(lo(quic)));
     l.trigger();
 }
 
@@ -229,11 +230,15 @@ fn loopback_shutdown_closes_socket() {
     );
     let t = Instant::now();
     l.shutdown();
-    assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
-    // the port can be bound again at once
-    let again = UdpSocket::bind(lo(own_port));
-    assert!(again.is_ok(), "port still held after shutdown");
-    drop(again);
+    // shutdown only signals: it never waits for the thread (the caller may be a runtime worker)
+    assert!(t.elapsed() < Duration::from_millis(50), "{:?}", t.elapsed());
+    assert_eq!(l.status(), LanStatus::Off);
+    // the thread closes the sockets within one receive timeout
+    assert!(
+        wait_for(Duration::from_secs(1), || UdpSocket::bind(lo(own_port))
+            .is_ok()),
+        "port still held after shutdown"
+    );
     // idempotent, and a later call never panics or blocks
     l.shutdown();
     l.set_local(None);
@@ -250,7 +255,10 @@ fn drop_of_last_arc_shuts_down() {
         engage(&l, 41_040, side(&fx, true), fx.pair);
         assert!(wait_for(Duration::from_secs(5), || l.status() == LanStatus::Running));
     }
-    assert!(UdpSocket::bind(lo(own_port)).is_ok());
+    assert!(wait_for(Duration::from_secs(1), || UdpSocket::bind(lo(
+        own_port
+    ))
+    .is_ok()));
 }
 
 #[test]
@@ -296,7 +304,7 @@ fn start_never_blocks() {
     let t = Instant::now();
     prod.shutdown();
     l.shutdown();
-    assert!(t.elapsed() < Duration::from_secs(1));
+    assert!(t.elapsed() < Duration::from_millis(50));
 }
 
 /// Manual check on a real machine: the real group on the default-route interface; both links
@@ -319,9 +327,9 @@ fn multicast_live() {
     for (l, quic, peer) in
         [(&la, 41_071u16, true), (&lb, 41_072u16, false)].map(|(l, q, a)| (l, q, side(&fx, a)))
     {
-        l.set_local(Some(SocketAddrV4::new(ip, quic)));
-        l.set_peers(vec![peer]);
         l.set_wanted(vec![fx.pair]);
+        l.set_peers(vec![peer]);
+        l.set_local(Some(SocketAddrV4::new(ip, quic)));
         l.trigger();
     }
     let mut got = (false, false);

@@ -54,5 +54,3 @@ pub(crate) const MIN_WAIT: Duration = Duration::from_millis(5);
 pub(crate) const BUDGET_PAUSE: Duration = Duration::from_millis(100);
 pub(crate) const REOPEN_AFTER: Duration = Duration::from_secs(30);
 pub(crate) const SOCKET_RECV_BUF: usize = 64 * 1024;
-/// Bounded wait for the thread on shutdown.
-pub(crate) const JOIN_WAIT: Duration = Duration::from_secs(1);

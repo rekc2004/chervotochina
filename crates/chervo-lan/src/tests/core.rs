@@ -162,27 +162,43 @@ fn wanted_frozen_per_epoch() {
     assert_eq!(opened(&k2, &b3, UNIX + 60, *SEND.ip()).len(), 1);
 }
 
-/// The caller pushes peers and wanted one call after another; a beacon sent in between must not
-/// leave the epoch without the real slot (found by `loopback_two_links_find_each_other`).
 #[test]
-fn wanted_set_right_after_activation_applies() {
+fn stale_wanted_on_reactivation_is_frozen_per_epoch() {
     let fx = pair();
-    let mut c = LanCore::new(CoreConfig::default());
-    c.set_local(Some(SEND), Duration::ZERO);
-    c.set_peers(vec![fx.peer_b().unwrap()]);
+    let mut c = sender(&fx, SEND, vec![fx.pair]);
     let keys = fx.peer_a().unwrap().keys;
-    // a beacon goes out before set_wanted: fillers only
-    let b0 = c.poll_send(Duration::ZERO, UNIX).unwrap();
-    assert!(opened(&keys, &b0, UNIX, *SEND.ip()).is_empty());
-    // the first set_wanted re-freezes the epoch: the next beacon carries the real slot
-    c.set_wanted(vec![fx.pair]);
-    let b1 = force_beacon(&mut c, secs(1), UNIX + 1);
-    assert_eq!(opened(&keys, &b1, UNIX + 1, *SEND.ip()), vec![SEND.port()]);
-    // later changes inside the epoch still do not alter the announced set
+    let b0 = force_beacon(&mut c, secs(0), UNIX);
+    assert_eq!(opened(&keys, &b0, UNIX, *SEND.ip()).len(), 1);
+    // the last friend goes away and comes back (re-activation); wanted stays as it was
+    c.set_peers(vec![]);
+    assert_eq!(c.wants_sockets(), None);
+    c.set_peers(vec![fx.peer_b().unwrap()]);
+    let b1 = force_beacon(&mut c, secs(5), UNIX + 5);
+    assert_eq!(opened(&keys, &b1, UNIX + 5, *SEND.ip()).len(), 1);
+    // a change of wanted inside the epoch does not change the id set of the beacons
     c.set_wanted(vec![]);
-    let b2 = force_beacon(&mut c, secs(2), UNIX + 2);
-    assert_eq!(opened(&keys, &b2, UNIX + 2, *SEND.ip()).len(), 1);
+    let b2 = force_beacon(&mut c, secs(10), UNIX + 10);
+    c.set_wanted(vec![fx.pair]);
+    let b3 = force_beacon(&mut c, secs(15), UNIX + 15);
     assert_eq!(ids(&b1), ids(&b2));
+    assert_eq!(ids(&b1), ids(&b3));
+    assert_eq!(opened(&keys, &b2, UNIX + 10, *SEND.ip()).len(), 1);
+}
+
+/// Ids do not depend on the address: a new endpoint inside the epoch changes no id (only the
+/// sealed port bytes), so the old and the new address are linked for at most one epoch.
+#[test]
+fn endpoint_change_keeps_ids_within_epoch() {
+    let fx = pair();
+    let mut c = sender(&fx, SEND, vec![fx.pair]);
+    let keys = fx.peer_a().unwrap().keys;
+    let b0 = force_beacon(&mut c, secs(0), UNIX);
+    let new_local = v4(192, 168, 77, 40, 5000);
+    c.set_local(Some(new_local), secs(10));
+    let b1 = force_beacon(&mut c, secs(20), UNIX + 20);
+    assert_eq!(ids(&b0), ids(&b1));
+    assert_eq!(opened(&keys, &b0, UNIX, *SEND.ip()), vec![SEND.port()]);
+    assert_eq!(opened(&keys, &b1, UNIX + 20, *new_local.ip()), vec![5000]);
 }
 
 #[test]

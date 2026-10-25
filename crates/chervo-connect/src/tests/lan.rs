@@ -166,12 +166,13 @@ async fn lan_attach_pushes_state_then_triggers() {
     n.engine.attach_lan(link.clone()).unwrap();
     let calls = link.calls();
     assert_eq!(calls.len(), 4, "{calls:?}");
+    // wanted before peers before local: wanted is known when the sockets are first wanted
+    assert_eq!(calls[0], Call::Wanted(sorted(vec![a, b])));
+    assert_eq!(calls[1], Call::Peers(sorted(vec![a, b])));
     assert_eq!(
-        calls[0],
+        calls[2],
         Call::Local(Some("192.168.1.5:4000".parse().unwrap()))
     );
-    assert_eq!(calls[1], Call::Peers(sorted(vec![a, b])));
-    assert_eq!(calls[2], Call::Wanted(sorted(vec![a, b])));
     assert_eq!(calls[3], Call::Trigger);
     // ничего лишнего через несколько тактов
     ticks(10).await;
@@ -197,7 +198,10 @@ async fn lan_local_none_when_not_private() {
         let n = Node::start_with(pre, ConnectConfig::default(), t, FakeProbe::new(v4));
         let link = FakeLink::new();
         n.engine.attach_lan(link.clone()).unwrap();
-        assert_eq!(link.calls()[0], Call::Local(None), "{v4:?} {local:?}");
+        assert!(
+            link.calls().contains(&Call::Local(None)),
+            "{v4:?} {local:?}"
+        );
     }
     // при смене маршрута на частный новая точка входа уходит ссылке
     let mut pre = Pre::new();

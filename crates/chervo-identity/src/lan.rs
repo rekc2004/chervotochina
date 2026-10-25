@@ -15,7 +15,7 @@ use blake2::Blake2sMac256;
 use blake2::digest::Mac;
 use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, Key, KeyInit, Nonce, Tag};
 use x25519_dalek::PublicKey as XPublic;
-use zeroize::{ZeroizeOnDrop, Zeroizing};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::{IdentityError, KxPeer};
 
@@ -94,13 +94,15 @@ fn mac_full(key: &[u8; 32], parts: &[&[u8]]) -> Option<Zeroizing<[u8; 32]>> {
     for p in parts {
         m.update(p);
     }
-    let out = m.finalize().into_bytes();
+    let mut out = m.finalize().into_bytes();
     let mut arr = Zeroizing::new([0u8; 32]);
-    if out.len() != arr.len() {
-        return None;
+    let ok = out.len() == arr.len();
+    if ok {
+        arr.copy_from_slice(&out);
     }
-    arr.copy_from_slice(&out);
-    Some(arr)
+    // the finalized block is a key (or key-derived) copy: wipe it (the hash state stays as is)
+    out.as_mut_slice().zeroize();
+    ok.then_some(arr)
 }
 
 fn first16(full: &[u8; 32]) -> [u8; LAN_ID_LEN] {

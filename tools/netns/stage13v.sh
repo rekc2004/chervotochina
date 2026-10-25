@@ -45,6 +45,7 @@ SUMMARY="$LOGS/summary13v.txt"
 CMD="${1:-}"
 NSL=(br a b c d e)
 RD=""
+CAP_PID=""
 declare -A NODE_REAL=() NODE_WRAP=()
 BG_REAL=""; BG_WRAP=""
 
@@ -123,7 +124,8 @@ do_setup() {
 # Счётчики исходящего трафика узла a или b. peers4: все адреса друга (до и после смены).
 # grp: датаграммы на группу; badttl: на группу с TTL не 1; badlen: на группу с длиной UDP не 565 (557 + 8);
 # igmp: IGMP; igmp_bad: IGMP не на 224.0.0.22; unreach: ICMP «порт недоступен» (ядро, PORTSCAN);
-# dns, probe, other: всё прочее (должно быть 0).
+# dns, probe, other: всё прочее (должно быть 0). Входящие счётчики (положительные контроли): rx_grp: датаграммы
+# на группу; rx_c, rx_d: те же с адресов c и d.
 nft_guard() { # ns peers4(через запятую)
   local ns="$1" p4="$2"
   nsx "$ns" nft flush ruleset 2>/dev/null || true
@@ -141,6 +143,15 @@ table inet chv13vg {
   counter probe { }
   counter v6 { }
   counter other { }
+  counter rx_grp { }
+  counter rx_c { }
+  counter rx_d { }
+  chain input {
+    type filter hook input priority 0; policy accept;
+    ip daddr $GROUP udp dport $GPORT counter name "rx_grp"
+    ip saddr 192.168.77.4 ip daddr $GROUP counter name "rx_c"
+    ip saddr 192.168.77.5 ip daddr $GROUP counter name "rx_d"
+  }
   chain output {
     type filter hook output priority 0; policy accept;
     oifname "lo" accept
@@ -227,6 +238,9 @@ row_end() {
   local l
   for l in "${!NODE_REAL[@]}"; do node_kill "$l"; done
   NODE_REAL=(); NODE_WRAP=()
+  # захват tcpdump (если ещё ждёт маяк) и правила хоста c (snat) не переходят в следующую строку
+  if [[ -n "$CAP_PID" ]]; then kill "$CAP_PID" 2>/dev/null || true; { wait "$CAP_PID"; } 2>/dev/null || true; CAP_PID=""; fi
+  nsx c nft flush ruleset 2>/dev/null || true
   # адреса хостов возвращаются в исходные для следующей строки
   ipn a addr flush dev eth0 2>/dev/null || true; ipn a addr add 192.168.77.2/24 dev eth0 2>/dev/null || true
   ipn b addr flush dev eth0 2>/dev/null || true; ipn b addr add 192.168.77.3/24 dev eth0 2>/dev/null || true
@@ -313,26 +327,46 @@ row_lanoff() {
   fi
 }
 
-# Шлёт датаграммы на группу с хоста c: файл-образец, число секунд; печатает число отправленных.
-flood_from_c() { # payload secs
-  local n=0 end=$(( SECONDS + $2 ))
-  exec 7>"/dev/udp/$GROUP/$GPORT"
-  while (( SECONDS < end )); do
-    cat -- "$1" >&7
-    n=$(( n + 1 ))
-  done
-  exec 7>&-
-  echo "$n"
+# Счётчики хоста c (положительные контроли: без них строка не может быть PASS):
+# c_grp: его исходящие на группу; c_uni: его одноадресные на a:GPORT; unreach: входящие ICMP «порт недоступен».
+# Вызывать до загрузки правил snat (flush ruleset их сотрёт).
+c_nft_setup() {
+  nsx c nft flush ruleset 2>/dev/null || true
+  nsx c nft -f - <<NFT
+table inet chv13vc {
+  counter c_grp { }
+  counter c_uni { }
+  counter unreach { }
+  chain input { type filter hook input priority 0; policy accept; icmp type destination-unreachable counter name "unreach"; }
+  chain output {
+    type filter hook output priority 0; policy accept;
+    ip daddr $GROUP udp dport $GPORT counter name "c_grp"
+    ip daddr 192.168.77.2 udp dport $GPORT counter name "c_uni"
+  }
 }
+NFT
+}
+
+# Шлёт датаграммы на группу с хоста c: файл-образец, число секунд; печатает число отправленных.
+# ВСЁ внутри ns c (nsx): ни один пакет не выходит в корневое пространство имён хоста.
+flood_from_c() { # payload secs
+  nsx c bash -c 'exec 7>"/dev/udp/$0/$1"; end=$((SECONDS+$3)); n=0
+    while ((SECONDS<end)); do cat -- "$2" >&7; n=$((n+1)); done; echo "$n"' "$GROUP" "$GPORT" "$1" "$2"
+}
+
+# Число из файла счётчиков nft (пусто или нет такого: 0).
+cnt0() { local v; v="$(cnt "$1" "$2")"; echo "${v:-0}"; }
 
 row_stranger() {
   row_begin stranger
-  local f="" na nb t="" sent="" cap="$RD/replay.bin" replay=0
+  local f="" na nb t="" sent="" cap="$RD/replay.bin" replay=0 cf="" cg=0 rxc=0
   head -c 557 /dev/urandom > "$RD/rand.bin"
+  c_nft_setup
   if have tcpdump && have xxd; then
     # маяк a, снятый чужим хостом: байты после заголовков IP (20) и UDP (8)
     nsx c tcpdump -i eth0 -nn -c 1 -x "udp and dst host $GROUP and dst port $GPORT and src host 192.168.77.2" \
       > "$RD/cap.txt" 2>/dev/null &
+    CAP_PID=$!
   fi
   if ! befriend_ab --lan; then f+="not_connected_first "; fi
   if [[ -z "$f" ]]; then
@@ -351,10 +385,13 @@ row_stranger() {
     [[ "$(n_conn a)" -gt "$na" ]] || true
   fi
   f+="$(guard_fail a stra)$(guard_fail b strb)"
+  # положительные контроли: c действительно слал на группу (его счётчик), и b это принял (его счётчик)
+  cf="$(snap c strc)"; cg="$(cnt0 "$cf" c_grp)"; rxc="$(cnt0 "$RD/nft-strb.txt" rx_c)"
   row_end
   if [[ -n "${f// /}" ]]; then verdict STRANGER FAIL "$f"
-  elif [[ "$replay" != 1 ]]; then verdict STRANGER INCONCLUSIVE "поток прошёл (отправлено ${sent}), a и b не слали чужому ничего, но повтор маяка не выполнялся (нужны tcpdump и xxd)"
-  else verdict STRANGER PASS "поток ${sent} датаграмм и повтор маяка a с адреса c: a и b чужому ничего не слали (other = 0), соединение вернулось за ${t}s после потока"
+  elif [[ "$cg" -lt 1 || "$rxc" -lt 1 ]]; then verdict STRANGER INCONCLUSIVE "нет доказательства потока: c_grp=$cg, rx_c на b=$rxc (поток не дошёл до b или не отправлялся)"
+  elif [[ "$replay" != 1 ]]; then verdict STRANGER INCONCLUSIVE "поток дошёл до b (c_grp=$cg, rx_c=$rxc), a и b чужому ничего не слали, но повтор маяка не выполнялся (нужны tcpdump и xxd)"
+  else verdict STRANGER PASS "поток ${sent} датаграмм и повтор маяка a с адреса c (c_grp=$cg, у b rx_c=$rxc): a и b чужому ничего не слали (other = 0), соединение вернулось за ${t}s после потока"
   fi
 }
 
@@ -362,14 +399,15 @@ row_stranger() {
 # Маяк живёт только эпоху ±1 (около двух минут); если до повтора он устарел, строка INCONCLUSIVE.
 row_spoof() {
   row_begin spoof
-  local f="" cap="$RD/replay.bin" age0 age
+  local f="" cap="$RD/replay.bin" age0 age cf="" cg=0 rxd=0
   if ! have tcpdump || ! have xxd; then
-    RD="$LOGS/spoof"; mkdirs; mkdir -p "$RD"
     verdict SPOOF NOTRUN "нужны tcpdump и xxd"
     return 0
   fi
+  c_nft_setup
   nsx c tcpdump -i eth0 -nn -c 1 -x "udp and dst host $GROUP and dst port $GPORT and src host 192.168.77.2" \
     > "$RD/cap.txt" 2>/dev/null &
+  CAP_PID=$!
   if ! befriend_ab --lan; then f+="not_connected_first "; fi
   if [[ -z "$f" ]]; then
     age0=$SECONDS
@@ -396,10 +434,13 @@ NFT
     sleep 5
   fi
   f+="$(guard_fail b spoofb)"
+  # положительные контроли: c слал на группу, snat сработал (b принял датаграммы с адресом d)
+  cf="$(snap c spoofc)"; cg="$(cnt0 "$cf" c_grp)"; rxd="$(cnt0 "$RD/nft-spoofb.txt" rx_d)"
   row_end
-  if [[ "$f" == *beacon_too_old* || "$f" == *b_still_connected* ]]; then verdict SPOOF INCONCLUSIVE "$f (повторить)"
+  if [[ "$f" == *beacon_too_old* || "$f" == *b_still_connected* || "$f" == *no_beacon_captured* ]]; then verdict SPOOF INCONCLUSIVE "$f (повторить)"
   elif [[ -n "${f// /}" ]]; then verdict SPOOF FAIL "$f"
-  else verdict SPOOF PASS "маяк a с подменённым источником d: b не отправил d ни одного пакета (other = 0)"
+  elif [[ "$cg" -lt 1 || "$rxd" -lt 1 ]]; then verdict SPOOF INCONCLUSIVE "подмена не доказана: c_grp=$cg, rx_d на b=$rxd (snat не сработал или маяк не дошёл)"
+  else verdict SPOOF PASS "маяк a с подменённым источником d дошёл до b (rx_d=$rxd, c_grp=$cg): b не отправил d ни одного пакета (other = 0)"
   fi
 }
 
@@ -429,26 +470,23 @@ row_iface() {
 # Одноадресная датаграмма на порт поиска: ядро отвечает ICMP «порт недоступен» (сокет привязан к группе), a ничего больше не шлёт c.
 row_portscan() {
   row_begin portscan
-  local f="" u=0
+  local f="" u=0 cu=0
   if ! befriend_ab --lan; then f+="not_connected_first "; fi
-  nsx c nft flush ruleset 2>/dev/null || true
-  nsx c nft -f - <<NFT
-table inet chv13vc {
-  counter unreach { }
-  chain input { type filter hook input priority 0; policy accept; icmp type destination-unreachable counter name "unreach"; }
-}
-NFT
-  exec 8>"/dev/udp/192.168.77.2/$GPORT"
-  printf 'x' >&8
-  exec 8>&-
+  c_nft_setup
+  # одна одноадресная датаграмма из ns c (не из корневого пространства имён хоста)
+  nsx c bash -c 'exec 8>"/dev/udp/$0/$1"; printf x >&8' 192.168.77.2 "$GPORT"
   sleep 2
   nsx c nft list counters > "$RD/nft-c.txt"
-  u="$(cnt "$RD/nft-c.txt" unreach)"
-  [[ "${u:-0}" -ge 1 ]] || f+="c_got_no_icmp_unreachable "
+  u="$(cnt0 "$RD/nft-c.txt" unreach)"
+  cu="$(cnt0 "$RD/nft-c.txt" c_uni)"
+  [[ "$u" -ge 1 ]] || f+="c_got_no_icmp_unreachable "
   f+="$(guard_fail a psa)"
   row_end
-  if [[ -n "${f// /}" ]]; then verdict PORTSCAN FAIL "$f"
-  else verdict PORTSCAN PASS "одноадресный пакет на $GPORT: c получил ICMP port unreachable ($u), других пакетов c от a нет"
+  if [[ -n "${f// /}" ]]; then
+    if [[ "$cu" -lt 1 ]]; then verdict PORTSCAN INCONCLUSIVE "c ничего не отправил (c_uni=0): $f"
+    else verdict PORTSCAN FAIL "$f"
+    fi
+  else verdict PORTSCAN PASS "одноадресный пакет c -> a:$GPORT (c_uni=$cu): c получил ICMP port unreachable ($u), других пакетов a к c нет"
   fi
 }
 

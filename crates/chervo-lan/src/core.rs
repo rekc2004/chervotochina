@@ -151,10 +151,6 @@ pub struct LanCore {
     wanted: Vec<PairId>,
     active: bool,
     want_burst: bool,
-    /// `set_wanted` was called since the sockets were last wanted. Callers push local, peers and
-    /// wanted one call after another; a beacon between the calls must not freeze an empty
-    /// announced set for the whole epoch (the first `set_wanted` after activation re-freezes).
-    wanted_since_active: bool,
     ep: Option<EpochState>,
     table: Table,
     sched: Sched,
@@ -179,7 +175,6 @@ impl LanCore {
             wanted: Vec::new(),
             active: false,
             want_burst: false,
-            wanted_since_active: false,
             ep: None,
             table: Table::default(),
             sched: Sched::default(),
@@ -204,7 +199,6 @@ impl LanCore {
         let now_active = self.wants_sockets().is_some();
         if now_active && !self.active {
             self.want_burst = true;
-            self.wanted_since_active = false;
         }
         if !now_active {
             self.ep = None;
@@ -227,8 +221,8 @@ impl LanCore {
             return;
         }
         self.local = local;
-        // a new endpoint restarts the epoch state (spec D5, exception b)
-        self.ep = None;
+        // the epoch state stays: ids do not depend on the address (only the seal in `assemble`
+        // does), so a changed endpoint inside the epoch changes no id
         self.refresh_active();
         if self.active {
             self.want_burst = false;
@@ -265,15 +259,11 @@ impl LanCore {
         self.refresh_active();
     }
 
-    /// Pairs without a live connection; read when the next epoch is frozen.
+    /// Pairs without a live connection; read when the next epoch is frozen. Callers push this
+    /// BEFORE peers and local, so that it is known when the sockets are first wanted: a beacon
+    /// sent in between would otherwise freeze an empty announced set for the whole epoch.
     pub fn set_wanted(&mut self, wanted: Vec<PairId>) {
         self.wanted = wanted;
-        if !self.wanted_since_active {
-            // the epoch was frozen (if at all) before the caller said whom to announce: all
-            // ids are regenerated, so nothing separates real from filler ids
-            self.wanted_since_active = true;
-            self.ep = None;
-        }
     }
 
     /// Burst (start, user action). The rate cap applies when sending.
