@@ -19,6 +19,7 @@ mod keys;
 mod kk;
 mod knock;
 mod kx;
+mod lan;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod os;
 #[cfg(target_os = "linux")]
@@ -37,6 +38,10 @@ pub use kk::{
 };
 pub use knock::{KNOCK_ID_LABEL, KNOCK_KDF_LABEL, KNOCK_LEN, KNOCK_TAG_LABEL, KnockKeys};
 pub use kx::{KxPublicKey, PairKx};
+pub use lan::{
+    LAN_AAD_LABEL, LAN_FORMAT_VERSION, LAN_ID_KEY_LABEL, LAN_ID_LABEL, LAN_ID_LEN, LAN_NONCE_LEN,
+    LAN_SEAL_KEY_LABEL, LAN_SLOT_LEN, LanKeys,
+};
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 pub use os::OsKeyStore;
 #[cfg(target_os = "linux")]

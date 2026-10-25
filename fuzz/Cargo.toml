@@ -21,6 +21,8 @@ chervo-receive = { path = "../crates/chervo-receive", features = ["fuzzing"] }
 chervo-identity = { path = "../crates/chervo-identity" }
 chervo-upnp = { path = "../crates/chervo-upnp", features = ["fuzzing"] }
 chervo-transport-quinn = { path = "../crates/chervo-transport-quinn", features = ["fuzzing"] }
+# Stage 13v: LAN beacon parser.
+chervo-lan = { path = "../crates/chervo-lan", features = ["fuzzing"] }
 
 [workspace]
 members = ["."]
@@ -159,6 +161,13 @@ bench = false
 [[bin]]
 name = "transfer_names_file"
 path = "fuzz_targets/transfer_names_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lan_beacon"
+path = "fuzz_targets/lan_beacon.rs"
 test = false
 doc = false
 bench = false

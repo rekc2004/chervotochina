@@ -153,6 +153,7 @@ name = "chervo-addr"
 version = "0.0.0"
 dependencies = [
  "chervo-identity",
+ "zeroize",
 ]
 
 [[package]]
@@ -212,6 +213,7 @@ version = "0.0.0"
 dependencies = [
  "apple-native-keyring-store",
  "blake2",
+ "chacha20poly1305",
  "curve25519-dalek 5.0.0",
  "ed25519-dalek",
  "futures-core",
@@ -222,6 +224,17 @@ dependencies = [
  "windows-native-keyring-store",
  "x25519-dalek",
  "zbus",
+ "zeroize",
+]
+
+[[package]]
+name = "chervo-lan"
+version = "0.0.0"
+dependencies = [
+ "chervo-addr",
+ "chervo-identity",
+ "getrandom 0.4.3",
+ "socket2",
  "zeroize",
 ]
 
