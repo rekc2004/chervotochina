@@ -162,6 +162,29 @@ fn wanted_frozen_per_epoch() {
     assert_eq!(opened(&k2, &b3, UNIX + 60, *SEND.ip()).len(), 1);
 }
 
+/// The caller pushes peers and wanted one call after another; a beacon sent in between must not
+/// leave the epoch without the real slot (found by `loopback_two_links_find_each_other`).
+#[test]
+fn wanted_set_right_after_activation_applies() {
+    let fx = pair();
+    let mut c = LanCore::new(CoreConfig::default());
+    c.set_local(Some(SEND), Duration::ZERO);
+    c.set_peers(vec![fx.peer_b().unwrap()]);
+    let keys = fx.peer_a().unwrap().keys;
+    // a beacon goes out before set_wanted: fillers only
+    let b0 = c.poll_send(Duration::ZERO, UNIX).unwrap();
+    assert!(opened(&keys, &b0, UNIX, *SEND.ip()).is_empty());
+    // the first set_wanted re-freezes the epoch: the next beacon carries the real slot
+    c.set_wanted(vec![fx.pair]);
+    let b1 = force_beacon(&mut c, secs(1), UNIX + 1);
+    assert_eq!(opened(&keys, &b1, UNIX + 1, *SEND.ip()), vec![SEND.port()]);
+    // later changes inside the epoch still do not alter the announced set
+    c.set_wanted(vec![]);
+    let b2 = force_beacon(&mut c, secs(2), UNIX + 2);
+    assert_eq!(opened(&keys, &b2, UNIX + 2, *SEND.ip()).len(), 1);
+    assert_eq!(ids(&b1), ids(&b2));
+}
+
 #[test]
 fn removed_peer_dropped_immediately() {
     let fx1 = pair();

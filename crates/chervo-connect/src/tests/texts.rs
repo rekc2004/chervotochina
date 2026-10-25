@@ -3,8 +3,9 @@
 use chervo_friends::FriendsError;
 
 use crate::{
-    Clock, DOUBLE_NAT_TEXT, NoDirectPath, PEER_UNREACHABLE_INVITE_TEXT, REVOCATION_FAILED_TEXT,
-    REVOCATION_NOT_SENT_TEXT, SystemClock, revocation_error_text, user_text,
+    Clock, DOUBLE_NAT_TEXT, LAN_DISCOVERY_TEXT, LAN_FIRST_RUN_TEXT, NoDirectPath,
+    PEER_UNREACHABLE_INVITE_TEXT, REVOCATION_FAILED_TEXT, REVOCATION_NOT_SENT_TEXT, SystemClock,
+    revocation_error_text, user_text,
 };
 
 fn has_cyrillic(s: &str) -> bool {
@@ -28,6 +29,8 @@ fn texts_present() {
         REVOCATION_NOT_SENT_TEXT,
         REVOCATION_FAILED_TEXT,
         PEER_UNREACHABLE_INVITE_TEXT,
+        LAN_DISCOVERY_TEXT,
+        LAN_FIRST_RUN_TEXT,
     ]);
     for t in &all {
         assert!(!t.is_empty());

@@ -34,14 +34,30 @@ fn clock_fixed() -> Arc<dyn Fn() -> u64 + Send + Sync> {
     Arc::new(|| FIX_UNIX)
 }
 
-/// Two free loopback ports (held together so they differ, released before use).
+/// A loopback port for a link. Not taken from the OS ephemeral range (other tests bind port 0 and
+/// would be handed a port released a moment ago): a private counter in 30000-39999, started at
+/// a different place in every process, skipping ports that are busy right now.
+fn free_port() -> u16 {
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: OnceLock<AtomicU32> = OnceLock::new();
+    let next = NEXT.get_or_init(|| {
+        let seed = std::process::id()
+            .wrapping_mul(2_654_435_761)
+            .wrapping_add(real_unix() as u32);
+        AtomicU32::new(seed % 10_000)
+    });
+    loop {
+        let p = 30_000 + u16::try_from(next.fetch_add(1, Ordering::SeqCst) % 10_000).unwrap();
+        if UdpSocket::bind(lo(p)).is_ok() {
+            return p;
+        }
+    }
+}
+
+/// Two distinct free loopback ports.
 fn free_ports() -> (u16, u16) {
-    let a = UdpSocket::bind(lo(0)).unwrap();
-    let b = UdpSocket::bind(lo(0)).unwrap();
-    (
-        a.local_addr().unwrap().port(),
-        b.local_addr().unwrap().port(),
-    )
+    (free_port(), free_port())
 }
 
 fn unicast_link(
@@ -99,7 +115,16 @@ fn loopback_two_links_find_each_other() {
         found_b.extend(lb.take_found());
         !found_a.is_empty() && !found_b.is_empty()
     });
-    assert!(ok, "a: {} b: {}", found_a.len(), found_b.len());
+    assert!(
+        ok,
+        "a: {} b: {} status a {:?} b {:?} stats a {:?} b {:?}",
+        found_a.len(),
+        found_b.len(),
+        la.status(),
+        lb.status(),
+        la.stats(),
+        lb.stats()
+    );
     assert_eq!(found_a[0].pair, fx.pair);
     assert_eq!(found_a[0].addr, lo(41_002));
     assert_eq!(found_b[0].addr, lo(41_001));

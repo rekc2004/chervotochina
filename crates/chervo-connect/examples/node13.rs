@@ -13,7 +13,10 @@
 //! вместо 600 с, только для стенда), `--invite-addr
 //! IP:PORT` (адрес приглашения вручную вместо `Auto`), `--sas-auto-confirm`,
 //! `--expect-connected N --deadline S` (ждать N соединённых друзей не дольше S секунд),
-//! `--hold S` (после выполнения остаться ещё S секунд для действий стенда).
+//! `--hold S` (после выполнения остаться ещё S секунд для действий стенда),
+//! `--lan` (этап 13в: запустить поиск в LAN и подключить его к движку после запуска),
+//! `--expect-path lan` (ожидание выполнено, только если все соединённые друзья пришли по
+//! пути LAN; других значений нет).
 //! Выход: 0 — ожидание выполнено, 1 — нет, 2 — ошибка запуска или аргументов.
 
 use std::collections::{HashMap, HashSet};
@@ -24,8 +27,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chervo_connect::{
-    AllowSet, Clock, ConnectConfig, ConnectError, Engine, EngineEvent, InviteAddrs, RouteProbe,
-    SystemClock, SystemProbe,
+    AllowSet, Clock, ConnectConfig, ConnectError, Engine, EngineEvent, InviteAddrs, PathKind,
+    RouteProbe, SystemClock, SystemProbe,
 };
 use chervo_friends::FriendBook;
 use chervo_identity::{IdentityError, ListKeyStore, PairId, SecretStore};
@@ -93,6 +96,8 @@ struct Args {
     expect: usize,
     deadline: Duration,
     hold: Duration,
+    lan: bool,
+    expect_path: Option<PathKind>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -108,6 +113,8 @@ fn parse_args() -> Result<Args, String> {
         expect: 0,
         deadline: Duration::from_secs(60),
         hold: Duration::ZERO,
+        lan: false,
+        expect_path: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
@@ -137,6 +144,13 @@ fn parse_args() -> Result<Args, String> {
                     Duration::from_secs(val("--deadline")?.parse().map_err(|_| "--deadline")?);
             }
             "--hold" => a.hold = Duration::from_secs(val("--hold")?.parse().map_err(|_| "--hold")?),
+            "--lan" => a.lan = true,
+            "--expect-path" => {
+                a.expect_path = match val("--expect-path")?.as_str() {
+                    "lan" => Some(PathKind::Lan),
+                    _ => return Err("--expect-path: only `lan` is known".to_owned()),
+                };
+            }
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -178,6 +192,9 @@ fn print_state(engine: &Eng, pairs: &mut Vec<PairId>, connected: &HashSet<PairId
         connected.len(),
         engine.nat_view()
     );
+    if let Some(s) = engine.lan_status() {
+        line.push_str(&format!(" lan={s:?}"));
+    }
     for (p, addrs) in friends {
         let i = index_of(pairs, p);
         let list: Vec<String> = addrs.iter().map(ToString::to_string).collect();
@@ -221,6 +238,7 @@ async fn main() -> ExitCode {
         }
     };
     let clock: Arc<dyn Clock> = Arc::new(SystemClock::new());
+    let lan_clock = clock.clone();
     let probe: Arc<dyn RouteProbe> = Arc::new(SystemProbe);
     let mut cfg = ConnectConfig {
         manual_forward: args.forward,
@@ -235,6 +253,13 @@ async fn main() -> ExitCode {
         eprintln!("node13: engine");
         return ExitCode::from(2);
     };
+    if args.lan {
+        // поиск в LAN: часы те же, что у движка (с поправкой пользователя)
+        let lan_clock = lan_clock.clone();
+        let link = chervo_lan::LanDiscovery::start(Arc::new(move || lan_clock.now_unix()));
+        let attached = engine.attach_lan(link);
+        println!("EVENT lan_attached ok={}", attached.is_ok());
+    }
     println!(
         "EVENT started listen_port={}",
         transport.local_addrs().first().map_or(0, SocketAddr::port)
@@ -244,6 +269,7 @@ async fn main() -> ExitCode {
     let give_up = t0 + args.deadline;
     let mut pairs: Vec<PairId> = Vec::new();
     let mut connected: HashSet<PairId> = HashSet::new();
+    let mut paths: HashMap<PairId, PathKind> = HashMap::new();
     let mut in_next = 0usize;
     let mut out_next = 0usize;
     let mut met_at: Option<Instant> = None;
@@ -257,10 +283,12 @@ async fn main() -> ExitCode {
                 match ev {
                     EngineEvent::Connected { pair, path } => {
                         connected.insert(pair);
+                        paths.insert(pair, path);
                         println!("EVENT connected pair=#{} path={path:?}", index_of(&mut pairs, pair));
                     }
                     EngineEvent::Disconnected { pair } => {
                         connected.remove(&pair);
+                        paths.remove(&pair);
                         println!("EVENT disconnected pair=#{}", index_of(&mut pairs, pair));
                     }
                     EngineEvent::SasReady { pair, .. } => {
@@ -325,7 +353,10 @@ async fn main() -> ExitCode {
         }
         let ready = in_next >= args.invite_in.len()
             && out_next >= args.invite_out.len()
-            && connected.len() >= args.expect;
+            && connected.len() >= args.expect
+            && args
+                .expect_path
+                .is_none_or(|want| connected.iter().all(|p| paths.get(p) == Some(&want)));
         if ready && met_at.is_none() {
             met_at = Some(Instant::now());
             println!(

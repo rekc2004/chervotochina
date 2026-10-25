@@ -24,6 +24,7 @@ mod engine;
 mod gateway;
 mod inbox;
 mod invite;
+mod lan;
 mod limiter;
 mod plan;
 mod texts;
@@ -40,7 +41,8 @@ pub use engine::{ConnectError, Engine, EngineEvent, EngineEvents, InviteAddrs, I
 pub use inbox::{ConnHold, IncomingStream, StreamInbox};
 pub use plan::PathKind;
 pub use texts::{
-    CGNAT_TEXT, DOUBLE_NAT_TEXT, NO_IPV6_TEXT, NO_KNOWN_ADDRESS_TEXT, PEER_UNREACHABLE_INVITE_TEXT,
-    REVOCATION_FAILED_TEXT, REVOCATION_NOT_SENT_TEXT, SYMMETRIC_TEXT, UDP_BLOCKED_TEXT,
-    UNKNOWN_TEXT, revocation_error_text, user_text,
+    CGNAT_TEXT, DOUBLE_NAT_TEXT, LAN_DISCOVERY_TEXT, LAN_FIRST_RUN_TEXT, NO_IPV6_TEXT,
+    NO_KNOWN_ADDRESS_TEXT, PEER_UNREACHABLE_INVITE_TEXT, REVOCATION_FAILED_TEXT,
+    REVOCATION_NOT_SENT_TEXT, SYMMETRIC_TEXT, UDP_BLOCKED_TEXT, UNKNOWN_TEXT,
+    revocation_error_text, user_text,
 };

@@ -9,9 +9,9 @@ mod redact_kit;
 
 use chervo_connect::{
     AllowSet, CGNAT_TEXT, ClockRangeError, ConnectConfig, ConnectError, DOUBLE_NAT_TEXT, Diagnosis,
-    NO_IPV6_TEXT, NO_KNOWN_ADDRESS_TEXT, NoDirectPath, PEER_UNREACHABLE_INVITE_TEXT,
-    REVOCATION_FAILED_TEXT, REVOCATION_NOT_SENT_TEXT, SYMMETRIC_TEXT, SystemClock,
-    UDP_BLOCKED_TEXT, UNKNOWN_TEXT, user_text,
+    LAN_DISCOVERY_TEXT, LAN_FIRST_RUN_TEXT, NO_IPV6_TEXT, NO_KNOWN_ADDRESS_TEXT, NoDirectPath,
+    PEER_UNREACHABLE_INVITE_TEXT, REVOCATION_FAILED_TEXT, REVOCATION_NOT_SENT_TEXT, SYMMETRIC_TEXT,
+    SystemClock, UDP_BLOCKED_TEXT, UNKNOWN_TEXT, user_text,
 };
 use chervo_friends::FriendsError;
 use chervo_identity::PairId;
@@ -114,4 +114,33 @@ fn connect_errors_have_fixed_text() {
             "IP-литерал в тексте: {t}"
         );
     }
+}
+
+#[test]
+fn lan_types_hide_addresses_and_pairs() {
+    use chervo_addr::{LanFound, LanStatus};
+    let pair = PairId::from_bytes([0x66; 16]);
+    let found = LanFound {
+        pair,
+        addr: "192.168.77.13:41234".parse().unwrap(),
+    };
+    let mut out = Out::new();
+    out.dbg("LanFound", &found);
+    for s in [
+        LanStatus::Off,
+        LanStatus::NoPeers,
+        LanStatus::NoLan,
+        LanStatus::Unavailable,
+        LanStatus::Running,
+    ] {
+        out.dbg("LanStatus", &s);
+    }
+    out.rec("LAN_DISCOVERY_TEXT", LAN_DISCOVERY_TEXT.to_owned());
+    out.rec("LAN_FIRST_RUN_TEXT", LAN_FIRST_RUN_TEXT.to_owned());
+    let mut n = Needles::new();
+    n.bytes("pair", pair.as_bytes());
+    n.add("lan ip", "192.168.77.13");
+    n.add("lan port", "41234");
+    check(&out, &n);
+    assert_eq!(format!("{found:?}"), "LanFound(..)");
 }

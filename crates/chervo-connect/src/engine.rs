@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::future::Future;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, SocketAddrV4};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -31,6 +31,7 @@ use crate::diag::{Diagnosis, NoDirectPath};
 use crate::gateway::Gateway;
 use crate::inbox::IncomingStream;
 use crate::invite::Invite;
+use crate::lan::{LanSlot, prepend_hint};
 use crate::limiter::{Limiter, add_sat};
 use crate::plan::{Candidate, PathKind, friend_plan_confirmed, guest_plan, path_kind, select};
 
@@ -238,6 +239,8 @@ pub(crate) struct State<C> {
     /// S2, L4: `EngineEvent::Internal` по неудаче публикации уже выдан в текущей серии неудач
     /// (повтор каждые 5 с его не повторяет); сбрасывается успешной публикацией.
     pub(crate) publish_internal_reported: bool,
+    /// 13в: подсказки поиска в LAN (одна на пару, только в памяти, не в книге). Пишет только `lan.rs`.
+    pub(crate) lan_hints: HashMap<PairId, (SocketAddrV4, Instant)>,
 }
 
 /// Через сколько `tick` повторяет неудавшуюся публикацию набора пар.
@@ -256,6 +259,7 @@ pub(crate) struct Inner<T: ManagedTransport, S> {
     pub(crate) shut: AtomicBool,
     pub(crate) tasks: Mutex<Vec<JoinHandle<()>>>,
     pub(crate) gw: Gateway,
+    pub(crate) lan: LanSlot,
     /// Зарегистрированные виды потоков -> отправитель в приёмник. Замок листовой: берётся
     /// отдельно от `state`, не вместе с ним.
     pub(crate) kinds: Mutex<HashMap<u8, mpsc::Sender<IncomingStream<T::Conn>>>>,
@@ -359,6 +363,8 @@ where
         }
         // отправители приёмников снимаются: `StreamInbox::recv` вернёт `None`
         self.kinds_lock().clear();
+        // 13в: поиск в LAN закрывается вместе с движком
+        self.lan_detach();
     }
 
     // ---------------------------------------------------------------- публикация
@@ -696,7 +702,9 @@ where
                         .get(&pair)
                         .map(|f| confirmed_addrs(&f.known_addrs, unix))
                         .unwrap_or_default();
-                    friend_plan_confirmed(&st.book.usable_known(&pair, unix), &confirmed, local)
+                    let entries =
+                        prepend_hint(st, &pair, now, unix, st.book.usable_known(&pair, unix));
+                    friend_plan_confirmed(&entries, &confirmed, local)
                 }
             };
             if plan.cands.is_empty() {
@@ -1112,6 +1120,7 @@ where
             publish_retry_at: None,
             published: Vec::new(),
             publish_internal_reported: false,
+            lan_hints: HashMap::new(),
         };
         let inner = Arc::new(Inner {
             transport,
@@ -1126,6 +1135,7 @@ where
             shut: AtomicBool::new(false),
             tasks: Mutex::new(Vec::new()),
             gw: Gateway::new(),
+            lan: LanSlot::default(),
             kinds: Mutex::new(HashMap::new()),
         });
         let transport_events = inner.transport.subscribe();
@@ -1181,6 +1191,9 @@ where
             rt.last_conn_at = None;
         }
         self.inner.start_fast_pair(&mut st, *pair, now);
+        drop(st);
+        // 13в: серия маяков поиска в LAN по действию пользователя
+        self.inner.lan_trigger();
         Ok(())
     }
 

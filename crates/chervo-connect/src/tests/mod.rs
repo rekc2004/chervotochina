@@ -17,6 +17,7 @@ mod gateway;
 mod inbox;
 mod invite;
 mod kit;
+mod lan;
 mod limiter;
 mod manual_token;
 mod publish;

@@ -115,7 +115,13 @@ fn src_guard() {
     assert!(count("reporter_down(", "engine.rs") >= 1);
     // проба маршрута к цели (сокетный код) вызывается только из `clock.rs`
     assert!(count("route_source_for(", "clock.rs") >= 1);
+    // 13в: найденное в LAN читается и становится подсказкой только в `lan.rs`; подсказка в
+    // книгу не пишется (`AddrSource::Lan` и запись в карту подсказок только там)
+    assert!(count("take_found(", "lan.rs") >= 1);
+    assert!(count("AddrSource::Lan", "lan.rs") >= 1);
+    assert!(count("lan_hints.insert", "lan.rs") >= 1);
     // положительный контроль: охрана видит нужные файлы
+    assert!(engine.iter().any(|s| s.rel == "lan.rs"));
     assert!(engine.iter().any(|s| s.rel == "watch.rs"));
     assert!(engine.iter().any(|s| s.rel == "addrinfo.rs"));
     assert!(engine.iter().any(|s| s.rel == "gateway.rs"));
@@ -128,6 +134,19 @@ fn src_guard() {
     for w in ["upnp", "igd", "socket2", "mio", "hyper"] {
         assert!(!manifest.contains(w), "Cargo.toml contains {w}");
     }
+    // 13в: поиск в LAN приходит только как `Arc<dyn LanLink>`; крейт сетевой части нужен лишь
+    // тестам (в обычных зависимостях его нет)
+    let (normal, dev) = manifest
+        .split_once("[dev-dependencies]")
+        .expect("Cargo.toml has [dev-dependencies]");
+    assert!(
+        !normal.contains("chervo-lan"),
+        "chervo-lan in [dependencies]"
+    );
+    assert!(
+        dev.contains("chervo-lan"),
+        "the guard sees the dev-dependency"
+    );
 }
 
 // ----------------------------------------------------------------------------------------
