@@ -4,7 +4,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
@@ -19,10 +19,10 @@ use crate::events::{
 use crate::fsio::verify_blocks;
 use crate::hash::{BlockHash, FileRoot, file_root};
 use crate::layout::{Layout, layout};
-use crate::limits::STREAM_TRANSFER_CTL;
+use crate::limits::{MAX_OFFER_RELINKS, STREAM_TRANSFER_CTL};
 use crate::links::Links;
 use crate::liveness::{Liveness, idle_limit, stall_limit};
-use crate::names::{TransferKey, UntrustedName};
+use crate::names::{OfferedFile, TransferKey, UntrustedName};
 use crate::paths::{
     create_part_new, ensure_part, placing_present, remove_hashes, remove_part_and_hashes,
     remove_part_strict, remove_placing_strict, remove_session, session_dir, write_hashes,
@@ -196,6 +196,11 @@ pub(crate) struct RecvSession {
     answer: Mutex<Option<oneshot::Sender<bool>>>,
     /// Блокирующие задачи сессии (итоговая проверка, подготовка файлов).
     pub(crate) jobs: Tracker,
+    /// Предел жизни ожидающего предложения: первое появление + `offer_ttl`. Повтор предложения
+    /// его не продлевает.
+    pub(crate) offer_deadline: tokio::time::Instant,
+    /// Сколько повторов предложения принято (`MAX_OFFER_RELINKS`).
+    relinks: AtomicU8,
 }
 
 fn share_for(sh: &Shared, sizes: &[u64]) -> Arc<Semaphore> {
@@ -225,6 +230,7 @@ impl RecvSession {
         total: u64,
         answer: oneshot::Sender<bool>,
     ) -> Arc<Self> {
+        let offer_ttl = sh.cfg.offer_ttl;
         let sizes: Vec<u64> = files.iter().map(|f| f.1).collect();
         let names: Vec<UntrustedName> = files.into_iter().map(|f| f.0).collect();
         let runs = sizes.iter().map(|_| Run::Waiting(None)).collect();
@@ -265,6 +271,8 @@ impl RecvSession {
             end: Stop::new(),
             answer: Mutex::new(Some(answer)),
             jobs: Tracker::new(),
+            offer_deadline: tokio::time::Instant::now() + offer_ttl,
+            relinks: AtomicU8::new(0),
         })
     }
 
@@ -317,6 +325,8 @@ impl RecvSession {
             end: Stop::new(),
             answer: Mutex::new(None),
             jobs: Tracker::new(),
+            offer_deadline: tokio::time::Instant::now(),
+            relinks: AtomicU8::new(0),
         })
     }
 
@@ -348,8 +358,37 @@ impl RecvSession {
         Ok(base)
     }
 
+    /// Повтор предложения побайтно совпадает с исходным: счётчики заголовка и каждая запись
+    /// `(имя, размер)` по порядку (границы кадров не важны).
+    pub(crate) fn same_offer(&self, head: (u32, u64, u32), files: &[OfferedFile]) -> bool {
+        let bytes = self.names.iter().fold(0u64, |a, n| {
+            a.saturating_add(10)
+                .saturating_add(u64::try_from(n.len()).unwrap_or(u64::MAX))
+        });
+        head.0 == self.file_count()
+            && head.1 == self.total
+            && u64::from(head.2) == bytes
+            && files.len() == self.names.len()
+            && files.len() == self.sizes.len()
+            && files
+                .iter()
+                .zip(self.names.iter().zip(self.sizes.iter()))
+                .all(|(f, (n, size))| f.name == *n && f.size == *size)
+    }
+
+    /// Считает принятый повтор предложения. `false`: уже больше `MAX_OFFER_RELINKS`.
+    pub(crate) fn count_relink(&self) -> bool {
+        let prev = self
+            .relinks
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                Some(n.saturating_add(1))
+            })
+            .unwrap_or(u8::MAX);
+        prev < MAX_OFFER_RELINKS
+    }
+
     /// Предложение принято (ответ взят), а передача ещё не стала `Active`.
-    fn answered(&self) -> bool {
+    pub(crate) fn answered(&self) -> bool {
         lock(&self.answer).is_none()
     }
 
@@ -963,7 +1002,16 @@ pub(crate) struct FirstCtl<C: Connection> {
     pub(crate) rx: Rx<C>,
 }
 
-async fn is_closed<C: Connection>(c: &C) -> bool {
+/// Повтор предложения, прошедший сборку и сверку: поток управления, который отправитель
+/// открыл заново. Уходит в `pending_task` ожидающего предложения.
+pub(crate) struct Reoffer<C: Connection> {
+    pub(crate) conn: C,
+    pub(crate) tx: Tx<C>,
+    pub(crate) rx: Rx<C>,
+    pub(crate) buf: Vec<u8>,
+}
+
+pub(crate) async fn is_closed<C: Connection>(c: &C) -> bool {
     timeout(std::time::Duration::ZERO, c.closed()).await.is_ok()
 }
 

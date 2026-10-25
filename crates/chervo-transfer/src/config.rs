@@ -6,6 +6,10 @@ use std::time::Duration;
 use crate::events::TransferError;
 use crate::limits::MAX_BLOCK;
 
+/// Вопрос владельцу Q1 (этап 14б): сколько предложение ждёт возврата связи. Принято 2 минуты
+/// (рекомендация спецификации); меняется одной этой константой.
+const DEFAULT_OFFER_RELINK_GRACE: Duration = Duration::from_secs(120);
+
 #[derive(Clone)]
 pub struct TransferConfig {
     /// Абсолютный существующий каталог. Внутри создаются только подкаталоги со служебными
@@ -50,6 +54,9 @@ pub struct TransferConfig {
     /// Получатель: наименьшая средняя скорость хэширования у отправителя (байт/с), которую он
     /// терпит, ожидая HASH_PROGRESS. Ниже: пауза `Stalled`.
     pub min_hash_rate: u64,
+    /// Сколько ожидающее ответа предложение терпит отсутствие рабочего соединения (у отправителя
+    /// и у получателя). Допустимо от 1 с до `offer_ttl`.
+    pub offer_relink_grace: Duration,
 }
 
 impl TransferConfig {
@@ -80,6 +87,7 @@ impl TransferConfig {
             progress_interval: Duration::from_millis(250),
             min_block_rate: 32 << 10,
             min_hash_rate: 8 << 20,
+            offer_relink_grace: DEFAULT_OFFER_RELINK_GRACE,
         }
     }
 
@@ -107,6 +115,8 @@ impl TransferConfig {
             && !self.offer_read_timeout.is_zero()
             && !self.msg_timeout.is_zero()
             && !self.offer_ttl.is_zero()
+            && self.offer_relink_grace >= Duration::from_secs(1)
+            && self.offer_relink_grace <= self.offer_ttl
             && !self.stall_timeout.is_zero()
             && !self.resume_hold.is_zero()
             && !self.checkpoint_interval.is_zero();

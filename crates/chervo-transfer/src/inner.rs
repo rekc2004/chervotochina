@@ -5,14 +5,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chervo_identity::PairId;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 
 use crate::events::PauseReason;
 use crate::links::Links;
 use crate::names::TransferKey;
 use crate::policy::{AcceptPolicy, InboundReservation, OfferView};
-use crate::receiver::{RPhase, RecvSession};
+use crate::receiver::{RPhase, RecvSession, Reoffer};
 use crate::sender::SendSession;
 use crate::shared::{Shared, lock};
 
@@ -23,6 +23,19 @@ pub(crate) struct Registry {
     /// Недавние потоки управления от каждого друга (для предела в минуту).
     pub(crate) ctl_recent: HashMap<PairId, VecDeque<Instant>>,
 }
+
+/// Окончательный ответ на ожидавшее предложение, который отправитель мог не получить.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Tomb {
+    Decline,
+    Expired,
+    Busy,
+    Limits,
+    Protocol,
+}
+
+/// Сколько надгробие живёт сверх `offer_relink_grace`.
+const TOMB_EXTRA: Duration = Duration::from_secs(30);
 
 pub(crate) struct Inner<L: Links> {
     pub(crate) sh: Arc<Shared>,
@@ -36,6 +49,12 @@ pub(crate) struct Inner<L: Links> {
     /// Решения о предложениях принимаются по одному: политика видит резерв места всех уже
     /// принятых передач, а принятое предложение сразу попадает в этот резерв (Рев. 5).
     pub(crate) decide_lock: Mutex<()>,
+    /// Каналы повторов для ожидающих предложений (ёмкость 1). Запись есть, только пока идёт
+    /// `pending_task`. Замок берётся после `reg`, никогда до него.
+    pub(crate) relink: Mutex<HashMap<TransferKey, mpsc::Sender<Reoffer<L::Conn>>>>,
+    /// Надгробия: ответ на предложение, который отправитель мог не получить. Не больше
+    /// `max_pending_offers`, живут `offer_relink_grace + 30 с`. Замок берётся после `reg`.
+    pub(crate) tombs: Mutex<VecDeque<(TransferKey, Tomb, Instant)>>,
 }
 
 impl<L: Links> Inner<L> {
@@ -70,6 +89,39 @@ impl<L: Links> Inner<L> {
 
     pub(crate) fn remove_inb(&self, key: &TransferKey) {
         lock(&self.reg).inb.remove(key);
+    }
+
+    /// Снимает ожидающее предложение и пишет надгробие под одним замком `reg`: повтор не
+    /// увидит промежуток между ними и не получит новое окно решения.
+    pub(crate) fn remove_inb_tomb(&self, key: &TransferKey, tomb: Tomb) {
+        let mut reg = lock(&self.reg);
+        reg.inb.remove(key);
+        let now = Instant::now();
+        let until = now + self.sh.cfg.offer_relink_grace + TOMB_EXTRA;
+        let mut t = lock(&self.tombs);
+        t.retain(|(k, _, u)| *u > now && k != key);
+        while t.len() >= self.sh.cfg.max_pending_offers {
+            t.pop_front();
+        }
+        t.push_back((*key, tomb, until));
+    }
+
+    /// Надгробие ключа, если оно ещё действует (просроченные убираются при обращении).
+    pub(crate) fn tomb_get(&self, key: &TransferKey) -> Option<Tomb> {
+        let now = Instant::now();
+        let mut t = lock(&self.tombs);
+        t.retain(|(_, _, u)| *u > now);
+        t.iter().find(|(k, _, _)| k == key).map(|(_, v, _)| *v)
+    }
+
+    /// Ключ известен: есть сессия или действующее надгробие (подсказка для разбора ошибок
+    /// сборки; решение принимается позже под замком `reg`).
+    pub(crate) fn is_known(&self, key: &TransferKey) -> bool {
+        lock(&self.reg).inb.contains_key(key) || self.tomb_get(key).is_some()
+    }
+
+    pub(crate) fn unreg_relink(&self, key: &TransferKey) {
+        lock(&self.relink).remove(key);
     }
 
     pub(crate) fn bump(&self) {

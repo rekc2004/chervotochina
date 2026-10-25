@@ -20,6 +20,7 @@ mod kit;
 mod liveness;
 mod place;
 mod redaction;
+mod relink;
 mod reserve;
 mod resume;
 mod round2;

@@ -50,7 +50,7 @@ use chervo_transfer::{
     AskAlways, CompletedFile, PlaceError, Placed, Placement, SourceFile, TransferConfig,
     TransferEvent, TransferEvents, TransferKey, Transfers,
 };
-use chervo_transport::{PeerFilter, Transport};
+use chervo_transport::{Connection, PeerFilter, Transport};
 use chervo_transport_quinn::{QuinnConfig, QuinnTransport};
 use common::{Tmp, tree};
 use redact_kit::{Needles, b32, b64, scan};
@@ -348,6 +348,41 @@ async fn wait_conn(engine: &Eng, pair: &PairId, secs: u64) -> bool {
     false
 }
 
+/// Связь с другом устойчива: она есть, не закрыта, и на каждом опросе (50 мс) в течение 1,5 с
+/// это одно и то же соединение. Оба движка звонят друг другу в один такт, и одно из двух
+/// соединений закрывается как дубль через несколько миллисекунд после публикации; отправка
+/// сразу после первой публикации попадала в это окно (этап 14б, отчёт о флаке).
+/// `CHERVO_NOLEAKS_NO_SETTLE=1`: ждать только первого попавшегося соединения, как раньше. Это
+/// проверка продуктовой правки (повтор предложения) на настоящем стеке без ожидания в тесте.
+async fn wait_stable_conn(engine: &Eng, pair: &PairId, secs: u64) -> bool {
+    let no_settle = std::env::var("CHERVO_NOLEAKS_NO_SETTLE").as_deref() == Ok("1");
+    let end = tokio::time::Instant::now() + Duration::from_secs(secs);
+    let mut seen: Option<(u64, tokio::time::Instant)> = None;
+    while tokio::time::Instant::now() < end {
+        match engine.connection(pair) {
+            Some(_) if no_settle => return true,
+            Some(c)
+                if tokio::time::timeout(Duration::ZERO, c.closed())
+                    .await
+                    .is_err() =>
+            {
+                let id = c.conn_id();
+                match seen {
+                    Some((sid, since)) if sid == id => {
+                        if since.elapsed() >= Duration::from_millis(1500) {
+                            return true;
+                        }
+                    }
+                    _ => seen = Some((id, tokio::time::Instant::now())),
+                }
+            }
+            _ => seen = None,
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
 fn unix_now() -> u64 {
     SystemClock::new().now_unix()
 }
@@ -514,8 +549,14 @@ async fn no_leaks_full_scenario() {
             _ => unreachable!(),
         }
     }
-    assert!(wait_conn(&x.engine, &pa, 30).await, "X not connected to Y");
-    assert!(wait_conn(&y.engine, &pb, 30).await, "Y not connected to X");
+    assert!(
+        wait_stable_conn(&x.engine, &pa, 30).await,
+        "X not connected to Y"
+    );
+    assert!(
+        wait_stable_conn(&y.engine, &pb, 30).await,
+        "Y not connected to X"
+    );
 
     // возвращаемые значения соединения
     for (n, p, l) in [(&x, pa, "X"), (&y, pb, "Y")] {

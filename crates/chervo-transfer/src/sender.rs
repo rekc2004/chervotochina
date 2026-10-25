@@ -21,10 +21,12 @@ use crate::events::{
 use crate::fsio::{ReadFail, hash_source, read_source_block};
 use crate::hash::{BlockHash, FileRoot, leaf_hash};
 use crate::layout::{Layout, block_len, layout};
-use crate::limits::{HASH_PROGRESS_INTERVAL, MAX_MESSAGE_LEN, STREAM_TRANSFER_CTL};
+use crate::limits::{
+    HASH_PROGRESS_INTERVAL, MAX_MESSAGE_LEN, MAX_OFFER_RELINKS, STREAM_TRANSFER_CTL,
+};
 use crate::links::Links;
 use crate::names::{OfferedFile, TransferKey, UntrustedName};
-use crate::receiver::Finish;
+use crate::receiver::{Finish, is_closed};
 use crate::rstream::{write_loop, write_msg};
 use crate::shared::{
     Acquired, HookPoint, Shared, acquire_pair, buffer_floor, io_deadline, kib, lock,
@@ -87,6 +89,9 @@ pub(crate) struct SAttempt {
 /// паузу, то есть честная попытка не открывает больше `4 × потоков` без прогресса.
 const BIND_CHURN_FACTOR: usize = 4;
 
+/// Начальная пауза между повторами предложения (удваивается, не больше периода опроса).
+const RELINK_PACE: std::time::Duration = std::time::Duration::from_millis(100);
+
 impl SAttempt {
     fn new(conn_id: u64, hold: Option<ConnHold>) -> (Arc<Self>, mpsc::UnboundedReceiver<Message>) {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -117,6 +122,12 @@ pub(crate) struct SCore {
     completed: bool,
     /// Когда в последний раз выдано событие `Preparing`.
     last_prep: Option<tokio::time::Instant>,
+    /// Сколько раз предложение повторено после потери связи (первая отправка не в счёте).
+    relinks: u8,
+    /// Когда предложение осталось без рабочей попытки (начало отсчёта `offer_relink_grace`).
+    lost_at: Option<tokio::time::Instant>,
+    /// Задача `relink_offer` уже идёт.
+    relinking: bool,
 }
 
 pub(crate) struct SendSession {
@@ -186,6 +197,9 @@ impl SendSession {
                 paused_gen: 0,
                 completed: false,
                 last_prep: None,
+                relinks: 0,
+                lost_at: None,
+                relinking: false,
             }),
             halt: Arc::new(AtomicBool::new(false)),
             stop: Stop::new(),
@@ -378,7 +392,8 @@ fn attempt_lost<L: Links>(inner: &Arc<Inner<L>>, s: &Arc<SendSession>, att: &Arc
         return;
     }
     match phase {
-        SPhase::Offering => finish_send(inner, s, Finish::Failed(FailReason::Protocol)),
+        // ответа ещё нет: то же предложение уходит по следующей рабочей связи
+        SPhase::Offering => enter_relink(inner, s),
         SPhase::Accepted => {
             s.phase.send_replace(SPhase::Paused);
             s.emit(TransferEvent::Paused {
@@ -545,31 +560,86 @@ fn offer_frames(s: &SendSession) -> Result<Vec<u8>, ProtocolError> {
     Ok(out)
 }
 
-/// Открывает поток управления, отправляет предложение и ведёт сессию до первой паузы.
+/// Открывает поток управления и пишет в него предложение. `None`: не вышло (поток не открылся
+/// вовремя или запись не прошла); решает вызывающий.
+async fn send_offer<C: Connection>(
+    s: &SendSession,
+    conn: &C,
+    frames: &[u8],
+) -> Option<(C::Tx, C::Rx)> {
+    let cfg = &s.sh.cfg;
+    let Ok(Ok((mut tx, rx))) = timeout(cfg.msg_timeout, conn.open_bi()).await else {
+        return None;
+    };
+    let sent = timeout(cfg.offer_read_timeout, tx.write_all(frames)).await;
+    matches!(sent, Ok(Ok(()))).then_some((tx, rx))
+}
+
+/// Ставит попытку для предложения, если оно всё ещё ждёт ответа и другой попытки нет. `false`:
+/// поток отброшен (предложение уже принято, закончено или у него есть другая попытка).
+fn install_offer_attempt<L: Links>(
+    inner: &Arc<Inner<L>>,
+    s: &Arc<SendSession>,
+    conn: L::Conn,
+    hold: Option<ConnHold>,
+    tx: <L::Conn as Connection>::Tx,
+    rx: <L::Conn as Connection>::Rx,
+) -> bool {
+    let (att, out_rx) = SAttempt::new(conn.conn_id(), hold);
+    {
+        let mut c = lock(&s.core);
+        if s.phase() != SPhase::Offering || c.att.is_some() {
+            return false;
+        }
+        c.att = Some(att.clone());
+        c.relinking = false;
+    }
+    start_attempt_tasks(inner, s, &att, conn, tx, rx, Vec::new(), out_rx);
+    true
+}
+
+/// Срок жизни предложения без ответа: один на сессию, не на попытку. С живой попыткой это
+/// `Expired` (получатель уведомляется), без неё `Disconnected`.
+fn spawn_offer_ttl<L: Links>(inner: &Arc<Inner<L>>, s: &Arc<SendSession>) {
+    let ttl =
+        s.sh.cfg
+            .offer_ttl
+            .saturating_add(std::time::Duration::from_secs(30));
+    let (inner2, s2) = (inner.clone(), s.clone());
+    let mut stop = s.stop.watcher();
+    let g = s.sh.tracker.guard();
+    drop(s.sh.rt.spawn(async move {
+        let _g = g;
+        tokio::select! {
+            () = tokio::time::sleep(ttl) => {
+                if s2.phase() == SPhase::Offering {
+                    let attached = lock(&s2.core).att.is_some();
+                    if attached {
+                        s2.ctl_send(Message::Cancel { id: s2.key.id, reason: CancelReason::User });
+                        finish_send(&inner2, &s2, Finish::Failed(FailReason::Expired));
+                    } else {
+                        finish_send(&inner2, &s2, Finish::Failed(FailReason::Disconnected));
+                    }
+                }
+            }
+            () = stop.stopped() => {}
+        }
+    }));
+}
+
+/// Открывает поток управления, отправляет предложение и ведёт сессию до первой паузы. Если
+/// отправить не вышло, предложение повторяется по следующей рабочей связи (`relink_offer`).
 pub(crate) async fn sender_main<L: Links>(
     inner: Arc<Inner<L>>,
     s: Arc<SendSession>,
     conn: L::Conn,
 ) {
-    let cfg = &s.sh.cfg;
-    let hold = inner.links.hold(&s.key.pair);
-    let opened = timeout(cfg.msg_timeout, conn.open_bi()).await;
-    let Ok(Ok((mut tx, rx))) = opened else {
-        finish_send(&inner, &s, Finish::Failed(FailReason::Protocol));
-        return;
-    };
     let Ok(frames) = offer_frames(&s) else {
         finish_send(&inner, &s, Finish::Failed(FailReason::Limits));
         return;
     };
-    let sent = timeout(cfg.offer_read_timeout, tx.write_all(&frames)).await;
-    if !matches!(sent, Ok(Ok(()))) {
-        finish_send(&inner, &s, Finish::Failed(FailReason::Protocol));
-        return;
-    }
-    let (att, out_rx) = SAttempt::new(conn.conn_id(), hold);
-    lock(&s.core).att = Some(att.clone());
-    // хэширование не принадлежит попытке: обрыв соединения его не останавливает
+    // хэширование не принадлежит попытке: обрыв соединения его не останавливает, и запускается
+    // оно один раз на сессию, а не при каждой отправке предложения
     {
         let g = s.sh.tracker.guard();
         let s2 = s.clone();
@@ -578,24 +648,116 @@ pub(crate) async fn sender_main<L: Links>(
             hash_all(s2).await;
         }));
     }
-    start_attempt_tasks(&inner, &s, &att, conn.clone(), tx, rx, Vec::new(), out_rx);
-    // ответа нет слишком долго: предложение снимается
-    let ttl = cfg
-        .offer_ttl
-        .saturating_add(std::time::Duration::from_secs(30));
-    let (inner2, s2) = (inner.clone(), s.clone());
-    let mut stop = s.stop.watcher();
-    spawn_att(&s.sh, &att, async move {
-        tokio::select! {
-            () = tokio::time::sleep(ttl) => {
-                if s2.phase() == SPhase::Offering {
-                    s2.ctl_send(Message::Cancel { id: s2.key.id, reason: CancelReason::User });
-                    finish_send(&inner2, &s2, Finish::Failed(FailReason::Expired));
-                }
-            }
-            () = stop.stopped() => {}
+    spawn_offer_ttl(&inner, &s);
+    let hold = inner.links.hold(&s.key.pair);
+    match send_offer(&s, &conn, &frames).await {
+        Some((tx, rx)) => {
+            let _ = install_offer_attempt(&inner, &s, conn, hold, tx, rx);
         }
-    });
+        None => enter_relink(&inner, &s),
+    }
+}
+
+/// Предложение осталось без рабочей попытки: запускает `relink_offer`, если он ещё не идёт.
+fn enter_relink<L: Links>(inner: &Arc<Inner<L>>, s: &Arc<SendSession>) {
+    {
+        let mut c = lock(&s.core);
+        if c.relinking {
+            return;
+        }
+        c.relinking = true;
+        c.lost_at = Some(tokio::time::Instant::now());
+    }
+    let (inner, s2) = (inner.clone(), s.clone());
+    let g = s.sh.tracker.guard();
+    drop(s.sh.rt.spawn(async move {
+        let _g = g;
+        relink_offer(inner, s2).await;
+    }));
+}
+
+/// Повторяет то же предложение (тот же `TransferId`, то же содержимое) по следующей рабочей
+/// связи. Пределы: `MAX_OFFER_RELINKS` повторов и `offer_relink_grace` без рабочей попытки.
+async fn relink_offer<L: Links>(inner: Arc<Inner<L>>, s: Arc<SendSession>) {
+    let cfg = &s.sh.cfg;
+    let pair = s.key.pair;
+    let Ok(frames) = offer_frames(&s) else {
+        finish_send(&inner, &s, Finish::Failed(FailReason::Limits));
+        return;
+    };
+    let mut gen_rx = inner.conn_gen.subscribe();
+    let mut stop = s.stop.watcher();
+    let mut down = s.sh.shutdown.watcher();
+    loop {
+        // 1. предложение всё ещё ждёт ответа
+        let (relinks, lost_at) = {
+            let mut c = lock(&s.core);
+            if s.phase() != SPhase::Offering {
+                c.relinking = false;
+                return;
+            }
+            (
+                c.relinks,
+                c.lost_at.unwrap_or_else(tokio::time::Instant::now),
+            )
+        };
+        let deadline = lost_at + cfg.offer_relink_grace;
+        // 2. пределы
+        if relinks >= MAX_OFFER_RELINKS || tokio::time::Instant::now() >= deadline {
+            finish_send(&inner, &s, Finish::Failed(FailReason::Disconnected));
+            return;
+        }
+        // пауза между повторами растёт: получатель, который отбрасывает потоки, не сожжёт все
+        // повторы за миллисекунды; первый повтор (замена связи) идёт сразу
+        if relinks > 0 {
+            let shift = u32::from(relinks.saturating_sub(1)).min(6);
+            let pause = RELINK_PACE.saturating_mul(1u32 << shift).min(inner.poll);
+            tokio::select! {
+                () = tokio::time::sleep(pause) => {}
+                () = tokio::time::sleep_until(deadline) => continue,
+                () = stop.stopped() => return,
+                () = down.stopped() => return,
+            }
+        }
+        // 3. рабочая связь: есть у движка и не закрыта (номер погибшей не сравнивается)
+        let mut link = None;
+        if let Some(c) = inner.links.connection(&pair)
+            && !is_closed(&c).await
+        {
+            link = Some(c);
+        }
+        let Some(conn) = link else {
+            tokio::select! {
+                _ = gen_rx.changed() => {}
+                () = tokio::time::sleep(inner.poll) => {}
+                () = tokio::time::sleep_until(deadline) => {}
+                () = stop.stopped() => return,
+                () = down.stopped() => return,
+            }
+            continue;
+        };
+        // 4. одна попытка
+        {
+            let mut c = lock(&s.core);
+            c.relinks = c.relinks.saturating_add(1);
+        }
+        let hold = inner.links.hold(&pair);
+        let Some((tx, rx)) = send_offer(&s, &conn, &frames).await else {
+            // 6. без горячего цикла: следующая попытка по событию или по опросу
+            tokio::select! {
+                _ = gen_rx.changed() => {}
+                () = tokio::time::sleep(inner.poll) => {}
+                () = stop.stopped() => return,
+                () = down.stopped() => return,
+            }
+            continue;
+        };
+        // 5. успех: попытка ставится, только если предложение всё ещё ждёт ответа
+        if !install_offer_attempt(&inner, &s, conn, hold, tx, rx) {
+            lock(&s.core).relinking = false;
+        }
+        return;
+    }
 }
 
 fn spawn_att<F>(sh: &Shared, att: &SAttempt, f: F)
@@ -786,15 +948,9 @@ pub(crate) async fn handle_resume<L: Links>(
         let _ = tx.finish();
         return;
     }
-    if phase == SPhase::Offering {
-        let out = reply(Message::Cancel {
-            id: key.id,
-            reason: CancelReason::Unknown,
-        });
-        let _ = timeout(cfg.msg_timeout, tx.write_all(&out)).await;
-        let _ = tx.finish();
-        return;
-    }
+    // RESUME приходит только от получателя этого предложения по соединению этой пары. В фазе
+    // `Offering` он означает принятие, чей DECISION потерян вместе со связью или который не
+    // успел уйти: получатель принял предложение без связи и теперь возобновляет передачу.
     // потоки старой попытки закрываются раньше, чем начнётся новая
     let old = lock(&s.core).att.take();
     if let Some(old) = old {
@@ -822,9 +978,26 @@ pub(crate) async fn handle_resume<L: Links>(
         attempt_lost(&inner, &s, &att);
         return;
     }
-    let was = s.phase.send_replace(SPhase::Accepted);
-    if was == SPhase::Paused {
-        s.emit(TransferEvent::Resumed { key: s.key });
+    // под замком `core`: `finish_send` меняет фазу под тем же замком, закончившееся не оживает
+    let was = {
+        let _c = lock(&s.core);
+        let cur = s.phase();
+        if cur == SPhase::Finished {
+            return;
+        }
+        s.phase.send_replace(SPhase::Accepted);
+        cur
+    };
+    match was {
+        SPhase::Paused => s.emit(TransferEvent::Resumed { key: s.key }),
+        SPhase::Offering => {
+            s.emit(TransferEvent::OfferAnswered {
+                key: s.key,
+                accepted: true,
+            });
+            s.emit(TransferEvent::Started { key: s.key });
+        }
+        SPhase::Accepted | SPhase::Finished => {}
     }
     start_attempt_tasks(&inner, &s, &att, conn, tx, rx, buf, out_rx);
     spawn_att(&s.sh, &att, hash_ticker(s.clone(), att.clone()));

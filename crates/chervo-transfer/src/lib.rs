@@ -58,8 +58,8 @@ pub use hash::{BlockHash, FileRoot, file_root, leaf_hash};
 pub use layout::{Layout, block_len, check_block_len, check_manifest_layout, layout};
 pub use limits::{
     MAX_BLOCK, MAX_BLOCKS, MAX_FILE_SIZE, MAX_FILES_PER_OFFER, MAX_INPROGRESS, MAX_MESSAGE_LEN,
-    MAX_NAME_BYTES, MAX_NAMES_LEN, MAX_OFFER_BYTES, MAX_OFFER_TOTAL, MAX_STATE_LEN, MIN_BLOCK,
-    PROTO_VERSION, STREAM_TRANSFER_CTL, STREAM_TRANSFER_DATA,
+    MAX_NAME_BYTES, MAX_NAMES_LEN, MAX_OFFER_BYTES, MAX_OFFER_RELINKS, MAX_OFFER_TOTAL,
+    MAX_STATE_LEN, MIN_BLOCK, PROTO_VERSION, STREAM_TRANSFER_CTL, STREAM_TRANSFER_DATA,
 };
 pub use links::Links;
 pub use names::{OfferedFile, TransferId, TransferKey, UntrustedName};
@@ -72,7 +72,7 @@ pub use policy::{AcceptPolicy, AskAlways, InboundReservation, OfferView, PolicyV
 pub use state::{RecvState, decode_names, decode_state, encode_state};
 pub use state::{StateError, encode_hashes, parse_hashes, state_dir_name};
 pub use texts::{
-    DAMAGED_TEXT, DECLINED_TEXT, DISK_FULL_TEXT, EXPIRED_TEXT, PEER_CANCELLED_TEXT,
-    PEER_FORGOT_TEXT, PREPARING_TEXT, SOURCE_CHANGED_TEXT, STALLED_TEXT,
+    DAMAGED_TEXT, DECLINED_TEXT, DISCONNECTED_TEXT, DISK_FULL_TEXT, EXPIRED_TEXT,
+    PEER_CANCELLED_TEXT, PEER_FORGOT_TEXT, PREPARING_TEXT, SOURCE_CHANGED_TEXT, STALLED_TEXT,
 };
 pub use wire_io::{read_exact, read_message};

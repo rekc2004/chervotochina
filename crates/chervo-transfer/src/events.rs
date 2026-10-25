@@ -40,6 +40,9 @@ pub enum FailReason {
     Protocol,
     PeerForgot,
     NotFriend,
+    /// Предложение не удалось доставить или получить на него ответ: рабочей связи не было
+    /// дольше `offer_relink_grace` или исчерпан `MAX_OFFER_RELINKS`.
+    Disconnected,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

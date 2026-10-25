@@ -1,33 +1,37 @@
 //! Публичный интерфейс передачи файлов: `Transfers`. Приём входящих потоков (предложения,
 //! возобновление, потоки данных), запуск, отмена и остановка.
 
+use std::future::Future;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chervo_connect::{EngineEvents, IncomingStream, StreamInbox};
 use chervo_identity::PairId;
-use chervo_transport::{Connection, SendStream};
+use chervo_transport::{Connection, RecvStream, SendStream};
 use tokio::runtime::Handle;
-use tokio::sync::{Semaphore, broadcast, oneshot, watch};
+use tokio::sync::{Semaphore, broadcast, mpsc, oneshot, watch};
 use tokio::time::timeout;
 
-use crate::codec::{CancelReason, Message, OfferAssembler, Verdict, encode};
+use crate::codec::{CancelReason, Message, OfferAssembler, ProtocolError, Verdict, encode};
 use crate::config::TransferConfig;
 use crate::events::{
     FailReason, PauseReason, Side, TransferError, TransferEvent, TransferEvents, TransferStatus,
 };
-use crate::inner::{Inner, Registry};
+use crate::inner::{Inner, Registry, Tomb};
 use crate::limits::{
     MAX_FILE_SIZE, MAX_FILES_PER_OFFER, MAX_OFFER_BYTES, MAX_OFFER_TOTAL, STREAM_TRANSFER_CTL,
     STREAM_TRANSFER_DATA,
 };
 use crate::links::Links;
-use crate::names::{TransferId, TransferKey, UntrustedName};
+use crate::names::{OfferedFile, TransferId, TransferKey, UntrustedName};
 use crate::paths::{create_session_dir, remove_session};
 use crate::placement::Placement;
 use crate::policy::{AcceptPolicy, OfferView, PolicyVerdict};
-use crate::receiver::{Finish, FirstCtl, RPhase, RecvSession, recv_supervisor};
+use crate::receiver::{
+    Finish, FirstCtl, RPhase, RecvSession, Reoffer, Rx, is_closed, recv_supervisor,
+};
 use crate::sender::{SendSession, SrcFile, finish_send, handle_data, handle_resume, sender_main};
 use crate::shared::{Hook, Shared, lock};
 use crate::state::state_dir_name;
@@ -111,6 +115,8 @@ impl<L: Links> Transfers<L> {
             conn_gen: watch::channel(0u64).0,
             poll,
             decide_lock: std::sync::Mutex::new(()),
+            relink: Mutex::new(std::collections::HashMap::new()),
+            tombs: Mutex::new(std::collections::VecDeque::new()),
         });
         for s in crate::restore::load_all(&sh) {
             lock(&inner.reg).inb.insert(s.key, s.clone());
@@ -398,6 +404,98 @@ async fn handle_ctl_in<L: Links>(inner: Arc<Inner<L>>, st: IncomingStream<L::Con
     }
 }
 
+async fn write_cancel<T: SendStream>(
+    tx: &mut T,
+    id: TransferId,
+    reason: CancelReason,
+    limit: Duration,
+) {
+    let mut out = Vec::new();
+    if encode(&Message::Cancel { id, reason }, &mut out).is_ok() {
+        let _ = timeout(limit, tx.write_all(&out)).await;
+    }
+    let _ = tx.finish();
+}
+
+/// Ответ из надгробия: тот же, что получил (или мог не получить) отправитель в первый раз.
+async fn write_tomb<T: SendStream>(tx: &mut T, id: TransferId, tomb: Tomb, limit: Duration) {
+    match tomb {
+        Tomb::Decline => write_decision(tx, id, Verdict::Decline, limit).await,
+        Tomb::Expired => write_decision(tx, id, Verdict::Expired, limit).await,
+        Tomb::Busy => write_decision(tx, id, Verdict::Busy, limit).await,
+        Tomb::Limits => write_decision(tx, id, Verdict::Limits, limit).await,
+        Tomb::Protocol => write_cancel(tx, id, CancelReason::Protocol, limit).await,
+    }
+}
+
+/// Итог сборки предложения из потока.
+enum Assembled {
+    Files(Vec<OfferedFile>),
+    /// Поток оборвался или молчит: нарушением это не считается.
+    Lost,
+    /// Нарушение границ или порядка кадров.
+    Violation,
+}
+
+/// Собирает записи предложения: те же пределы и срок, что у первого предложения.
+async fn assemble_offer<R: RecvStream>(
+    cfg: &TransferConfig,
+    rx: &mut R,
+    buf: &mut Vec<u8>,
+    head: (u32, u64, u32),
+) -> Assembled {
+    let Ok(mut asm) = OfferAssembler::new(head.0, head.1, head.2) else {
+        return Assembled::Violation;
+    };
+    // записи собираются в пределах `offer_read_timeout` на всё предложение
+    let deadline = tokio::time::Instant::now() + cfg.offer_read_timeout;
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let m = timeout(left, read_message(rx, buf, cfg.msg_timeout)).await;
+        let done = match m {
+            Ok(Ok(Some(Message::OfferFiles(v)))) => match asm.push(v) {
+                Ok(done) => done,
+                Err(_) => return Assembled::Violation,
+            },
+            Ok(Ok(None) | Err(ProtocolError::Closed | ProtocolError::TimedOut)) | Err(_) => {
+                return Assembled::Lost;
+            }
+            _ => return Assembled::Violation,
+        };
+        if done {
+            break;
+        }
+    }
+    match asm.finish() {
+        Ok(files) => Assembled::Files(files),
+        Err(_) => Assembled::Violation,
+    }
+}
+
+/// Что делать с пришедшим предложением (решается под замком `reg`).
+enum Act<C: Connection> {
+    /// Для ключа есть надгробие.
+    Tomb(Tomb),
+    /// Ожидающее предложение закрывается: повтор не совпал или повторов слишком много.
+    EndPending(Arc<RecvSession>, Tomb),
+    /// Принятая передача закрывается: повтор не совпал.
+    EndActive(Arc<RecvSession>),
+    /// Повтор совпал: поток уходит ожидающему предложению.
+    Attach(Option<mpsc::Sender<Reoffer<C>>>),
+    /// Повтор принятого предложения: `DECISION{Accept}`.
+    Echo,
+    /// Поток молча закрывается.
+    Drop,
+    Busy,
+    Limits,
+    /// Новое предложение.
+    New(
+        Arc<RecvSession>,
+        oneshot::Receiver<bool>,
+        mpsc::Receiver<Reoffer<C>>,
+    ),
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn receive_offer<L: Links>(
     inner: &Arc<Inner<L>>,
@@ -409,186 +507,427 @@ async fn receive_offer<L: Links>(
     head: (u32, u64, u32),
 ) {
     let cfg = &inner.sh.cfg;
-    let mut asm = match OfferAssembler::new(head.0, head.1, head.2) {
-        Ok(a) => a,
-        Err(_) => {
+    // известный ключ: сессия или надгробие (повтор предложения после потери связи)
+    let known = inner.is_known(&key);
+    let files = match assemble_offer(cfg, &mut rx, &mut buf, head).await {
+        Assembled::Files(f) => Some(f),
+        // оборванный повтор нарушением не считается
+        Assembled::Lost if known => return,
+        Assembled::Violation if known => None,
+        Assembled::Lost | Assembled::Violation => {
             write_decision(&mut tx, key.id, Verdict::Limits, cfg.msg_timeout).await;
             return;
         }
     };
-    // записи собираются в пределах `offer_read_timeout` на всё предложение
-    let deadline = tokio::time::Instant::now() + cfg.offer_read_timeout;
-    loop {
-        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let m = timeout(left, read_message(&mut rx, &mut buf, cfg.msg_timeout)).await;
-        let done = match m {
-            Ok(Ok(Some(Message::OfferFiles(v)))) => match asm.push(v) {
-                Ok(done) => done,
-                Err(_) => {
-                    write_decision(&mut tx, key.id, Verdict::Limits, cfg.msg_timeout).await;
-                    return;
-                }
-            },
-            _ => {
-                write_decision(&mut tx, key.id, Verdict::Limits, cfg.msg_timeout).await;
-                return;
-            }
-        };
-        if done {
-            break;
-        }
-    }
-    let Ok(files) = asm.finish() else {
-        write_decision(&mut tx, key.id, Verdict::Limits, cfg.msg_timeout).await;
-        return;
-    };
     let Some(perm) = inner.links.permission(&key.pair) else {
         return;
     };
-    let list: Vec<(UntrustedName, u64)> = files.iter().map(|f| (f.name.clone(), f.size)).collect();
     let (ans_tx, ans_rx) = oneshot::channel::<bool>();
-    let s = RecvSession::pending(inner.sh.clone(), key, list, head.1, ans_tx);
-    // один ожидающий ответа от друга и не больше `max_pending_offers` всего
-    let busy = {
+    let (rtx, rrx) = mpsc::channel::<Reoffer<L::Conn>>(1);
+    let act: Act<L::Conn> = {
         let mut reg = lock(&inner.reg);
-        let pending = reg
-            .inb
-            .values()
-            .filter(|x| lock(&x.core).phase == RPhase::Pending)
-            .count();
-        let busy = reg.inb.contains_key(&key)
-            || reg.inb.values().any(|x| x.key.pair == key.pair)
-            || pending >= cfg.max_pending_offers;
-        if !busy {
-            reg.inb.insert(key, s.clone());
+        if let Some(t) = inner.tomb_get(&key) {
+            Act::Tomb(t)
+        } else if let Some(old) = reg.inb.get(&key).cloned() {
+            let phase = lock(&old.core).phase;
+            let same = files.as_deref().is_some_and(|f| old.same_offer(head, f));
+            match phase {
+                RPhase::Pending if !old.answered() => {
+                    if !same {
+                        Act::EndPending(old, Tomb::Protocol)
+                    } else if !old.count_relink() {
+                        Act::EndPending(old, Tomb::Limits)
+                    } else {
+                        Act::Attach(lock(&inner.relink).get(&key).cloned())
+                    }
+                }
+                // ответ дан, передача ещё не началась: отправитель повторит или придёт RESUME
+                RPhase::Pending | RPhase::Ended => Act::Drop,
+                RPhase::Active | RPhase::Paused(_) => {
+                    if same {
+                        Act::Echo
+                    } else {
+                        Act::EndActive(old)
+                    }
+                }
+            }
+        } else if let Some(list) = files.as_deref() {
+            let list: Vec<(UntrustedName, u64)> =
+                list.iter().map(|f| (f.name.clone(), f.size)).collect();
+            let s = RecvSession::pending(inner.sh.clone(), key, list, head.1, ans_tx);
+            // один ожидающий ответа от друга и не больше `max_pending_offers` всего
+            let pending = reg
+                .inb
+                .values()
+                .filter(|x| lock(&x.core).phase == RPhase::Pending)
+                .count();
+            let busy = reg.inb.values().any(|x| x.key.pair == key.pair)
+                || pending >= cfg.max_pending_offers;
+            if busy {
+                Act::Busy
+            } else {
+                reg.inb.insert(key, s.clone());
+                lock(&inner.relink).insert(key, rtx);
+                Act::New(s, ans_rx, rrx)
+            }
+        } else {
+            Act::Limits
         }
-        busy
     };
-    if busy {
-        write_decision(&mut tx, key.id, Verdict::Busy, cfg.msg_timeout).await;
+    match act {
+        Act::Tomb(t) => write_tomb(&mut tx, key.id, t, cfg.msg_timeout).await,
+        Act::Drop => {}
+        Act::Busy => write_decision(&mut tx, key.id, Verdict::Busy, cfg.msg_timeout).await,
+        Act::Limits => write_decision(&mut tx, key.id, Verdict::Limits, cfg.msg_timeout).await,
+        Act::Echo => {
+            write_decision(&mut tx, key.id, Verdict::Accept, cfg.msg_timeout).await;
+            // передача ждёт связь: пусть попробует сейчас
+            inner.bump();
+        }
+        Act::Attach(Some(ch)) => {
+            // занято или закрыто: поток отбрасывается, отправитель повторит
+            let _ = ch.try_send(Reoffer { conn, tx, rx, buf });
+        }
+        Act::Attach(None) => {}
+        Act::EndPending(old, tomb) => end_pending(inner, &old, tomb, &mut tx).await,
+        Act::EndActive(old) => end_active(&old, &mut tx, cfg.msg_timeout).await,
+        Act::New(s, ans_rx, rrx) => {
+            // Решения по одному (Рев. 5): политика видит резерв места уже принятых передач, а
+            // принятое предложение (ответ взят) сразу входит в этот резерв для следующего решения.
+            let verdict = {
+                let _g = lock(&inner.decide_lock);
+                let view = inner.offer_view_for(&s);
+                let verdict = inner.policy.decide(&key.pair, perm, &view);
+                if verdict == PolicyVerdict::Accept
+                    && let Some(a) = s.take_answer()
+                {
+                    let _ = a.send(true);
+                }
+                verdict
+            };
+            match verdict {
+                PolicyVerdict::Decline => {
+                    inner.remove_inb_tomb(&key, Tomb::Decline);
+                    inner.unreg_relink(&key);
+                    write_decision(&mut tx, key.id, Verdict::Decline, cfg.msg_timeout).await;
+                    return;
+                }
+                PolicyVerdict::Ask => s.emit(TransferEvent::OfferReceived { key }),
+                PolicyVerdict::Accept => {}
+            }
+            pending_task(inner.clone(), s, conn, tx, rx, buf, ans_rx, rrx).await;
+        }
+    }
+}
+
+/// Закрывает ожидающее предложение по повтору (не совпал или слишком много): надгробие,
+/// событие и ответ на новый поток. Решение берётся тут же: если пользователь успел ответить,
+/// повтор молча отбрасывается.
+async fn end_pending<L: Links, T: SendStream>(
+    inner: &Arc<Inner<L>>,
+    s: &Arc<RecvSession>,
+    tomb: Tomb,
+    tx: &mut T,
+) {
+    let key = s.key;
+    let Some(answer) = s.take_answer() else {
         return;
-    }
-    // Решения по одному (Рев. 5): политика видит резерв места уже принятых передач, а
-    // принятое предложение (ответ взят) сразу входит в этот резерв для следующего решения.
-    let verdict = {
-        let _g = lock(&inner.decide_lock);
-        let view = inner.offer_view_for(&s);
-        let verdict = inner.policy.decide(&key.pair, perm, &view);
-        if verdict == PolicyVerdict::Accept
-            && let Some(a) = s.take_answer()
-        {
-            let _ = a.send(true);
-        }
-        verdict
     };
-    match verdict {
-        PolicyVerdict::Decline => {
-            inner.remove_inb(&key);
-            write_decision(&mut tx, key.id, Verdict::Decline, cfg.msg_timeout).await;
-            return;
+    inner.remove_inb_tomb(&key, tomb);
+    // `pending_task` выходит молча; ответ отброшен вместе с отправителем oneshot
+    s.end.stop();
+    drop(answer);
+    write_tomb(tx, key.id, tomb, inner.sh.cfg.msg_timeout).await;
+    let reason = if tomb == Tomb::Limits {
+        FailReason::Limits
+    } else {
+        FailReason::Protocol
+    };
+    s.emit(TransferEvent::Failed { key, reason });
+}
+
+/// Повтор принятого предложения не совпал с ним: передача заканчивается нарушением, временные
+/// данные убирает обычное завершение сессии.
+async fn end_active<T: SendStream>(s: &Arc<RecvSession>, tx: &mut T, limit: Duration) {
+    {
+        let mut c = lock(&s.core);
+        if c.finish.is_none() {
+            c.finish = Some(Finish::Failed(FailReason::Protocol));
         }
-        PolicyVerdict::Ask => s.emit(TransferEvent::OfferReceived { key }),
-        PolicyVerdict::Accept => {}
     }
-    pending_task(inner.clone(), s, conn, tx, rx, buf, ans_rx).await;
+    s.ctl_send(Message::Cancel {
+        id: s.key.id,
+        reason: CancelReason::Protocol,
+    });
+    s.end.stop();
+    write_cancel(tx, s.key.id, CancelReason::Protocol, limit).await;
 }
 
-enum Pending {
-    Answer(bool),
-    Expired,
-    SenderCancelled,
-    /// Отправитель прислал HASH_PROGRESS до принятия.
-    Protocol,
-    Lost,
-    Shutdown,
+/// Чтение кадра с потока управления, которое не прерывается посреди кадра: поток и буфер
+/// принадлежат будущему, а при его уничтожении (в том числе на середине кадра) возвращаются в
+/// `back`. Читать дальше можно только тем же будущим.
+struct Reading<C: Connection + 'static> {
+    fut: Option<ReadFut>,
+    back: Slot<Rx<C>>,
 }
 
-/// Ждёт решения. Ничего на диск не пишется до принятия.
+type ReadFut = Pin<Box<dyn Future<Output = Result<Option<Message>, ProtocolError>> + Send>>;
+type Slot<R> = Arc<Mutex<Option<(R, Vec<u8>)>>>;
+
+struct ReadGuard<R> {
+    parts: Option<(R, Vec<u8>)>,
+    slot: Slot<R>,
+}
+
+impl<R> Drop for ReadGuard<R> {
+    fn drop(&mut self) {
+        if let Some(p) = self.parts.take() {
+            *lock(&self.slot) = Some(p);
+        }
+    }
+}
+
+impl<C: Connection + 'static> Reading<C> {
+    fn new(rx: Rx<C>, buf: Vec<u8>, limit: Duration) -> Self {
+        let back = Arc::new(Mutex::new(None));
+        let guard = ReadGuard {
+            parts: Some((rx, buf)),
+            slot: back.clone(),
+        };
+        let fut = Box::pin(async move {
+            let mut g = guard;
+            match g.parts.as_mut() {
+                Some((rx, buf)) => read_message(rx, buf, limit).await,
+                None => Err(ProtocolError::Closed),
+            }
+        });
+        Self {
+            fut: Some(fut),
+            back,
+        }
+    }
+
+    /// Следующий кадр. После готового результата вызывать нельзя: читатель заменяют или
+    /// выбрасывают.
+    async fn next(&mut self) -> Result<Option<Message>, ProtocolError> {
+        match self.fut.as_mut() {
+            Some(f) => f.await,
+            None => std::future::pending().await,
+        }
+    }
+
+    /// Возвращает поток (для принятия на этом же потоке управления).
+    fn into_rx(mut self) -> Option<Rx<C>> {
+        self.fut = None;
+        lock(&self.back).take().map(|(rx, _)| rx)
+    }
+}
+
+/// Запись в `Inner::relink` живёт, пока идёт `pending_task`.
+struct Unreg<L: Links> {
+    inner: Arc<Inner<L>>,
+    key: TransferKey,
+}
+
+impl<L: Links> Drop for Unreg<L> {
+    fn drop(&mut self) {
+        self.inner.unreg_relink(&self.key);
+    }
+}
+
+enum Ev<C: Connection> {
+    Answer(Result<bool, oneshot::error::RecvError>),
+    /// Кто-то другой закрыл ожидающее предложение и всё сделал сам.
+    Ended,
+    Down,
+    Deadline,
+    Grace,
+    Reattach(Option<Reoffer<C>>),
+    Closed,
+    Read(Result<Option<Message>, ProtocolError>),
+}
+
+/// Ждёт решения. Ничего на диск не пишется до принятия. Потеря потока управления или
+/// соединения предложение не снимает: оно ждёт повтора от отправителя до `offer_relink_grace`
+/// и в любом случае не дольше `offer_deadline`.
+#[allow(clippy::too_many_arguments)]
 async fn pending_task<L: Links>(
     inner: Arc<Inner<L>>,
     s: Arc<RecvSession>,
     conn: L::Conn,
-    mut tx: <L::Conn as Connection>::Tx,
-    mut rx: <L::Conn as Connection>::Rx,
-    mut buf: Vec<u8>,
+    tx: <L::Conn as Connection>::Tx,
+    rx: <L::Conn as Connection>::Rx,
+    buf: Vec<u8>,
     mut answer: oneshot::Receiver<bool>,
+    mut rrx: mpsc::Receiver<Reoffer<L::Conn>>,
 ) {
     let cfg = &inner.sh.cfg;
-    let mut down = inner.sh.shutdown.watcher();
-    let p = tokio::select! {
-        a = &mut answer => a.map_or(Pending::Lost, Pending::Answer),
-        () = tokio::time::sleep(cfg.offer_ttl) => Pending::Expired,
-        m = read_message(&mut rx, &mut buf, cfg.msg_timeout) => match m {
-            Ok(Some(Message::Cancel { id, .. })) if id == s.key.id => Pending::SenderCancelled,
-            Ok(Some(Message::HashProgress { .. })) => Pending::Protocol,
-            _ => Pending::Lost,
-        },
-        () = conn.closed() => Pending::Lost,
-        () = down.stopped() => Pending::Shutdown,
-    };
     let key = s.key;
-    match p {
-        Pending::Shutdown => {}
-        Pending::Answer(true) => accept_flow(inner, s, conn, tx, rx).await,
-        Pending::Answer(false) => {
-            inner.remove_inb(&key);
-            s.emit(TransferEvent::OfferAnswered {
-                key,
-                accepted: false,
-            });
-            write_decision(&mut tx, key.id, Verdict::Decline, cfg.msg_timeout).await;
-        }
-        Pending::Expired => {
-            inner.remove_inb(&key);
-            s.take_answer();
-            write_decision(&mut tx, key.id, Verdict::Expired, cfg.msg_timeout).await;
-            s.emit(TransferEvent::Failed {
-                key,
-                reason: FailReason::Expired,
-            });
-        }
-        Pending::Protocol => {
-            inner.remove_inb(&key);
-            s.take_answer();
-            let mut out = Vec::new();
-            let m = Message::Cancel {
-                id: key.id,
-                reason: CancelReason::Protocol,
-            };
-            if encode(&m, &mut out).is_ok() {
-                let _ = timeout(cfg.msg_timeout, tx.write_all(&out)).await;
+    let unreg = Unreg {
+        inner: inner.clone(),
+        key,
+    };
+    let mut down = inner.sh.shutdown.watcher();
+    let mut ended = s.end.watcher();
+    let mut conn_cur = Some(conn);
+    let mut tx_cur = Some(tx);
+    let mut rd = Some(Reading::<L::Conn>::new(rx, buf, cfg.msg_timeout));
+    let mut detached_at: Option<tokio::time::Instant> = None;
+    let mut rrx_open = true;
+    loop {
+        let grace_at = detached_at.map(|t| t + cfg.offer_relink_grace);
+        let ev = tokio::select! {
+            biased;
+            () = ended.stopped() => Ev::Ended,
+            () = down.stopped() => Ev::Down,
+            a = &mut answer => Ev::Answer(a),
+            () = tokio::time::sleep_until(s.offer_deadline) => Ev::Deadline,
+            () = async {
+                match grace_at {
+                    Some(t) => tokio::time::sleep_until(t).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => Ev::Grace,
+            m = rrx.recv(), if rrx_open => Ev::Reattach(m),
+            () = async {
+                match conn_cur.as_ref() {
+                    Some(c) => c.closed().await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => Ev::Closed,
+            r = async {
+                match rd.as_mut() {
+                    Some(r) => r.next().await,
+                    None => std::future::pending().await,
+                }
+            } => Ev::Read(r),
+        };
+        match ev {
+            Ev::Ended | Ev::Down => return,
+            Ev::Answer(Ok(true)) => {
+                // принятие на живом потоке управления или без него (тогда RESUME)
+                let first = match (
+                    conn_cur.take(),
+                    tx_cur.take(),
+                    rd.take().and_then(Reading::into_rx),
+                ) {
+                    (Some(conn), Some(tx), Some(rx)) => Some(FirstCtl { conn, tx, rx }),
+                    _ => None,
+                };
+                drop(rrx);
+                drop(unreg);
+                accept_flow(inner, s, first).await;
+                return;
             }
-            let _ = tx.finish();
-            s.emit(TransferEvent::Failed {
-                key,
-                reason: FailReason::Protocol,
-            });
-        }
-        Pending::SenderCancelled | Pending::Lost => {
-            inner.remove_inb(&key);
-            s.take_answer();
-            s.emit(TransferEvent::Cancelled {
-                key,
-                by: Side::Sender,
-            });
+            Ev::Answer(Ok(false)) => {
+                inner.remove_inb_tomb(&key, Tomb::Decline);
+                s.emit(TransferEvent::OfferAnswered {
+                    key,
+                    accepted: false,
+                });
+                if let Some(tx) = tx_cur.as_mut() {
+                    write_decision(tx, key.id, Verdict::Decline, cfg.msg_timeout).await;
+                }
+                return;
+            }
+            Ev::Answer(Err(_)) => {
+                inner.remove_inb(&key);
+                s.take_answer();
+                s.emit(TransferEvent::Cancelled {
+                    key,
+                    by: Side::Sender,
+                });
+                return;
+            }
+            Ev::Deadline => {
+                inner.remove_inb_tomb(&key, Tomb::Expired);
+                s.take_answer();
+                if let Some(tx) = tx_cur.as_mut() {
+                    write_decision(tx, key.id, Verdict::Expired, cfg.msg_timeout).await;
+                }
+                s.emit(TransferEvent::Failed {
+                    key,
+                    reason: FailReason::Expired,
+                });
+                return;
+            }
+            Ev::Grace => {
+                inner.remove_inb_tomb(&key, Tomb::Expired);
+                s.take_answer();
+                s.emit(TransferEvent::Failed {
+                    key,
+                    reason: FailReason::Disconnected,
+                });
+                return;
+            }
+            Ev::Reattach(None) => rrx_open = false,
+            Ev::Reattach(Some(new)) => {
+                // закрытое соединение живого не заменяет; два живых: отправитель бросил прежнее
+                if is_closed(&new.conn).await {
+                    continue;
+                }
+                conn_cur = Some(new.conn);
+                tx_cur = Some(new.tx);
+                rd = Some(Reading::<L::Conn>::new(new.rx, new.buf, cfg.msg_timeout));
+                detached_at = None;
+            }
+            Ev::Closed => {
+                conn_cur = None;
+                tx_cur = None;
+                rd = None;
+                detached_at = Some(tokio::time::Instant::now());
+            }
+            Ev::Read(r) => match r {
+                Ok(Some(Message::Cancel { id, .. })) if id == key.id => {
+                    inner.remove_inb(&key);
+                    s.take_answer();
+                    s.emit(TransferEvent::Cancelled {
+                        key,
+                        by: Side::Sender,
+                    });
+                    return;
+                }
+                // конец потока или обрыв: предложение ждёт повтора
+                Ok(None) | Err(ProtocolError::Closed | ProtocolError::TimedOut) => {
+                    conn_cur = None;
+                    tx_cur = None;
+                    rd = None;
+                    detached_at = Some(tokio::time::Instant::now());
+                }
+                // HASH_PROGRESS до принятия и любое другое сообщение или ошибка разбора
+                Ok(Some(_)) | Err(_) => {
+                    inner.remove_inb_tomb(&key, Tomb::Protocol);
+                    s.take_answer();
+                    if let Some(tx) = tx_cur.as_mut() {
+                        write_cancel(tx, key.id, CancelReason::Protocol, cfg.msg_timeout).await;
+                    }
+                    s.emit(TransferEvent::Failed {
+                        key,
+                        reason: FailReason::Protocol,
+                    });
+                    return;
+                }
+            },
         }
     }
 }
 
-/// Принято: каталог и первое состояние на диск, DECISION{Accept}, потоки данных.
+/// Принято: каталог и первое состояние на диск, DECISION{Accept}, потоки данных. Без потока
+/// управления (`first = None`) ответ получит отправитель по RESUME, когда вернётся связь.
 async fn accept_flow<L: Links>(
     inner: Arc<Inner<L>>,
     s: Arc<RecvSession>,
-    conn: L::Conn,
-    mut tx: <L::Conn as Connection>::Tx,
-    rx: <L::Conn as Connection>::Rx,
+    first: Option<FirstCtl<L::Conn>>,
 ) {
     let cfg = &inner.sh.cfg;
     let key = s.key;
+    let mut first = first;
     // занять место сразу и атомарно: два одновременных ответа не превысят предел
     if inner.claim_slot(&s).is_none() {
-        inner.remove_inb(&key);
-        write_decision(&mut tx, key.id, Verdict::Busy, cfg.msg_timeout).await;
+        inner.remove_inb_tomb(&key, Tomb::Busy);
+        if let Some(f) = first.as_mut() {
+            write_decision(&mut f.tx, key.id, Verdict::Busy, cfg.msg_timeout).await;
+        }
         s.emit(TransferEvent::Failed {
             key,
             reason: FailReason::Busy,
@@ -624,20 +963,10 @@ async fn accept_flow<L: Links>(
         .await;
     if !matches!(made, Ok(Ok(()))) {
         lock(&s.core).phase = RPhase::Ended;
-        inner.remove_inb(&key);
-        let mut out = Vec::new();
-        if encode(
-            &Message::Cancel {
-                id: key.id,
-                reason: CancelReason::Limits,
-            },
-            &mut out,
-        )
-        .is_ok()
-        {
-            let _ = timeout(cfg.msg_timeout, tx.write_all(&out)).await;
+        inner.remove_inb_tomb(&key, Tomb::Limits);
+        if let Some(f) = first.as_mut() {
+            write_cancel(&mut f.tx, key.id, CancelReason::Limits, cfg.msg_timeout).await;
         }
-        let _ = tx.finish();
         s.emit(TransferEvent::Failed {
             key,
             reason: FailReason::Limits,
@@ -649,7 +978,7 @@ async fn accept_flow<L: Links>(
         accepted: true,
     });
     s.emit(TransferEvent::Started { key });
-    recv_supervisor(inner, s, Some(FirstCtl { conn, tx, rx })).await;
+    recv_supervisor(inner, s, first).await;
 }
 
 // ---------------------------------------------------------------- права друзей

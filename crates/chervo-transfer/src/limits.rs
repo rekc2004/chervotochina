@@ -29,6 +29,10 @@ pub const MAX_INPROGRESS: usize = 8;
 /// Байт на запись OFFER_FILES сверх имени: размер u64 и длина имени u16.
 pub(crate) const ENTRY_OVERHEAD: u64 = 8 + 2;
 
+/// Сколько раз отправитель повторяет то же предложение после потери связи (и сколько повторов
+/// одного предложения принимает получатель).
+pub const MAX_OFFER_RELINKS: u8 = 8;
+
 /// Период кадров HASH_PROGRESS на потоке управления: раз в секунду, и только пока значение
 /// растёт (кадр с итоговым значением уходит сразу).
 pub(crate) const HASH_PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
