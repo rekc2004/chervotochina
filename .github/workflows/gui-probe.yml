@@ -1,0 +1,46 @@
+# TEMPORARY (stage 18p). Delete together with spikes/gui-probe once DECISION 2.x is written.
+# No apt install on Linux on purpose: the gate checks that nothing has to be installed.
+# --render-check under xvfb is not run here (needs apt); only build and static checks.
+name: gui-probe
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: spikes/gui-probe
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.99.1 --profile minimal
+      # V1: build, licences, bans, advisories
+      - run: cargo +1.99.1 build --release --locked
+      - run: cargo install --locked --version =0.20.2 cargo-deny
+      - run: cp ../../deny.toml deny.toml
+      - run: cargo deny --manifest-path Cargo.toml check
+        continue-on-error: true
+      # Linux tree must not contain zbus / zvariant / accesskit_unix
+      - run: bash check-linux-tree.sh
+      # V2: no network or telemetry crates in any target
+      - run: |
+          cargo tree -e normal --target all --prefix none > tree.txt
+          if grep -E '^(reqwest|hyper|ureq|curl|h2|isahc|surf|sentry|opentelemetry|tokio) ' tree.txt; then echo "V2 FAIL"; exit 1; fi
+          echo "V2 PASS"
+      # V3: runtime libraries
+      - if: runner.os == 'Linux'
+        run: readelf -d target/release/gui-probe | grep NEEDED
+      - if: runner.os == 'macOS'
+        run: otool -L target/release/gui-probe
+      - if: runner.os == 'Windows'
+        run: objdump -p target/release/gui-probe.exe | grep "DLL Name" || dumpbin /dependents target/release/gui-probe.exe
+      # V9: size
+      - run: ls -l target/release/gui-probe*
