@@ -43,6 +43,7 @@ fn all_errors() -> Vec<FriendsError> {
         NotActive,
         RolledBack,
         StaleInstance,
+        SavedAnchorStale,
     ]
 }
 

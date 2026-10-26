@@ -30,6 +30,11 @@ pub enum FriendsError {
     /// Другой экземпляр программы уже изменил безопасность (запись в хранилище ОС новее
     /// нашего файла): изменение не сохранено, список нужно открыть заново.
     StaleInstance,
+    /// Изменение безопасности сохранено в файле и применено в памяти, но запись счётчика-якоря
+    /// в хранилище ОС не удалась (S1 L3, этап 18). Это не «не удалось»: изменение не потеряно,
+    /// якорь отстаёт на 1 и исправится при следующем `open_anchored` или изменении безопасности.
+    /// Оболочка показывает предупреждение, а не ошибку. Возвращается только из этого случая.
+    SavedAnchorStale,
 }
 
 impl fmt::Display for FriendsError {
@@ -58,6 +63,7 @@ impl fmt::Display for FriendsError {
             Self::NotActive => "friend is not active",
             Self::RolledBack => "friends list is older than the last security change",
             Self::StaleInstance => "friends list was changed by another instance",
+            Self::SavedAnchorStale => "saved, but the rollback counter was not updated",
         };
         f.write_str(text)
     }
