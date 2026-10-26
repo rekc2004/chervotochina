@@ -377,9 +377,12 @@ async fn handle_ctl_in<L: Links>(inner: Arc<Inner<L>>, st: IncomingStream<L::Con
         mut rx,
         ..
     } = st;
-    if inner.links.permission(&pair).is_none() || !inner.ctl_rate_ok(&pair) {
+    if inner.links.permission(&pair).is_none() {
         return;
     }
+    let Some(token) = inner.ctl_rate_ok(&pair) else {
+        return;
+    };
     let mut buf = Vec::new();
     let first = timeout(
         cfg.offer_read_timeout,
@@ -394,7 +397,10 @@ async fn handle_ctl_in<L: Links>(inner: Arc<Inner<L>>, st: IncomingStream<L::Con
             offer_bytes,
         }))) => {
             let head = (file_count, total_size, offer_bytes);
-            receive_offer(&inner, conn, tx, rx, buf, TransferKey { pair, id }, head).await;
+            let key = TransferKey { pair, id };
+            // повтор известного предложения не тратит общий предел потоков (см. `ctl_rate_ok`)
+            inner.refund_reoffer(&key, token);
+            receive_offer(&inner, conn, tx, rx, buf, key, head).await;
         }
         Ok(Ok(Some(Message::Resume { id }))) => {
             handle_resume(inner.clone(), conn, tx, rx, buf, TransferKey { pair, id }).await;
@@ -735,6 +741,19 @@ impl<L: Links> Drop for Unreg<L> {
     }
 }
 
+/// Конец ожидающего предложения достаётся тому, кто взял ответ (`take_answer`): ответ
+/// пользователя, `end_pending` и концы в `pending_task` не выдадут два итоговых события и не
+/// затрут чужое надгробие. Проигравший ничего не делает: победитель либо пришлёт ответ по
+/// oneshot, либо остановит `s.end`, и цикл `pending_task` это увидит. Уступка планировщику не
+/// даёт крутить цикл вхолостую в окне между `take_answer` и `send`.
+async fn win_end(s: &Arc<RecvSession>) -> bool {
+    if s.take_answer().is_some() {
+        return true;
+    }
+    tokio::task::yield_now().await;
+    false
+}
+
 enum Ev<C: Connection> {
     Answer(Result<bool, oneshot::error::RecvError>),
     /// Кто-то другой закрыл ожидающее предложение и всё сделал сам.
@@ -840,8 +859,10 @@ async fn pending_task<L: Links>(
                 return;
             }
             Ev::Deadline => {
+                if !win_end(&s).await {
+                    continue;
+                }
                 inner.remove_inb_tomb(&key, Tomb::Expired);
-                s.take_answer();
                 if let Some(tx) = tx_cur.as_mut() {
                     write_decision(tx, key.id, Verdict::Expired, cfg.msg_timeout).await;
                 }
@@ -852,8 +873,10 @@ async fn pending_task<L: Links>(
                 return;
             }
             Ev::Grace => {
+                if !win_end(&s).await {
+                    continue;
+                }
                 inner.remove_inb_tomb(&key, Tomb::Expired);
-                s.take_answer();
                 s.emit(TransferEvent::Failed {
                     key,
                     reason: FailReason::Disconnected,
@@ -879,8 +902,12 @@ async fn pending_task<L: Links>(
             }
             Ev::Read(r) => match r {
                 Ok(Some(Message::Cancel { id, .. })) if id == key.id => {
+                    // прочитанный кадр израсходован: читатель больше не опрашивается
+                    rd = None;
+                    if !win_end(&s).await {
+                        continue;
+                    }
                     inner.remove_inb(&key);
-                    s.take_answer();
                     s.emit(TransferEvent::Cancelled {
                         key,
                         by: Side::Sender,
@@ -896,8 +923,11 @@ async fn pending_task<L: Links>(
                 }
                 // HASH_PROGRESS до принятия и любое другое сообщение или ошибка разбора
                 Ok(Some(_)) | Err(_) => {
+                    rd = None;
+                    if !win_end(&s).await {
+                        continue;
+                    }
                     inner.remove_inb_tomb(&key, Tomb::Protocol);
-                    s.take_answer();
                     if let Some(tx) = tx_cur.as_mut() {
                         write_cancel(tx, key.id, CancelReason::Protocol, cfg.msg_timeout).await;
                     }
