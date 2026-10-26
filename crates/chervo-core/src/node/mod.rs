@@ -17,6 +17,7 @@ mod profile;
 mod runtime;
 mod settings;
 mod store;
+#[cfg(any(test, feature = "test-store"))]
 mod testing;
 #[cfg(test)]
 mod tests;
@@ -58,9 +59,11 @@ pub use self::events::{NodeEvent, NodeEvents};
 #[cfg(any(test, feature = "fuzzing"))]
 #[doc(hidden)]
 pub use self::settings::fuzz_settings;
+#[cfg(any(test, feature = "test-store"))]
 #[doc(hidden)]
 pub use self::store::KeyBackend;
 pub use self::store::KeyStoreKind;
+#[cfg(any(test, feature = "test-store"))]
 #[doc(hidden)]
 pub use self::testing::TestOpen;
 pub use self::views::{
@@ -114,7 +117,8 @@ pub(crate) enum OpenMode {
 /// `testing.rs`.
 pub(crate) enum StoreSource {
     Os,
-    Given(Arc<dyn KeyBackend>),
+    #[cfg(any(test, feature = "test-store"))]
+    Given(Arc<dyn store::KeyBackend>),
 }
 
 /// Запущенный узел. Не клонируется. `Send + Sync`.
@@ -174,9 +178,10 @@ fn open_store(src: StoreSource) -> Result<Arc<NodeStore>, NodeError> {
     match src {
         StoreSource::Os => {
             let os = chervo_identity::OsKeyStore::open().map_err(|_| NodeError::KeyStoreLocked)?;
-            let backend: Arc<dyn KeyBackend> = Arc::new(os);
+            let backend: Arc<dyn store::KeyBackend> = Arc::new(os);
             Ok(Arc::new(NodeStore::new(backend, KeyStoreKind::of_os())))
         }
+        #[cfg(any(test, feature = "test-store"))]
         StoreSource::Given(b) => Ok(Arc::new(NodeStore::new(b, KeyStoreKind::Test))),
     }
 }
@@ -220,7 +225,7 @@ impl Node {
                 confirm_shared_root,
             ),
             Some(mut s) => {
-                settings::replace_root(&mut s, root, confirm_shared_root);
+                settings::replace_root(&mut s, root, confirm_shared_root)?;
                 s
             }
         };
@@ -282,8 +287,10 @@ impl Node {
         self.core.sink.set_waker(w);
     }
 
-    /// Упорядоченная остановка: передачи, движок, транспорт, снятие проброса (до 8 с), затем
-    /// фоновая среда и замок. Не дольше `deadline` на передачи плюс 8 с на проброс.
+    /// Упорядоченная остановка: передачи, движок, транспорт, снятие проброса, затем фоновая среда
+    /// и замок. Верхняя граница: `deadline` + 1 с (ожидание остановки передач) + 8 с (снятие
+    /// проброса) + 2 с (остановка среды) = `deadline` + 11 с. Снятие проброса выполняется всегда,
+    /// даже если остановка передач не уложилась в срок.
     pub fn shutdown(self, deadline: Duration) {
         self.stop(deadline);
     }
@@ -293,12 +300,17 @@ impl Node {
             return;
         }
         let core = self.core.clone();
-        let _ = runtime::run(&self.core.rt, async move {
-            core.transfers.shutdown();
-            let _ = tokio::time::timeout(deadline, core.transfers.wait_stopped()).await;
-            core.engine.shutdown();
-            core.transport.shutdown();
-        });
+        let _ = runtime::run_timeout(
+            &self.core.rt,
+            async move {
+                core.transfers.shutdown();
+                let _ = tokio::time::timeout(deadline, core.transfers.wait_stopped()).await;
+            },
+            deadline + Duration::from_secs(1),
+        );
+        // и при просроченном ожидании движок и транспорт останавливаются (оба вызова синхронные)
+        self.core.engine.shutdown();
+        self.core.transport.shutdown();
         // проброс снимается явно: движок сам `release` при выходе не вызывает
         let mapper = lock(&self.core.mapper).take();
         if let Some(m) = mapper {

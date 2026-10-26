@@ -57,6 +57,8 @@ fn all_errors() -> Vec<NodeError> {
         Shutdown,
         Io,
         NoSpace,
+        InvalidValue,
+        LimitReached,
     ]
 }
 

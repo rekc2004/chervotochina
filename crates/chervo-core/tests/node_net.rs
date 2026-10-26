@@ -309,6 +309,33 @@ fn two_nodes_befriend_transfer_block_and_revoke() {
         let _ = finished(&mut a, t3);
     }
 
+    // --- приём в другую папку: путь запоминается только после успеха и в каноническом виде
+    let other = b.rig.dir.join("recv-other");
+    std::fs::create_dir_all(&other).unwrap();
+    write_file(&src.join("extra.txt"), b"into another folder");
+    let t4 = a.node.send(fb_on_a, &[src.join("extra.txt")]).unwrap();
+    let in4 =
+        b.w.wait(LONG, |e| match e {
+            NodeEvent::OfferIncoming { transfer } => Some(*transfer),
+            _ => None,
+        })
+        .expect("предложение для другой папки");
+    assert!(b.node.settings().extra_roots.is_empty());
+    b.node.accept_into(in4, &other).unwrap();
+    assert_eq!(finished(&mut b, in4), TransferResult::Completed);
+    assert_eq!(finished(&mut a, t4), TransferResult::Completed);
+    assert_eq!(
+        std::fs::read(other.join("extra.txt")).unwrap(),
+        b"into another folder"
+    );
+    let canon = std::fs::canonicalize(&other).unwrap();
+    let shown = b.node.settings().extra_roots;
+    assert_eq!(shown.len(), 1);
+    assert_eq!(
+        Path::new(&shown[0]),
+        Path::new(canon.to_str().unwrap().trim_start_matches(r"\\?\"))
+    );
+
     // --- блокировка рвёт живое соединение
     a.w.clear();
     b.w.clear();

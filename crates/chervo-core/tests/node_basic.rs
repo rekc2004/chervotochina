@@ -310,14 +310,14 @@ fn clock_reset() {
 fn settings_setters_persist_and_flag_restart() {
     let rig = Rig::new("setters");
     let (node, _ev) = rig.start();
-    assert_eq!(node.set_port(80).err(), Some(NodeError::SettingsCorrupt));
+    assert_eq!(node.set_port(80).err(), Some(NodeError::InvalidValue));
     assert_eq!(
         node.set_min_free_percent(101).err(),
-        Some(NodeError::SettingsCorrupt)
+        Some(NodeError::InvalidValue)
     );
     assert_eq!(
         node.set_manual_forward(Some(0)).err(),
-        Some(NodeError::SettingsCorrupt)
+        Some(NodeError::InvalidValue)
     );
     node.set_min_free_percent(25).unwrap();
     node.set_manual_forward(Some(50123)).unwrap();

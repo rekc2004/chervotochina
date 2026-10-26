@@ -74,6 +74,9 @@ pub const UNSUPPORTED_TEXT: &str = "Эта возможность недосту
 pub const SHUTDOWN_TEXT: &str = "Программа завершает работу.";
 pub const IO_TEXT: &str = "Ошибка чтения или записи.";
 pub const NO_SPACE_TEXT: &str = "В выбранной папке не хватает места.";
+pub const INVALID_VALUE_TEXT: &str = "Недопустимое значение настройки: оно вне разрешённых границ.";
+pub const LIMIT_REACHED_TEXT: &str =
+    "Достигнут предел списка: уберите ненужную папку приёма или роутер и повторите.";
 
 pub const ANCHOR_NOT_UPDATED_TEXT: &str =
     "Сохранено, но счётчик защиты от отката не обновлён. Перезапустите программу.";
@@ -165,6 +168,8 @@ impl NodeError {
             Self::Shutdown => SHUTDOWN_TEXT,
             Self::Io => IO_TEXT,
             Self::NoSpace => NO_SPACE_TEXT,
+            Self::InvalidValue => INVALID_VALUE_TEXT,
+            Self::LimitReached => LIMIT_REACHED_TEXT,
         }
     }
 }

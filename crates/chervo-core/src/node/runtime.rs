@@ -12,6 +12,9 @@ use tokio::sync::oneshot;
 
 use super::error::NodeError;
 
+/// Сколько среда ждёт незавершённые блокирующие задачи при остановке.
+pub(crate) const RT_SHUTDOWN_BOUND: Duration = Duration::from_secs(2);
+
 pub(crate) struct RtThread {
     pub(crate) handle: Handle,
     stop: Option<oneshot::Sender<()>>,
@@ -43,7 +46,7 @@ impl RtThread {
                     let _ = stop_rx.await;
                 });
                 // незавершённые блокирующие задачи не держат выход дольше двух секунд
-                rt.shutdown_timeout(Duration::from_secs(2));
+                rt.shutdown_timeout(RT_SHUTDOWN_BOUND);
             })
             .map_err(|_| NodeError::Io)?;
         match hrx.recv() {
@@ -70,8 +73,9 @@ impl RtThread {
     }
 }
 
-/// Выполнить будущее на фоновой среде и дождаться результата. `None`: среда остановлена.
-pub(crate) fn run<F>(handle: &Handle, f: F) -> Option<F::Output>
+/// Выполнить будущее на фоновой среде и дождаться результата не дольше `limit`. `None`: среда
+/// остановлена или срок вышел (задача при этом продолжает идти на среде, пока та не остановится).
+pub(crate) fn run_timeout<F>(handle: &Handle, f: F, limit: Duration) -> Option<F::Output>
 where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
@@ -80,5 +84,5 @@ where
     drop(handle.spawn(async move {
         let _ = tx.send(f.await);
     }));
-    rx.recv().ok()
+    rx.recv_timeout(limit).ok()
 }

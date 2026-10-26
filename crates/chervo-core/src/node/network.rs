@@ -65,7 +65,7 @@ impl Node {
                 r.permanent_ok = permanent_ok;
             } else {
                 if s.routers.len() >= settings::MAX_ROUTERS {
-                    return Err(NodeError::InputTooLong);
+                    return Err(NodeError::LimitReached);
                 }
                 s.routers.push(AllowedRouter {
                     id: router.0.clone(),

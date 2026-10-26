@@ -820,6 +820,105 @@ fn event_queue_is_bounded_and_reports_lag_once() {
 }
 
 #[test]
+fn replace_root_keeps_the_old_one_and_reports_a_full_list() {
+    let mut s = Settings::new(50000, abs(&["a"]), false);
+    settings::replace_root(&mut s, &abs(&["b"]), true).unwrap();
+    assert_eq!(
+        (s.receive_root.clone(), s.extra_roots.clone()),
+        (abs(&["b"]), vec![abs(&["a"])])
+    );
+    assert!(s.shared_root_confirmed);
+    // возврат на прежнюю папку: она уходит из дополнительных, новая дополнительная это бывшая основная
+    settings::replace_root(&mut s, &abs(&["a"]), false).unwrap();
+    assert_eq!(
+        (s.receive_root.clone(), s.extra_roots.clone()),
+        (abs(&["a"]), vec![abs(&["b"])])
+    );
+    assert!(s.shared_root_confirmed, "подтверждение не снимается");
+    // список полон (основная и 15 дополнительных): LimitReached, настройки не тронуты
+    let mut full = Settings::new(50000, abs(&["main"]), false);
+    full.extra_roots = (0..15).map(|i| abs(&["x", &i.to_string()])).collect();
+    assert!(serialize(&full).is_ok());
+    let before = full.clone();
+    assert_eq!(
+        settings::replace_root(&mut full, &abs(&["new"]), false).err(),
+        Some(NodeError::LimitReached)
+    );
+    assert!(full == before);
+    // но выбрать одну из уже известных можно
+    settings::replace_root(&mut full, &abs(&["x", "3"]), false).unwrap();
+    assert_eq!(full.extra_roots.len(), 15);
+}
+
+#[test]
+fn run_timeout_gives_up_but_does_not_hang() {
+    let rt = super::runtime::RtThread::start().unwrap();
+    let slow = super::runtime::run_timeout(
+        &rt.handle,
+        async {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            1
+        },
+        std::time::Duration::from_millis(200),
+    );
+    assert_eq!(slow, None);
+    let fast =
+        super::runtime::run_timeout(&rt.handle, async { 7 }, std::time::Duration::from_secs(5));
+    assert_eq!(fast, Some(7));
+    let mut rt = rt;
+    rt.stop();
+    // среда остановлена: ожидание не зависает
+    assert_eq!(
+        super::runtime::run_timeout(&rt.handle, async { 1 }, std::time::Duration::from_secs(5)),
+        None
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn data_dir_must_be_ours_and_private_unix() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tmp::new("owner");
+    let open = t.0.join("open");
+    std::fs::create_dir(&open).unwrap();
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+    assert_eq!(
+        profile::resolve_data_dir(Some(&open)).err(),
+        Some(NodeError::DataDir)
+    );
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(profile::resolve_data_dir(Some(&open)).unwrap(), open);
+    let group = t.0.join("group");
+    std::fs::create_dir(&group).unwrap();
+    std::fs::set_permissions(&group, std::fs::Permissions::from_mode(0o770)).unwrap();
+    assert_eq!(
+        profile::resolve_data_dir(Some(&group)).err(),
+        Some(NodeError::DataDir)
+    );
+    // ссылка на хороший каталог: отказ
+    let link = t.0.join("link");
+    std::os::unix::fs::symlink(&open, &link).unwrap();
+    assert_eq!(
+        profile::resolve_data_dir(Some(&link)).err(),
+        Some(NodeError::DataDir)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn settings_symlink_is_not_followed_unix() {
+    let t = Tmp::new("setlink");
+    let real = t.0.join("real");
+    settings::save(&t.0, &full_sample()).unwrap();
+    std::fs::rename(t.0.join("settings.v1"), &real).unwrap();
+    std::os::unix::fs::symlink(&real, t.0.join("settings.v1")).unwrap();
+    assert_eq!(settings::load(&t.0).err(), Some(NodeError::SettingsCorrupt));
+    // сам O_NOFOLLOW (гонка между проверкой и открытием): открытие ссылки обрывается
+    assert!(super::settings::open_nofollow(&t.0.join("settings.v1")).is_err());
+    assert!(super::settings::open_nofollow(&real).is_ok());
+}
+
+#[test]
 fn node_and_events_are_thread_safe() {
     fn send_sync<T: Send + Sync>() {}
     fn send<T: Send>() {}

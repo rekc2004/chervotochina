@@ -6,7 +6,7 @@
 //! переименование), права 0600 там, где они есть.
 
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use chervo_upnp::{AllowedRouter, RouterId};
@@ -77,18 +77,27 @@ impl Settings {
     }
 }
 
-/// Новая основная папка. Прежняя основная остаётся среди дополнительных (если есть место в
-/// списке), чтобы недокачанные там передачи не потерялись; новая из дополнительных убирается.
-/// Подтверждение «других пользователей нет» только накапливается.
-pub(crate) fn replace_root(s: &mut Settings, root: &Path, confirm_shared: bool) {
+/// Новая основная папка. Прежняя основная остаётся среди дополнительных, чтобы недокачанные там
+/// передачи не потерялись; новая из дополнительных убирается. Места в списке нет:
+/// `LimitReached`, настройки не меняются. Подтверждение «других пользователей нет» только
+/// накапливается.
+pub(crate) fn replace_root(
+    s: &mut Settings,
+    root: &Path,
+    confirm_shared: bool,
+) -> Result<(), NodeError> {
     if s.receive_root != root {
-        let old = std::mem::replace(&mut s.receive_root, root.to_path_buf());
-        s.extra_roots.retain(|r| r != root);
-        if s.extra_roots.len() + 1 < MAX_ROOTS {
-            s.extra_roots.push(old);
+        let mut next = s.clone();
+        let old = std::mem::replace(&mut next.receive_root, root.to_path_buf());
+        next.extra_roots.retain(|r| r != root);
+        if next.extra_roots.len() + 1 >= MAX_ROOTS {
+            return Err(NodeError::LimitReached);
         }
+        next.extra_roots.push(old);
+        *s = next;
     }
     s.shared_root_confirmed |= confirm_shared;
+    Ok(())
 }
 
 fn bad<T>() -> Result<T, NodeError> {
@@ -328,6 +337,19 @@ pub(crate) fn serialize(s: &Settings) -> Result<String, NodeError> {
     Ok(out)
 }
 
+// тип `bits()` зависит от ОС (u32 или i32): приведение нужно не везде
+#[allow(clippy::unnecessary_cast, clippy::cast_possible_wrap)]
+pub(crate) fn open_nofollow(path: &Path) -> std::io::Result<fs::File> {
+    let mut opts = OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(
+        &mut opts,
+        rustix::fs::OFlags::NOFOLLOW.bits() as i32,
+    );
+    opts.open(path)
+}
+
 /// Читает `<dir>/settings.v1`. `Ok(None)`: файла нет. Размер проверяется до чтения.
 pub(crate) fn load(dir: &Path) -> Result<Option<Settings>, NodeError> {
     let path = dir.join(FILE_NAME);
@@ -339,7 +361,17 @@ pub(crate) fn load(dir: &Path) -> Result<Option<Settings>, NodeError> {
     if !meta.file_type().is_file() || meta.len() > MAX_FILE_BYTES as u64 {
         return bad();
     }
-    let bytes = fs::read(&path).map_err(|_| NodeError::Io)?;
+    // один раз открываем (на Unix с O_NOFOLLOW: подмена обычного файла ссылкой между проверкой и
+    // чтением не пройдёт), проверяем уже открытый файл и читаем не больше предела плюс байт
+    let file = open_nofollow(&path).map_err(|_| NodeError::Io)?;
+    let on_handle = file.metadata().map_err(|_| NodeError::Io)?;
+    if !on_handle.is_file() || on_handle.len() > MAX_FILE_BYTES as u64 {
+        return bad();
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_FILE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| NodeError::Io)?;
     parse(&bytes).map(Some)
 }
 

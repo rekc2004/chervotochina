@@ -169,6 +169,8 @@ impl EventSink {
         self.flush_lagged();
         match self.tx.try_send(e) {
             Ok(()) => self.wake(),
+            // потеря события: для InviteSas снимка нет, поэтому при потере код сверки не вернуть
+            // (приглашение закончится по сроку, ничего не подтверждается молча)
             Err(std::sync::mpsc::TrySendError::Full(_)) => {
                 *self.lagged.lock().unwrap_or_else(PoisonError::into_inner) = true;
             }

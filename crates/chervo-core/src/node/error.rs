@@ -19,7 +19,8 @@ pub enum NodeError {
     AlreadyRunning,
     /// Каталог данных не определить или он не абсолютный.
     DataDir,
-    /// Файл настроек не разобрать, либо значение настройки вне допустимых границ.
+    /// Файл настроек не разобрать (только сломанный файл; неверное значение в вызове это
+    /// `InvalidValue`).
     SettingsCorrupt,
     /// Хранилище ключей ОС закрыто или недоступно (одна ошибка на оба случая, этап 11, Н1).
     KeyStoreLocked,
@@ -46,6 +47,10 @@ pub enum NodeError {
     /// В выбранной папке приёма не хватает места (добавлено в 18а: без неё `accept_into` нечем
     /// ответить).
     NoSpace,
+    /// Значение настройки вне допустимых границ (порт, процент, внешний порт).
+    InvalidValue,
+    /// Достигнут предел списка (папок приёма или разрешённых роутеров).
+    LimitReached,
 }
 
 impl fmt::Display for NodeError {
@@ -72,6 +77,8 @@ impl fmt::Display for NodeError {
             Self::Shutdown => "node is shut down",
             Self::Io => "i/o error",
             Self::NoSpace => "not enough free space",
+            Self::InvalidValue => "setting value is out of range",
+            Self::LimitReached => "list limit reached",
         };
         f.write_str(text)
     }

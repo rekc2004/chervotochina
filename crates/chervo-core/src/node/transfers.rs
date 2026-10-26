@@ -23,8 +23,8 @@ use super::error::NodeError;
 use super::folder;
 use super::settings::{self, Settings};
 use super::views::{
-    FileKind, FriendRef, IncomingOffer, OfferFile, RouterCandidate, RouterView, SettingsView,
-    SpaceView, TransferRef, TransferView, path_for_display,
+    FileKind, FriendRef, IncomingOffer, NodeWarning, OfferFile, RouterCandidate, RouterView,
+    SettingsView, SpaceView, TransferRef, TransferView, path_for_display,
 };
 
 fn kind_of(p: &chervo_receive::SafeRelPath) -> (FileKind, bool, bool) {
@@ -168,8 +168,10 @@ impl Node {
     }
 
     /// Принять в другую папку (когда в основной не хватает места). Папка проверяется, место на
-    /// её томе тоже; успешный выбор запоминается в настройках (`extra_root`), чтобы после
-    /// перезапуска передача нашлась.
+    /// её томе тоже. После успешного приёма канонический путь запоминается в настройках
+    /// (`extra_root`), чтобы после перезапуска передача нашлась; список полон: `LimitReached`
+    /// ещё до приёма. Не удалось записать настройки: приём состоялся, придёт
+    /// `Warning(SettingsNotSaved)`.
     pub fn accept_into(&self, transfer: TransferRef, root: &Path) -> Result<(), NodeError> {
         let key = *transfer.inner();
         let mut rc = self.core.rcfg.clone();
@@ -177,16 +179,14 @@ impl Node {
         rc.allow_shared_root |= lock(&self.core.settings).shared_root_confirmed;
         let target = ReceiveRoot::open(&rc).map_err(NodeError::ReceiveRoot)?;
         let target_root = target.root().to_path_buf();
-        if target.root() != self.core.root.root() {
-            self.update_settings(|s| {
-                if !s.extra_roots.iter().any(|r| r == root) && s.receive_root != root {
-                    if 1 + s.extra_roots.len() >= settings::MAX_ROOTS {
-                        return Err(NodeError::InputTooLong);
-                    }
-                    s.extra_roots.push(root.to_path_buf());
-                }
-                Ok(())
-            })?;
+        let is_primary = target.root() == self.core.root.root();
+        let known =
+            |s: &Settings| s.receive_root == target_root || s.extra_roots.contains(&target_root);
+        if !is_primary {
+            let s = lock(&self.core.settings);
+            if !known(&s) && 1 + s.extra_roots.len() >= settings::MAX_ROOTS {
+                return Err(NodeError::LimitReached);
+            }
         }
         accept_into(&self.core.transfers, &self.core.placement, &key, target).map_err(
             |e| match e {
@@ -199,7 +199,21 @@ impl Node {
                 _ => NodeError::Io,
             },
         )?;
-        lock(&self.core.reg).entry(key, Side::Receiver).dest_root = Some(target_root);
+        lock(&self.core.reg).entry(key, Side::Receiver).dest_root = Some(target_root.clone());
+        if !is_primary {
+            let saved = self.update_settings(|s| {
+                if !known(s) {
+                    if 1 + s.extra_roots.len() >= settings::MAX_ROOTS {
+                        return Err(NodeError::LimitReached);
+                    }
+                    s.extra_roots.push(target_root.clone());
+                }
+                Ok(())
+            });
+            if saved.is_err() {
+                self.core.warn(NodeWarning::SettingsNotSaved);
+            }
+        }
         Ok(())
     }
 
@@ -281,17 +295,14 @@ impl Node {
         rc.root = root.to_path_buf();
         rc.allow_shared_root |= confirm_shared_root;
         ReceiveRoot::open(&rc).map_err(NodeError::ReceiveRoot)?;
-        self.update_settings(|s| {
-            settings::replace_root(s, root, confirm_shared_root);
-            Ok(())
-        })
+        self.update_settings(|s| settings::replace_root(s, root, confirm_shared_root))
     }
 
     /// Запас свободного места после приёма, процентов объёма тома (0..=100). Вступает в силу
     /// после перезапуска.
     pub fn set_min_free_percent(&self, percent: u8) -> Result<(), NodeError> {
         if percent > 100 {
-            return Err(NodeError::SettingsCorrupt);
+            return Err(NodeError::InvalidValue);
         }
         self.update_settings(|s| {
             s.min_free_percent = percent;
@@ -302,7 +313,7 @@ impl Node {
     /// Порт UDP (1024..=65535). Вступает в силу после перезапуска.
     pub fn set_port(&self, port: u16) -> Result<(), NodeError> {
         if port < settings::MIN_USER_PORT {
-            return Err(NodeError::SettingsCorrupt);
+            return Err(NodeError::InvalidValue);
         }
         self.update_settings(|s| {
             s.port = port;
@@ -313,7 +324,7 @@ impl Node {
     /// Внешний порт ручного проброса (`None`: нет). Вступает в силу после перезапуска.
     pub fn set_manual_forward(&self, port: Option<u16>) -> Result<(), NodeError> {
         if port == Some(0) {
-            return Err(NodeError::SettingsCorrupt);
+            return Err(NodeError::InvalidValue);
         }
         self.update_settings(|s| {
             s.manual_forward = port;

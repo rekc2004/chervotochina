@@ -9,7 +9,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const NAME: &str = "open_with_store_for_tests";
+/// Любой идентификатор тестового окна в узел (`open_with_store_for_tests`, `clock_result_for_tests`
+/// и т. п.).
+const NAME: &str = "_for_tests";
 /// Единственный разрешённый файл (путь от `crates/`, с косой чертой).
 const ALLOWED: &str = "chervo-core/src/node/testing.rs";
 
@@ -61,8 +63,14 @@ fn violations(files: &[(String, String)]) -> Vec<String> {
 #[test]
 fn guard_sees_violations() {
     let files = vec![
-        ("chervo-gui/src/main.rs".to_owned(), format!("x.{NAME}(c);")),
-        (ALLOWED.to_owned(), format!("pub fn {NAME}()")),
+        (
+            "chervo-gui/src/main.rs".to_owned(),
+            "x.clock_result_for_tests(c);".to_owned(),
+        ),
+        (
+            ALLOWED.to_owned(),
+            "pub fn open_with_store_for_tests()".to_owned(),
+        ),
         ("chervo-core/src/lib.rs".to_owned(), "mod node;".to_owned()),
     ];
     assert_eq!(violations(&files), ["chervo-gui/src/main.rs"]);
@@ -79,7 +87,7 @@ fn test_entry_point_lives_only_in_testing_rs() {
     );
     // положительный контроль: точка входа на месте
     let testing = files.iter().find(|(rel, _)| rel == ALLOWED).unwrap();
-    assert!(testing.1.contains(&format!("pub fn {NAME}")));
+    assert!(testing.1.contains("pub fn open_with_store_for_tests"));
 }
 
 /// Продуктовый вход использует только хранилище ОС, а подстановка недостижима из `open*`.

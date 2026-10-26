@@ -99,11 +99,29 @@ fn create_private_dir(dir: &Path) -> Result<(), NodeError> {
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
     b.create(dir).map_err(|_| NodeError::DataDir)?;
+    #[cfg(unix)]
+    check_private_unix(dir)?;
     if fs::metadata(dir).is_ok_and(|m| m.is_dir()) {
         Ok(())
     } else {
         Err(NodeError::DataDir)
     }
+}
+
+/// Unix (L2): уже существовавший каталог данных тоже должен быть нашим: не ссылка, владелец
+/// равен действующему пользователю, группа и остальные не пишут в него. Иначе чужой процесс
+/// мог бы подменить `settings.v1` или занять замок.
+#[cfg(unix)]
+pub(crate) fn check_private_unix(dir: &Path) -> Result<(), NodeError> {
+    use std::os::unix::fs::MetadataExt;
+    let m = fs::symlink_metadata(dir).map_err(|_| NodeError::DataDir)?;
+    if m.file_type().is_symlink() || !m.file_type().is_dir() {
+        return Err(NodeError::DataDir);
+    }
+    if m.uid() != rustix::process::geteuid().as_raw() || m.mode() & 0o022 != 0 {
+        return Err(NodeError::DataDir);
+    }
+    Ok(())
 }
 
 /// Замок единственного экземпляра. Держится, пока жив `InstanceLock`; снимается при `Drop` и при
