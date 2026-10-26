@@ -21,6 +21,8 @@ chervo-receive = { path = "../crates/chervo-receive", features = ["fuzzing"] }
 chervo-identity = { path = "../crates/chervo-identity" }
 chervo-upnp = { path = "../crates/chervo-upnp", features = ["fuzzing"] }
 chervo-transport-quinn = { path = "../crates/chervo-transport-quinn", features = ["fuzzing"] }
+# Stage 18a: the node settings parser (`chervo_core::fuzz_settings`, target `settings`).
+chervo-core = { path = "../crates/chervo-core", features = ["fuzzing"] }
 
 [workspace]
 members = ["."]
@@ -159,6 +161,14 @@ bench = false
 [[bin]]
 name = "transfer_names_file"
 path = "fuzz_targets/transfer_names_file.rs"
+test = false
+doc = false
+bench = false
+
+# Stage 18a: node settings file parser.
+[[bin]]
+name = "settings"
+path = "fuzz_targets/settings.rs"
 test = false
 doc = false
 bench = false

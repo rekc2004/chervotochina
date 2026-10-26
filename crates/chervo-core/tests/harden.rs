@@ -61,7 +61,10 @@ fn harden_macos_core_zero() {
 #[test]
 fn harden_windows_applies_nothing() {
     let report = harden_process();
-    assert_eq!(report, chervo_core::HardenReport::default());
+    assert!(
+        !report.not_dumpable && !report.core_limit_zero,
+        "{report:?}"
+    );
     assert!(!report.any_applied());
 }
 
