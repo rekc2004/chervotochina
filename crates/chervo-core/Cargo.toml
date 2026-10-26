@@ -14,11 +14,29 @@ chervo-friends.workspace = true
 chervo-connect.workspace = true
 chervo-transfer.workspace = true
 chervo-receive.workspace = true
+# Этап 18а (решение D1): узел живёт в ядре, транспорт окончательный (quinn), UPnP и сверка времени
+# подключаются только по действию пользователя. Новых внешних пакетов нет.
+chervo-transport-quinn.workspace = true
+chervo-upnp.workspace = true
+chervo-timesync.workspace = true
+tokio.workspace = true
+# Нужен только для имени `Zeroizing` в обёртке хранилища ключей (`node/store.rs`); пакет уже в
+# рабочем пространстве.
+zeroize.workspace = true
 
 # Запрет дампов памяти (этап 17, C07): безопасный API rustix без `unsafe`. Крейт уже в
 # `Cargo.lock`; добавлена только возможность `process`.
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "=1.1.5", default-features = false, features = ["std", "process"] }
+
+[dev-dependencies]
+# Свои тесты используют точку входа за свойством `fuzzing` (как в chervo-token): в продуктовой
+# сборке её нет.
+chervo-core = { path = ".", features = ["fuzzing"] }
+
+[features]
+# Точка входа разбора настроек для libFuzzer (`fuzz/`, вне рабочего пространства), не для продукта.
+fuzzing = []
 
 [lints]
 workspace = true
