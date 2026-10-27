@@ -108,7 +108,7 @@ impl Node {
 4. No logging, no printing in `chervo-core/src` (`no_logger.rs`) [P]. Event, error and view `Debug` never contain SAS, tokens, names, paths, addresses or keys (extend `chervo-core/tests/redaction.rs`).
 5. Untrusted text input (invite, address token, revocation text pasted from a messenger): trimmed; > 4096 bytes → `InputTooLong` before decoding. It goes only to the existing decoders, which are fuzzed [P: TASK 11, 16, 17]. Errors never echo the input.
 6. Offer views contain only sanitized planned names (invariant tested by a hostile-name table: bidi U+202E, zero-width, `..`, `CON`, NUL-free over-long).
-7. Shutdown always tries `release()` of a live mapping with a bound of 8 s. It never hangs longer than `deadline` + 8 s.
+7. Shutdown always tries `release()` of a live mapping with a bound of 8 s. It never hangs longer than `deadline` + 11 s (1 s for the runtime thread, 2 s runtime shutdown, 8 s `release()`; security review 18a L1).
 8. One process per data dir (lock). This also stops GUI and CLI from running on one profile at the same time.
 
 ### 2.4 Acceptance criteria (each by command; Windows dev box unless noted; CI = 3 OS)
