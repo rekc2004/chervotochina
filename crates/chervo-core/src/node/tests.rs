@@ -919,6 +919,57 @@ fn settings_symlink_is_not_followed_unix() {
 }
 
 #[test]
+fn settings_handle_must_be_a_regular_file() {
+    let t = Tmp::new("handle");
+    settings::save(&t.0, &full_sample()).unwrap();
+    let file = settings::open_nofollow(&t.0.join("settings.v1")).unwrap();
+    assert!(settings::is_regular_handle(&file.metadata().unwrap()));
+    // каталог (на Windows он открывается с флагом точки повторной обработки): не обычный файл
+    if let Ok(d) = settings::open_nofollow(&t.0) {
+        assert!(!settings::is_regular_handle(&d.metadata().unwrap()));
+    }
+    // символьная ссылка на Windows: нужна привилегия, без неё проверка пропускается
+    #[cfg(windows)]
+    {
+        let link = t.0.join("link.v1");
+        if std::os::windows::fs::symlink_file(t.0.join("settings.v1"), &link).is_ok() {
+            let h = settings::open_nofollow(&link).unwrap();
+            assert!(
+                !settings::is_regular_handle(&h.metadata().unwrap()),
+                "ссылка принята за обычный файл"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn settings_fifo_does_not_block_unix() {
+    let t = Tmp::new("fifo");
+    let fifo = t.0.join("settings.v1");
+    let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+    if !made.is_ok_and(|s| s.success()) {
+        return; // нет mkfifo: проверка пропускается
+    }
+    // открытие FIFO без писателя не должно ждать (O_NONBLOCK), затем вид файла отвергается
+    let (tx, rx) = std::sync::mpsc::channel();
+    let p = fifo.clone();
+    std::thread::spawn(move || {
+        let r = settings::open_nofollow(&p)
+            .map(|f| settings::is_regular_handle(&f.metadata().unwrap()));
+        let _ = tx.send(r.ok());
+    });
+    let got = rx.recv_timeout(std::time::Duration::from_secs(5));
+    assert_eq!(
+        got,
+        Ok(Some(false)),
+        "FIFO повесил открытие или принят за файл"
+    );
+    // и целиком через load: отказ без зависания
+    assert_eq!(settings::load(&t.0).err(), Some(NodeError::SettingsCorrupt));
+}
+
+#[test]
 fn node_and_events_are_thread_safe() {
     fn send_sync<T: Send + Sync>() {}
     fn send<T: Send>() {}

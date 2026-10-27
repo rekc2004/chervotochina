@@ -1,25 +1,39 @@
-//! Охрана «тестовые возможности не попадают в продукт» (этап 18а, исправление M1): свойства
-//! `test-store` и `fuzzing` крейта `chervo-core` (и `fuzzing` других крейтов) включаются только
-//! через dev-зависимость на самих себя. Ни одна запись `[dependencies]`,
-//! `[target.*.dependencies]`, `[workspace.dependencies]` или `default` в `[features]` ни одного
-//! продуктового манифеста их не включает.
+//! Охрана «тестовые возможности не попадают в продукт» (этап 18а, исправления M1 и круга 2):
+//! свойства `test-store` и `fuzzing` включаются только через dev-зависимости. В каждом
+//! продуктовом манифесте (корневом и `crates/*/Cargo.toml`) подстроки `test-store` и `fuzzing`
+//! (в любых кавычках, в любой строке, в том числе пересылка вида `chervo-core/test-store` или
+//! `dep:`) запрещены везде, кроме:
+//! * таблиц `[dev-dependencies]` (и `[target.*.dev-dependencies]`, `[dev-dependencies.имя]`);
+//! * строк-определений свойства с пустым списком (`fuzzing = []`, `test-store = []`) в `[features]`:
+//!   пустое определение ничего не включает;
+//! * строк-комментариев.
 //!
 //! Текстовый разбор без `cargo`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const TEST_FEATURES: [&str; 2] = ["\"test-store\"", "\"fuzzing\""];
+const TEST_FEATURES: [&str; 2] = ["test-store", "fuzzing"];
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// Строки манифеста, где в продуктовой таблице включено тестовое свойство.
+/// Строка вида `fuzzing = []` (с любыми пробелами): определение свойства без включений.
+fn is_empty_definition(t: &str) -> bool {
+    let Some((name, value)) = t.split_once('=') else {
+        return false;
+    };
+    let name = name.trim().trim_matches(|c| c == '"' || c == '\'');
+    let value: String = value.chars().filter(|c| !c.is_whitespace()).collect();
+    TEST_FEATURES.contains(&name) && value == "[]"
+}
+
+/// Строки манифеста, где тестовое свойство упомянуто вне разрешённых мест.
 fn violations(manifest: &str) -> Vec<String> {
     let mut out = Vec::new();
-    let mut product = false;
-    let mut in_features = false;
+    let mut dev = false;
+    let mut features = false;
     for line in manifest.replace("\r\n", "\n").lines() {
         let t = line.trim();
         if t.is_empty() || t.starts_with('#') {
@@ -27,36 +41,79 @@ fn violations(manifest: &str) -> Vec<String> {
         }
         if t.starts_with('[') {
             let s = t.trim_matches(|c| c == '[' || c == ']');
-            product = s == "dependencies"
-                || s == "workspace.dependencies"
-                || s.starts_with("dependencies.")
-                || (s.starts_with("target.") && s.contains("dependencies") && !s.contains("dev-"));
-            in_features = s == "features";
+            dev = s.contains("dev-dependencies");
+            features = s == "features";
+            // имя свойства или зависимости прямо в заголовке таблицы
+            if !dev && TEST_FEATURES.iter().any(|f| s.contains(f)) {
+                out.push(t.to_owned());
+            }
             continue;
         }
-        let hit = TEST_FEATURES.iter().any(|f| t.contains(f));
-        if hit && (product || (in_features && t.starts_with("default"))) {
-            out.push(t.to_owned());
+        if dev || !TEST_FEATURES.iter().any(|f| t.contains(f)) {
+            continue;
         }
+        if features && is_empty_definition(t) {
+            continue;
+        }
+        out.push(t.to_owned());
     }
     out
 }
 
 #[test]
-fn guard_sees_violations() {
-    let bad = "[dependencies]\nchervo-core = { workspace = true, features = [\"test-store\"] }\n";
-    assert_eq!(violations(bad).len(), 1);
-    let bad =
-        "[target.'cfg(unix)'.dependencies]\nx = { path = \"..\", features = [\"fuzzing\"] }\n";
-    assert_eq!(violations(bad).len(), 1);
-    let bad = "[dependencies.x]\nfeatures = [\"fuzzing\"]\n";
-    assert_eq!(violations(bad).len(), 1);
-    let bad = "[features]\ndefault = [\"test-store\"]\n";
-    assert_eq!(violations(bad).len(), 1);
-    // dev-зависимость и сами определения свойств не нарушение
-    let ok = "[dev-dependencies]\nx = { path = \".\", features = [\"fuzzing\", \"test-store\"] }\n\
-              [features]\nfuzzing = []\ntest-store = []\n";
-    assert!(violations(ok).is_empty());
+fn guard_sees_every_bypass_form() {
+    let bad = [
+        // двойные кавычки в [dependencies]
+        "[dependencies]\nchervo-core = { workspace = true, features = [\"test-store\"] }\n",
+        // одинарные кавычки
+        "[dependencies]\nchervo-core = { workspace = true, features = ['test-store'] }\n",
+        // без кавычек (разобрать как строку нельзя, но подстрока видна)
+        "[dependencies]\nchervo-core = { features = [test-store] }\n",
+        // многострочный список
+        "[dependencies]\nchervo-core = { workspace = true, features = [\n  \"x\",\n  'fuzzing',\n] }\n",
+        // целевая таблица
+        "[target.'cfg(unix)'.dependencies]\nx = { path = \"..\", features = [\"fuzzing\"] }\n",
+        // таблица зависимости
+        "[dependencies.x]\nfeatures = [\"fuzzing\"]\n",
+        "[dependencies.x]\nfeatures = ['fuzzing']\n",
+        // зависимость, названная тестовым свойством в заголовке
+        "[dependencies.fuzzing]\nversion = \"1\"\n",
+        // сборочные зависимости и рабочее пространство
+        "[build-dependencies]\nx = { path = \"..\", features = [\"fuzzing\"] }\n",
+        "[workspace.dependencies]\nx = { path = \"..\", features = [\"test-store\"] }\n",
+        // свойство, пересылающее тестовое свойство (любое имя, не только `default`)
+        "[features]\ndefault = [\"test-store\"]\n",
+        "[features]\nconvenient = [\"chervo-core/test-store\"]\n",
+        "[features]\nconvenient = ['chervo-core/fuzzing']\n",
+        "[features]\nconvenient = [\"dep:fuzzing\"]\n",
+        "[features]\ndefault = [\n  \"x\",\n  \"fuzzing\",\n]\n",
+        // определение, которое что-то включает
+        "[features]\nfuzzing = [\"chervo-token/fuzzing\"]\n",
+        "[features]\ntest-store = [ \"x\" ]\n",
+        // пересылка в обычной зависимости
+        "[dependencies]\nx = { path = \"..\", features = [\"chervo-core/test-store\"] }\n",
+        // CRLF
+        "[dependencies]\r\nx = { features = ['fuzzing'] }\r\n",
+    ];
+    for (i, m) in bad.iter().enumerate() {
+        assert!(!violations(m).is_empty(), "обход {i} не пойман: {m:?}");
+    }
+    // разрешённое: dev-таблицы в любом виде, пустые определения, комментарии
+    let ok = [
+        "[dev-dependencies]\nx = { path = \".\", features = [\"fuzzing\", \"test-store\"] }\n",
+        "[target.'cfg(unix)'.dev-dependencies]\nx = { path = \".\", features = ['fuzzing'] }\n",
+        "[dev-dependencies.x]\nfeatures = [\"test-store\"]\n",
+        "[dev-dependencies]\nx = { features = [\n  \"fuzzing\",\n] }\n",
+        "[features]\nfuzzing = []\ntest-store = []\n",
+        "[features]\nfuzzing = [ ]\n",
+        "# test-store и fuzzing в комментарии\n[dependencies]\nx = \"1\"\n",
+    ];
+    for (i, m) in ok.iter().enumerate() {
+        assert!(violations(m).is_empty(), "ложное срабатывание {i}: {m:?}");
+    }
+    // после dev-таблицы следующая продуктовая снова проверяется
+    let mixed = "[dev-dependencies]\nx = { features = [\"fuzzing\"] }\n[dependencies]\ny = { features = [\"fuzzing\"] }\n";
+    assert_eq!(violations(mixed).len(), 1);
 }
 
 #[test]

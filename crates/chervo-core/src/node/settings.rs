@@ -337,6 +337,19 @@ pub(crate) fn serialize(s: &Settings) -> Result<String, NodeError> {
     Ok(out)
 }
 
+/// Windows: `FILE_FLAG_OPEN_REPARSE_POINT` (значение 0x00200000 из winbase.h): открыть саму точку
+/// повторной обработки (символьную ссылку, junction), а не то, на что она указывает.
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+/// Windows: `FILE_ATTRIBUTE_REPARSE_POINT` (значение 0x400 из winnt.h).
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+
+/// Открывает файл настроек, не следуя ссылкам и не блокируясь. Unix: `O_NOFOLLOW` (ссылка на
+/// конце пути не открывается) и `O_NONBLOCK` (подставленный FIFO не повесит открытие; обычному
+/// файлу флаг безразличен). Windows: открывается сама точка повторной обработки; обычный файл
+/// открывается как всегда. Вид файла проверяет вызывающий по уже открытому дескриптору
+/// (`is_regular_handle`).
 // тип `bits()` зависит от ОС (u32 или i32): приведение нужно не везде
 #[allow(clippy::unnecessary_cast, clippy::cast_possible_wrap)]
 pub(crate) fn open_nofollow(path: &Path) -> std::io::Result<fs::File> {
@@ -345,9 +358,23 @@ pub(crate) fn open_nofollow(path: &Path) -> std::io::Result<fs::File> {
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::custom_flags(
         &mut opts,
-        rustix::fs::OFlags::NOFOLLOW.bits() as i32,
+        (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
     );
+    #[cfg(windows)]
+    std::os::windows::fs::OpenOptionsExt::custom_flags(&mut opts, FILE_FLAG_OPEN_REPARSE_POINT);
     opts.open(path)
+}
+
+/// Открытый дескриптор это обычный файл, а не ссылка, точка повторной обработки, FIFO,
+/// устройство или каталог.
+pub(crate) fn is_regular_handle(m: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    if m.file_type().is_symlink()
+        || std::os::windows::fs::MetadataExt::file_attributes(m) & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return false;
+    }
+    m.is_file()
 }
 
 /// Читает `<dir>/settings.v1`. `Ok(None)`: файла нет. Размер проверяется до чтения.
@@ -365,7 +392,7 @@ pub(crate) fn load(dir: &Path) -> Result<Option<Settings>, NodeError> {
     // чтением не пройдёт), проверяем уже открытый файл и читаем не больше предела плюс байт
     let file = open_nofollow(&path).map_err(|_| NodeError::Io)?;
     let on_handle = file.metadata().map_err(|_| NodeError::Io)?;
-    if !on_handle.is_file() || on_handle.len() > MAX_FILE_BYTES as u64 {
+    if !is_regular_handle(&on_handle) || on_handle.len() > MAX_FILE_BYTES as u64 {
         return bad();
     }
     let mut bytes = Vec::new();
