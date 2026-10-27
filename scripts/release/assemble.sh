@@ -44,7 +44,7 @@ cargo run --locked -p chervo-update --bin chervo-make-manifest -- \
   --artifact any "$release/chervo-$ver-sbom.cdx.json"
 
 # 4. Format check of the manifest file.
-CHERVO_MANIFEST="$release/chervo-release.txt" \
+CHERVO_MANIFEST="$(cd "$release" && pwd)/chervo-release.txt" \
   cargo test -p chervo-update --locked --test manifest_file -- --include-ignored
 
 summary "### Release files (unsigned)" "commit \`$commit\`, version \`$ver\`" '```'
