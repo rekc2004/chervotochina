@@ -19,7 +19,8 @@ chervo-receive.workspace = true
 chervo-transport-quinn.workspace = true
 chervo-upnp.workspace = true
 chervo-timesync.workspace = true
-tokio.workspace = true
+# `signal`: только для `Node::interrupt_signals` (Ctrl+C и SIGTERM для оболочек, этап 18в).
+tokio = { workspace = true, features = ["signal"] }
 # Нужен только для имени `Zeroizing` в обёртке хранилища ключей (`node/store.rs`); пакет уже в
 # рабочем пространстве.
 zeroize.workspace = true

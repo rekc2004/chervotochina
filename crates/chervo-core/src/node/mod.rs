@@ -12,6 +12,7 @@ mod error;
 mod events;
 mod folder;
 mod friends;
+mod interrupt;
 mod network;
 mod profile;
 mod runtime;
