@@ -408,6 +408,52 @@ fn repl_two_nodes_scripted() {
         assert_eq!(&std::fs::read(got).unwrap(), bytes, "{name}: содержимое");
     }
 
+    // удаление друга оставляет текст отзыва; забыть его можно только после слова ДА
+    a.send("remove Боб");
+    a.wait("Друг удалён. Чтобы он узнал");
+    a.send("forget-retired Боб");
+    a.wait("Для подтверждения введите ДА:");
+    a.send("нет");
+    a.wait("Отменено: текст отзыва сохранён.");
+    a.send("revoke-text");
+    a.wait("Отзыв для друга Боб.");
+    a.send("forget-retired Боб");
+    a.send("ДА");
+    a.wait("Текст отзыва забыт.");
+    a.send("revoke-text");
+    a.wait("Текстов отзыва для передачи нет.");
+
     a.finish();
     b.finish();
+}
+
+/// Ctrl+C и SIGTERM идут одним путём с `quit`. Проверка сигналом только на unix (на Windows
+/// Ctrl+C в процесс без консоли из теста не послать).
+#[cfg(unix)]
+#[test]
+fn sigterm_shuts_the_node_down_in_order() {
+    let dir = TestDir::new();
+    let (p, _) = two_free_ports();
+    let (data, _recv) = prepare(&dir.0.join("a"), p);
+    let mut a = Proc::start("A", &data, p);
+    a.wait("Узел запущен.");
+    // подписка на сигнал оформляется на фоновой среде узла
+    std::thread::sleep(Duration::from_millis(500));
+    let st = Command::new("kill")
+        .args(["-TERM", &a.child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(st.success());
+    a.wait("Получен сигнал прерывания");
+    a.wait("Узел остановлен.");
+    drop(a.stdin.take());
+    let end = Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Some(st) = a.child.try_wait().unwrap() {
+            assert!(st.success(), "код выхода {st:?}");
+            break;
+        }
+        assert!(Instant::now() < end, "не вышел за 30 с");
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }

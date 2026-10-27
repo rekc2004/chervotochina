@@ -12,10 +12,12 @@
 
 pub mod input;
 pub mod out;
+pub mod recovery;
 pub mod repl;
 mod view;
 
 use std::ffi::OsString;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -23,7 +25,7 @@ use std::time::Duration;
 use chervo_core::texts::{FIRST_RUN_TEXT, ROOT_OUTSIDE_PROFILE_TEXT};
 use chervo_core::{HardenReport, Node, NodeConfig, NodeError, ReceiveLimits, RootError};
 
-const USAGE: &str = "Использование:\n  chervo --version\n  chervo init --receive ПАПКА [--shared-root-ok]\n  chervo unlock\n  chervo run";
+const USAGE: &str = "Использование:\n  chervo --version\n  chervo init --receive ПАПКА [--shared-root-ok]\n  chervo unlock\n  chervo run\n  chervo recover accept-older|start-over [--yes]\n  chervo reset-settings [--yes]";
 /// Сколько ждать разблокировки хранилища ключей.
 const UNLOCK_WAIT: Duration = Duration::from_secs(60);
 
@@ -49,7 +51,9 @@ pub fn run_cli(h: &HardenReport, args: Vec<OsString>) -> ExitCode {
         }
         Some("init") => init(h, it.collect()),
         Some("unlock") => unlock(),
-        Some("run") if it.next().is_none() => run(h),
+        Some("run") if it.next().is_none() => run(h, Node::open),
+        Some("recover") => recover(h, it.collect()),
+        Some("reset-settings") => reset_settings(h, it.collect()),
         _ => {
             out::err(USAGE);
             ExitCode::from(2)
@@ -106,8 +110,75 @@ fn unlock() -> ExitCode {
     }
 }
 
-fn run(h: &HardenReport) -> ExitCode {
-    match Node::open(config(), h) {
+/// Способ открыть узел (`Node::open` и его варианты восстановления).
+type Opener = fn(NodeConfig, &HardenReport) -> Result<(Node, chervo_core::NodeEvents), NodeError>;
+
+/// Только `--yes` или ничего.
+fn yes_flag(args: &[OsString]) -> Option<bool> {
+    match args {
+        [] => Some(false),
+        [a] if a.to_str() == Some("--yes") => Some(true),
+        _ => None,
+    }
+}
+
+/// Подтверждение с терминала (одна строка со стандартного ввода).
+fn confirmed(what: recovery::Recovery, yes: bool) -> bool {
+    let stdin = std::io::stdin();
+    recovery::confirm(what, yes, stdin.is_terminal(), || {
+        match input::read_line(&mut stdin.lock()) {
+            input::Input::Line(s) => Some(s),
+            _ => None,
+        }
+    })
+}
+
+fn recover(h: &HardenReport, args: Vec<OsString>) -> ExitCode {
+    let usage = "chervo recover accept-older|start-over [--yes]";
+    let Some((kind, rest)) = args.split_first() else {
+        return usage_error(usage);
+    };
+    let Some(yes) = yes_flag(rest) else {
+        return usage_error(usage);
+    };
+    match kind.to_str() {
+        Some("accept-older") => {
+            if !confirmed(recovery::Recovery::AcceptOlder, yes) {
+                return ExitCode::from(2);
+            }
+            run(h, Node::open_accept_older)
+        }
+        Some("start-over") => {
+            if !confirmed(recovery::Recovery::StartOver, yes) {
+                return ExitCode::from(2);
+            }
+            run(h, Node::open_start_over)
+        }
+        _ => usage_error(usage),
+    }
+}
+
+fn reset_settings(h: &HardenReport, args: Vec<OsString>) -> ExitCode {
+    let Some(yes) = yes_flag(&args) else {
+        return usage_error("chervo reset-settings [--yes]");
+    };
+    if !confirmed(recovery::Recovery::ResetSettings, yes) {
+        return ExitCode::from(2);
+    }
+    match Node::reset_settings(&config(), h) {
+        Ok(()) => {
+            out::line("Настройки сброшены. Дальше: chervo init --receive ПАПКА");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            out::err(e.user_text());
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run(h: &HardenReport, open: Opener) -> ExitCode {
+    match open(config(), h) {
         Ok((node, events)) => {
             repl::run(node, events, input::stdin_lines());
             ExitCode::SUCCESS
@@ -120,6 +191,11 @@ fn run(h: &HardenReport) -> ExitCode {
                     out::err("Выполните: chervo init --receive ПАПКА");
                 }
                 NodeError::KeyStoreLocked => out::err("На Linux можно попробовать: chervo unlock"),
+                NodeError::RolledBack => {
+                    out::err("Принять старый список: chervo recover accept-older");
+                }
+                NodeError::KeysLost => out::err("Начать список заново: chervo recover start-over"),
+                NodeError::SettingsCorrupt => out::err("Сбросить настройки: chervo reset-settings"),
                 _ => {}
             }
             ExitCode::from(1)

@@ -46,6 +46,7 @@ const HELP: &[&str] = &[
     "  apply-token                     вставить текст с адресом друга (следующей строкой)",
     "  revoke-text                     тексты отзыва, которые нужно передать друзьям",
     "  apply-revocation                вставить отзыв от друга (следующей строкой)",
+    "  forget-retired ДРУГ [--yes]     забыть текст отзыва (после того, как друг его получил)",
     "  rekey ДРУГ                      пересоздать ключ пары",
     "  block ДРУГ | unblock ДРУГ | remove ДРУГ",
     "  upnp find | upnp allow [--permanent] | upnp forget",
@@ -55,10 +56,12 @@ const HELP: &[&str] = &[
 ];
 
 pub fn run(node: Node, events: NodeEvents, lines: Receiver<Input>) {
+    let interrupts = node.interrupt_signals();
     let mut r = Repl {
         node,
         events,
         lines,
+        interrupts,
         pending_sas: Vec::new(),
         router: None,
         proposal: None,
@@ -81,7 +84,19 @@ pub fn run(node: Node, events: NodeEvents, lines: Receiver<Input>) {
         }
     }
     out::line("Завершаю работу: останавливаю передачи и снимаю проброс порта.");
-    let Repl { node, .. } = r;
+    let Repl {
+        node, interrupts, ..
+    } = r;
+    // второе нажатие Ctrl+C во время остановки: выйти сразу (проброс тогда снимет только срок
+    // его аренды)
+    let _ = std::thread::Builder::new()
+        .name("chervo-interrupt".to_owned())
+        .spawn(move || {
+            if interrupts.recv().is_ok() {
+                out::line("Повторный сигнал: выхожу немедленно.");
+                std::process::exit(130);
+            }
+        });
     node.shutdown(QUIT_DEADLINE);
     out::line("Узел остановлен.");
 }
@@ -90,6 +105,8 @@ struct Repl {
     node: Node,
     events: NodeEvents,
     lines: Receiver<Input>,
+    /// Ctrl+C и SIGTERM от ядра (`Node::interrupt_signals`).
+    interrupts: Receiver<()>,
     /// Приглашения, у которых показан код и ждётся ответ человека (старое первым).
     pending_sas: Vec<(InviteRef, SasView)>,
     router: Option<RouterCandidate>,
@@ -140,6 +157,11 @@ impl Repl {
     fn next_input(&mut self) -> Input {
         loop {
             self.pump_events();
+            if self.interrupts.try_recv().is_ok() {
+                out::line("Получен сигнал прерывания (Ctrl+C).");
+                self.eof = true;
+                return Input::Eof;
+            }
             match self.lines.recv_timeout(POLL) {
                 Ok(i) => return i,
                 Err(RecvTimeoutError::Timeout) => {}
@@ -353,6 +375,7 @@ impl Repl {
             "apply-token" => self.cmd_apply_token(),
             "revoke-text" => self.cmd_revoke_text(),
             "apply-revocation" => self.cmd_apply_revocation(),
+            "forget-retired" => self.cmd_forget_retired(args),
             "rekey" => self.cmd_rekey(args),
             "block" => self.with_friend(args, |n, f| n.block(f), "Друг заблокирован."),
             "unblock" => self.with_friend(args, |n, f| n.unblock(f), "Друг разблокирован."),
@@ -761,6 +784,38 @@ impl Repl {
                 self.name_of(f)
             )),
             Ok(None) => out::line("Отзыв подлинный, но никому из ваших друзей не подходит."),
+            Err(e) => fail(e),
+        }
+    }
+
+    fn cmd_forget_retired(&mut self, args: &[String]) {
+        let yes = args.iter().any(|a| a == "--yes");
+        let rest: Vec<&String> = args.iter().filter(|a| *a != "--yes").collect();
+        let [arg] = rest.as_slice() else {
+            out::err("Использование: forget-retired ДРУГ [--yes]");
+            return;
+        };
+        let Some(f) = self.friend(arg) else { return };
+        if !self.node.retired().iter().any(|(r, _)| *r == f) {
+            out::err("Для этого друга нет текста отзыва.");
+            return;
+        }
+        out::line(crate::recovery::FORGET_RETIRED_WARNING);
+        if !yes {
+            let prompt = format!(
+                "Для подтверждения введите {}:",
+                crate::recovery::CONFIRM_WORD
+            );
+            match self.ask(&prompt) {
+                Some(a) if crate::recovery::is_confirm(&a) => {}
+                _ => {
+                    out::line("Отменено: текст отзыва сохранён.");
+                    return;
+                }
+            }
+        }
+        match self.node.forget_retired(f) {
+            Ok(()) => out::line("Текст отзыва забыт."),
             Err(e) => fail(e),
         }
     }
