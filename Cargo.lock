@@ -160,6 +160,7 @@ name = "chervo-cli"
 version = "0.0.0"
 dependencies = [
  "chervo-core",
+ "zeroize",
 ]
 
 [[package]]

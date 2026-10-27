@@ -12,5 +12,12 @@ path = "src/main.rs"
 [dependencies]
 chervo-core.workspace = true
 
+# Только для тестов. `test-store` даёт подставное хранилище ключей: страж features_guard.rs
+# разрешает его лишь в таблицах dev. `zeroize` нужен тесту, чтобы назвать тип возврата трейтов
+# хранилища (пакет уже в рабочем пространстве, новых внешних пакетов нет).
+[dev-dependencies]
+chervo-core = { workspace = true, features = ["test-store"] }
+zeroize.workspace = true
+
 [lints]
 workspace = true
