@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 chervo-core.workspace = true
 chervo-update.workspace = true
+chervo-update-check.workspace = true
 
 # Только для модульных тестов `verify-release` с тестовым ключом (новых пакетов в Cargo.lock нет).
 [dev-dependencies]

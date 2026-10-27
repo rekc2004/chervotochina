@@ -23,6 +23,8 @@ chervo-upnp = { path = "../crates/chervo-upnp", features = ["fuzzing"] }
 chervo-transport-quinn = { path = "../crates/chervo-transport-quinn", features = ["fuzzing"] }
 # Stage 19a: release verification parsers (public API only, no features).
 chervo-update = { path = "../crates/chervo-update" }
+# Stage 19d: HTTP response parser of the update notice (feature `fuzzing`: only the parser, no network hook).
+chervo-update-check = { path = "../crates/chervo-update-check", features = ["fuzzing"] }
 
 [workspace]
 members = ["."]
@@ -182,6 +184,13 @@ bench = false
 [[bin]]
 name = "update_manifest"
 path = "fuzz_targets/update_manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "update_http_response"
+path = "fuzz_targets/update_http_response.rs"
 test = false
 doc = false
 bench = false

@@ -1,5 +1,6 @@
 //! CLI Червоточины: `--version`, проверка выпусков (`verify-release`, `release-keys`).
 
+mod check_update;
 mod doctor;
 mod release;
 
@@ -25,6 +26,7 @@ fn main() -> std::process::ExitCode {
             &mut std::io::stdout().lock(),
             &mut std::io::stderr().lock(),
         )),
+        Some("check-update") => std::process::ExitCode::from(check_update::run(&args[1..])),
         Some("doctor") => std::process::ExitCode::from(doctor::doctor(
             &args[1..],
             &mut std::io::stdout().lock(),

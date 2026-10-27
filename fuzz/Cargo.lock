@@ -198,6 +198,7 @@ dependencies = [
  "chervo-transfer",
  "chervo-transport-quinn",
  "chervo-update",
+ "chervo-update-check",
  "chervo-upnp",
  "libfuzzer-sys",
 ]
@@ -293,6 +294,15 @@ dependencies = [
  "blake2",
  "ed25519-dalek",
  "ring",
+]
+
+[[package]]
+name = "chervo-update-check"
+version = "0.0.0"
+dependencies = [
+ "chervo-update",
+ "rustls",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -1307,6 +1317,15 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "1.0.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c1c8e20c8a38fc7d65abfe74eb7280e4aa667e8eec8bc84996d2874810748d9"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]

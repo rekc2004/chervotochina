@@ -13,6 +13,7 @@ members = [
     "crates/chervo-transfer",
     "crates/chervo-receive",
     "crates/chervo-update",
+    "crates/chervo-update-check",
     "crates/chervo-core",
     "crates/chervo-cli",
 ]
@@ -38,6 +39,7 @@ chervo-upnp = { path = "crates/chervo-upnp", version = "0.0.0" }
 chervo-transfer = { path = "crates/chervo-transfer", version = "0.0.0" }
 chervo-receive = { path = "crates/chervo-receive", version = "0.0.0" }
 chervo-update = { path = "crates/chervo-update", version = "0.0.0" }
+chervo-update-check = { path = "crates/chervo-update-check", version = "0.0.0" }
 chervo-core = { path = "crates/chervo-core", version = "0.0.0" }
 
 ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["zeroize", "fast"] }
@@ -54,6 +56,10 @@ zbus = { version = "=6.0.0", default-features = false, features = ["tokio"] }
 futures-core = { version = "=0.3.34", default-features = false }
 quinn = { version = "=0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std"] }
+# Stage 19d (Q4 = a): Mozilla root certificates as data, only for the update notice. Exactly 1.0.10
+# (2026-10-19): 1.0.9 has RUSTSEC-2026-0381 (emSign ECC Root CA - G3). Younger than two weeks at
+# selection; the security review diffed the sources: 1.0.9 -> 1.0.10 only removes that root. No features.
+webpki-roots = { version = "=1.0.10" }
 fs4 = { version = "=1.1.0" }
 ring = { version = "=0.17.14", default-features = false, features = ["alloc"] }
 tokio = { version = "=1.53.3", default-features = false, features = ["rt", "net", "time", "sync", "macros"] }

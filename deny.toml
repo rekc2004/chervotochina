@@ -23,6 +23,12 @@ deny = [
 allow = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib"]
 confidence-threshold = 0.93
 
+# Stage 19d (Q4 = a): root certificate data from Mozilla, license CDLA-Permissive-2.0 (permissive).
+# An exception for this one crate only, not added to the general allow list.
+[[licenses.exceptions]]
+name = "webpki-roots"
+allow = ["CDLA-Permissive-2.0"]
+
 [licenses.private]
 ignore = true
 
