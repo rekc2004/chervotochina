@@ -287,6 +287,49 @@ async fn progress_rate_limited() {
     assert!(n <= ms / 100 + 3, "{n} progress events in {ms} ms");
 }
 
+/// D1 (сквозная проверка 2026-10-27): события хода сглажены по `progress_interval`, и последнее
+/// `Progress` могло остаться на первом блоке. После `Completed` состояние передачи уже снято
+/// с учёта, и узел показывал бы по последнему событию «1 МБ из 50 МБ». Перед `Completed` у обеих
+/// сторон должно прийти `Progress` с `done == total`, как бы велик ни был интервал.
+#[tokio::test]
+async fn last_progress_before_completed_is_total() {
+    let mut rig = Rig::with(
+        |_| {},
+        |c| {
+            c.progress_interval = Duration::from_secs(3600);
+        },
+    )
+    .await;
+    let src = TestDir::new();
+    let size = 5u64 << 20;
+    let files = vec![write_src(
+        src.path(),
+        "a.bin",
+        &rand_bytes(82, usize::try_from(size).unwrap()),
+    )];
+    rig.a.tr.send(&rig.pa, files).unwrap();
+    let e = wait_ev(&mut rig.b.ev, 10, is_offer()).await;
+    rig.b.tr.respond(&key_of(&e), true).unwrap();
+    for (side, ev) in [
+        ("получатель", &mut rig.b.ev),
+        ("отправитель", &mut rig.a.ev),
+    ] {
+        let mut last = None;
+        loop {
+            match wait_ev(ev, 60, |_| true).await {
+                TransferEvent::Progress { done, total, .. } => last = Some((done, total)),
+                TransferEvent::Completed { .. } => break,
+                _ => {}
+            }
+        }
+        assert_eq!(
+            last,
+            Some((size, size)),
+            "{side}: последнее Progress до Completed"
+        );
+    }
+}
+
 // ------------------------------------------------------------- лимиты друга и политика
 
 /// Узел с `n` друзьями-заглушками, соединения от каждого уже приняты.

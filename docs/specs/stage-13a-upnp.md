@@ -6,7 +6,7 @@ Author: combine-architect (opus), 2026-10-17, revision 1. Labels: [P] verified b
 
 Goal: on a stationary computer behind a home router, the program opens a UDP port on the router by UPnP IGD, verifies it, publishes it to friends as a stable address (`NatView::PortMapped`), keeps it alive with a short lease and closes it on exit and on network change; the router's WAN IP feeds the CGNAT / double-NAT diagnosis. On a laptop in a foreign network nothing happens by default. Every byte from the LAN is hostile input.
 
-Read: this file; `docs/specs/stage-13-connect.md` ("Decisions" 8, 12; "Watcher"; "Diagnosis"; "Requirements for other stages"); `crates/chervo-addr/src/{own,probe,class}.rs`; `crates/chervo-connect/src/{engine,watch,diag,texts,clock,config,lib}.rs`, `src/tests/{src_guard,kit}.rs`; `crates/chervo-token/tests/fuzz_smoke.rs` (pattern); `spikes/transport/run8.sh` (miniupnpd stand helpers, for U4 only). Search nothing else.
+Read: this file; `docs/specs/stage-13-connect.md` ("Decisions" 8, 12; "Watcher"; "Diagnosis"; "Requirements for other stages"); `crates/chervo-addr/src/{own,probe,class}.rs`; `crates/chervo-connect/src/{engine,watch,diag,texts,clock,config,lib}.rs`, `src/tests/{src_guard,kit}.rs`; `crates/chervo-token/tests/fuzz_smoke.rs` (pattern); `spike-transport-final:spikes/transport/run8.sh` (miniupnpd stand helpers, for U4 only). Search nothing else.
 
 ## Scope
 | Item | Here | Note |
@@ -177,7 +177,7 @@ Renew = the same `refresh` (step 4 is skipped when `current` matches router, int
 - `diag.rs`: after `BehindCgnat`: `NatView::DoubleNat` -> `NoDirectPath::DoubleNat` (new variant, `rendezvous_could_help = true` like CGNAT); `texts.rs` `DOUBLE_NAT_TEXT = "Ваш роутер сам стоит за другим роутером или за NAT провайдера: снаружи к вам не достучаться. Соединение возможно, если у друга белый IP или проброс порта (звоните вы)."` (no word "UPnP": guard).
 - `src_guard` changes: `set_gateway(` count exactly 1 and only in `gateway.rs`; `spawn_blocking` only in `gateway.rs`; everything else unchanged.
 
-### U4. netns stand (`tools/netns/stage13a.sh`, Linux + root, reuse miniupnpd setup of `spikes/transport/run8.sh`)
+### U4. netns stand (`tools/netns/stage13a.sh`, Linux + root, reuse miniupnpd setup of `spike-transport-final:spikes/transport/run8.sh`)
 Rows (expected): map + reach from the white host + `GetSpecific` lease ≤ 3600; renew at half (lease 60 s in a test build of the example: entry still present at 90 s); `release` -> entry gone, inbound fails; `kill -9` -> entry gone after lease; restart -> stale entry deleted then re-added; WAN 100.64/10 -> `BehindCgnat`, no `AddPortMapping` in miniupnpd log; double NAT (miniupnpd inside behind another NAT) -> `DoubleNat`; second LAN host running the fake IGD -> `Ambiguous`; fake IGD two hops away with spoofed SSDP response -> TCP never established (TTL 1), `NoGateway`; capture on the host: only 239.255.255.250:1900 UDP and the router's TCP port, dns = 0, other = 0.
 
 ## Do not

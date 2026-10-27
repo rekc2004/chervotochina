@@ -1,1 +1,0 @@
-EVENT nat_probe t=6010 mapping=EDM filtering=APDF ext=198.51.100.40:30455 ext_r1b=198.51.100.40:63948 ext_r2=198.51.100.40:3113 r1b_reply=0 r2_reply=0

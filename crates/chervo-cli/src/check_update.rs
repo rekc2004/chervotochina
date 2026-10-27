@@ -81,8 +81,8 @@ pub(crate) fn run(args: &[OsString]) -> u8 {
         KeySet::embedded().is_ok(),
         env!("CARGO_PKG_VERSION"),
         chervo_update_check::check_latest,
-        &mut std::io::stdout().lock(),
-        &mut std::io::stderr().lock(),
+        &mut chervo_cli::out::main_sink(),
+        &mut chervo_cli::out::err_sink(),
     )
 }
 

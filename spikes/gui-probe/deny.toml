@@ -1,0 +1,52 @@
+[graph]
+# Stage 18p: accesskit_unix is an optional Linux-only dependency of accesskit_winit (default
+# feature). eframe's accesskit feature is enabled only for non-Linux targets, so the crate is not
+# built for any target (check-linux-tree.sh guards that). cargo-deny sees it because it does not
+# evaluate cargo feature activation per target. Bans on zbus/zvariant stay in force.
+exclude = ["accesskit_unix"]
+
+[advisories]
+# No exceptions. The RUSTSEC-2026-0370/0371/0372 ignores (zvariant 5.x via the old Secret Service
+# client) were removed in stage 17a together with the crates.
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+deny = [
+  { name = "igd-next" },
+  { name = "keyring" },
+  { name = "keyutils" },
+  # Stage 17a: the old Secret Service client and its zbus 5 / zvariant 5 tree must not come back.
+  # zbus 5 requires zvariant, so banning zvariant keeps zbus 5 out as well.
+  { name = "secret-service" },
+  { name = "zbus-secret-service-keyring-store" },
+  { name = "zvariant" },
+  { name = "zvariant_derive" },
+  { name = "zvariant_utils" },
+  { name = "zbus_names" },
+]
+
+[licenses]
+allow = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib"]
+confidence-threshold = 0.93
+
+[licenses.private]
+ignore = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+# Stage 18p proposal: crate-scoped exceptions, never the global allow list.
+[[licenses.exceptions]]
+name = "epaint_default_fonts"
+allow = ["OFL-1.1", "Ubuntu-font-1.0"]
+
+[[licenses.exceptions]]
+name = "clipboard-win"
+allow = ["BSL-1.0"]
+
+[[licenses.exceptions]]
+name = "error-code"
+allow = ["BSL-1.0"]

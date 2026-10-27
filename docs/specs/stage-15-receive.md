@@ -61,7 +61,7 @@ Read: this file; `docs/specs/stage-14-transfer.md` (decisions 10-12, X3 "Finaliz
 ### Call 2: `combine-builder` sonnet/high. Part R2 (filesystem, hooks, policy)
 3. `chervo-transfer` hooks of decision 11 and their tests; `chervo-receive` modules `root, place, journal, mark, policy`; tests R2 on Windows locally, others on CI.
 ### Call 3: `combine-builder` sonnet/medium. Part R3 (end to end)
-4. `crates/chervo-receive/tests/receive_net.rs` (two engines + `QuinnTransport` on 127.0.0.1, helpers copied from `transfer_net.rs`); `crates/chervo-receive/examples/node15.rs` (node14 with `ReceivePlacement` + `ReceivePolicy`, `--root DIR`, `--send-as NAME` to offer raw names for manual tests; prints numbers and SHA-256 only).
+4. `crates/chervo-receive/tests/receive_net.rs` (two engines + `QuinnTransport` on 127.0.0.1, helpers copied from `transfer_net.rs`); `crates/chervo-receive/examples/node15.rs` (deleted 2026-10-27; node14 with `ReceivePlacement` + `ReceivePolicy`, `--root DIR`, `--send-as NAME` to offer raw names for manual tests; prints numbers and SHA-256 only).
 
 ## Interface (exact)
 ```rust
@@ -142,7 +142,7 @@ R3 (`chervo-receive/tests/receive_net.rs`, loopback, Windows included): `net_tre
 - [ ] `cargo test -p chervo-core --test layout`; `bash scripts/check-forbidden.sh --self-test && bash scripts/check-forbidden.sh`
 - [ ] `for i in $(seq 10); do cargo test -q --locked -p chervo-receive --test receive_net || exit 1; done` (Windows locally)
 - [ ] CI green on 3 OS (the `hostile_table` and `place_table_on_this_os` lines with OS name and row count copied from each job log).
-- [ ] Linux box (conductor): `cargo test --locked -p chervo-receive` and one manual `node15` run Linux -> Windows with names `CON.txt`, `ab:c.txt`, `A.txt` + `a.txt`, `.hidden`, `x/y/z.jpg`, `setup.exe`; on Windows `dir /r` shows `Zone.Identifier` and the expected names (paste output).
+- [ ] Linux box (conductor): `cargo test --locked -p chervo-receive` and one manual `node15` run (example deleted 2026-10-27, TEST-AUDIT-2026-10-27 §5.6) Linux -> Windows with names `CON.txt`, `ab:c.txt`, `A.txt` + `a.txt`, `.hidden`, `x/y/z.jpg`, `setup.exe`; on Windows `dir /r` shows `Zone.Identifier` and the expected names (paste output).
 
 ## Not verifiable here (Windows host) / not verified
 - macOS (APFS/HFS+ folding, quarantine xattr, Gatekeeper effect) and Linux behaviour: only CI and the conductor's Linux box. Gatekeeper and SmartScreen effects of the marks: not testable, not claimed.

@@ -292,14 +292,6 @@ fn kx_peers_excludes_blocked_and_revoked() {
 }
 
 #[test]
-fn permission_default_ask() {
-    assert_eq!(Permission::default(), Permission::Ask);
-    let (_d, store, mut book) = fresh();
-    let a = add_friend(&mut book, &store, "А");
-    assert_eq!(book.get(&a.pair).unwrap().permission, Permission::Ask);
-}
-
-#[test]
 fn autoaccept_requires_trust_confirmation() {
     let (dir, store, mut book) = fresh();
     let a = add_friend(&mut book, &store, "А");

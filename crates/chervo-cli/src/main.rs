@@ -1,4 +1,5 @@
-//! CLI Червоточины: `--version`, проверка выпусков (`verify-release`, `release-keys`).
+//! Консольная оболочка узла: работа узла в библиотеке крейта. Здесь только команды выпусков
+//! (этап 19): `verify-release`, `release-keys`, `check-update`, `doctor`.
 
 mod check_update;
 mod doctor;
@@ -10,31 +11,24 @@ fn main() -> std::process::ExitCode {
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let command = args.first().and_then(|a| a.to_str());
     match command {
-        Some("--version") => {
-            println!("chervo {}", chervo_core::VERSION);
-            std::process::ExitCode::SUCCESS
-        }
         Some("verify-release") => std::process::ExitCode::from(release::verify_release(
             &args[1..],
             chervo_update::KeySet::embedded(),
-            &mut std::io::stdout().lock(),
-            &mut std::io::stderr().lock(),
+            &mut chervo_cli::out::main_sink(),
+            &mut chervo_cli::out::err_sink(),
         )),
         Some("release-keys") => std::process::ExitCode::from(release::release_keys(
             &args[1..],
             chervo_update::KeySet::embedded(),
-            &mut std::io::stdout().lock(),
-            &mut std::io::stderr().lock(),
+            &mut chervo_cli::out::main_sink(),
+            &mut chervo_cli::out::err_sink(),
         )),
         Some("check-update") => std::process::ExitCode::from(check_update::run(&args[1..])),
         Some("doctor") => std::process::ExitCode::from(doctor::doctor(
             &args[1..],
-            &mut std::io::stdout().lock(),
-            &mut std::io::stderr().lock(),
+            &mut chervo_cli::out::main_sink(),
+            &mut chervo_cli::out::err_sink(),
         )),
-        _ => {
-            eprintln!("chervo: not implemented");
-            std::process::ExitCode::from(2)
-        }
+        _ => chervo_cli::run_cli(&_hardening, args),
     }
 }

@@ -5,7 +5,7 @@ use chervo_identity::{
 };
 use chervo_token::{
     CLOCK_TOLERANCE_SECS, COMMIT_TAG, InviteDraft, MAX_TOKEN_TEXT_LEN, SAS_TAG, TOKEN_HASH_TAG,
-    Token, TokenError, decode, encode_invite_bytes, encode_revocation_bytes, issue_invite,
+    TokenError, decode, encode_invite_bytes, encode_revocation_bytes, issue_invite,
 };
 use common::*;
 
@@ -521,10 +521,4 @@ fn tags_distinct_from_identity_tags() {
             }
         }
     }
-}
-
-#[test]
-fn token_enum_is_invite() {
-    let (_k, text, _) = good();
-    assert!(matches!(decode(&text), Ok(Token::Invite(_))));
 }

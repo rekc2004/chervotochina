@@ -1,6 +1,0 @@
-case=7.3 tag=G7tbf mode=tbf size=134217728 timed_out=0 started=1
-arrived=1 recv_bytes=134217728 cmp=OK sha=eq
-total_ms=21355 conns_recv=2 conns_send=2 app_bytes_sent=149313057 ratio=1.11 max_resume_from=48081375
-peer_addr_change=нет stall_ms=10047 reconnects=1
-conn_lost=n=1 t_ms=14063 why=done: connection lost;
-sources_seen_by_w=198.51.100.10(12905) 

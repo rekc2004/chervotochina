@@ -1,2 +1,0 @@
-elapsed_s=41.0
-exit_code=0

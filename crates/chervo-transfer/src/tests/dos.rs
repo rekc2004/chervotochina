@@ -206,6 +206,7 @@ async fn restart_restores_names_from_immutable_file() {
 // ------------------------------------------------------------- 2. жёсткие ссылки
 
 #[test]
+#[allow(clippy::print_stderr)]
 fn hard_link_placement_ok_even_if_unlink_fails() {
     let d = TestDir::new();
     let temp = d.path().join("t.part");
@@ -214,11 +215,27 @@ fn hard_link_placement_ok_even_if_unlink_fails() {
     let denied = |_: &std::path::Path| -> io::Result<()> {
         Err(io::Error::from(io::ErrorKind::PermissionDenied))
     };
+    // поддерживает ли файловая система временной папки жёсткие ссылки (FAT, часть сетевых
+    // дисков нет): от этого зависит, какой путь размещения должен быть пройден
+    let probe = d.path().join("probe");
+    std::fs::write(&probe, b"x").unwrap();
+    let links = std::fs::hard_link(&probe, d.path().join("probe2")).is_ok();
     let m = place_impl(&temp, &fin, false, &denied).unwrap();
     assert_eq!(std::fs::read(&fin).unwrap(), b"payload");
-    if m == PlaceMethod::HardLink {
+    if links {
+        assert_eq!(
+            m,
+            PlaceMethod::HardLink,
+            "жёсткие ссылки есть, а путь другой"
+        );
         // размещено: успех, хотя временное имя осталось вторым именем того же файла
         assert!(temp.exists());
+    } else {
+        eprintln!(
+            "hard_link_placement_ok_even_if_unlink_fails: жёстких ссылок нет, проверен запасной путь"
+        );
+        assert_eq!(m, PlaceMethod::ReserveRename);
+        assert!(!temp.exists());
     }
 }
 

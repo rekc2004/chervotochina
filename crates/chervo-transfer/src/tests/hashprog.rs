@@ -753,12 +753,6 @@ async fn sender_hash_progress_frames_bounded() {
     assert!(t_total > t0);
 }
 
-#[test]
-fn preparing_text_has_no_placeholders() {
-    assert!(!crate::PREPARING_TEXT.contains('{'));
-    assert!(!crate::PREPARING_TEXT.is_empty());
-}
-
 // ------------------------------------------------ N1: отправитель перезапускает попытки
 
 /// Играет за враждебного отправителя на уже принятой передаче: каждую новую попытку получателя

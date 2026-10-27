@@ -443,9 +443,6 @@ fn wan_case(wan_text: &str) -> (MapStatus, Option<GatewayInfo>, usize, Duration)
 #[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_wan_empty_unknown_no_add() {
     let (st, gw, adds, retry) = wan_case("");
-    if st == MapStatus::Mapped {
-        return;
-    }
     assert_eq!(st, MapStatus::WanUnknown);
     assert!(gw.is_none());
     assert_eq!(adds, 0);
@@ -456,9 +453,6 @@ fn igd_wan_empty_unknown_no_add() {
 #[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_wan_cgnat_no_add() {
     let (st, gw, adds, retry) = wan_case("100.64.1.2");
-    if st == MapStatus::Mapped {
-        return;
-    }
     assert_eq!(st, MapStatus::BehindCgnat);
     assert_eq!(
         gw,
@@ -475,9 +469,6 @@ fn igd_wan_cgnat_no_add() {
 #[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
 fn igd_wan_private_double_nat_no_add() {
     let (st, gw, adds, _) = wan_case("192.168.0.5");
-    if st == MapStatus::Mapped {
-        return;
-    }
     assert_eq!(st, MapStatus::DoubleNat);
     assert_eq!(gw.unwrap().mapping, None);
     assert_eq!(adds, 0);
@@ -488,9 +479,6 @@ fn igd_wan_private_double_nat_no_add() {
 fn igd_wan_bogus_rejected() {
     for bogus in ["0.0.0.0", "127.0.0.1", "224.0.0.1", "192.0.2.1"] {
         let (st, gw, adds, _) = wan_case(bogus);
-        if st == MapStatus::Mapped {
-            return;
-        }
         assert_eq!(st, MapStatus::Failed, "{bogus}");
         assert!(gw.is_none(), "{bogus}");
         assert_eq!(adds, 0, "{bogus}");

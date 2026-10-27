@@ -176,6 +176,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "chervo-core"
+version = "0.0.0"
+dependencies = [
+ "chervo-addr",
+ "chervo-connect",
+ "chervo-friends",
+ "chervo-identity",
+ "chervo-receive",
+ "chervo-timesync",
+ "chervo-token",
+ "chervo-transfer",
+ "chervo-transport",
+ "chervo-transport-quinn",
+ "chervo-upnp",
+ "rustix",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
 name = "chervo-friends"
 version = "0.0.0"
 dependencies = [
@@ -191,6 +211,7 @@ dependencies = [
 name = "chervo-fuzz"
 version = "0.0.0"
 dependencies = [
+ "chervo-core",
  "chervo-identity",
  "chervo-receive",
  "chervo-timesync",

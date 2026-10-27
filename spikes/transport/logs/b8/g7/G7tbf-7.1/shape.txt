@@ -1,2 +1,0 @@
-qdisc tbf 800d: root refcnt 5 rate 100Mbit burst 64Kb lat 50ms 
-qdisc tbf 800e: root refcnt 5 rate 100Mbit burst 64Kb lat 50ms 

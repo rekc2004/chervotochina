@@ -14,11 +14,34 @@ chervo-friends.workspace = true
 chervo-connect.workspace = true
 chervo-transfer.workspace = true
 chervo-receive.workspace = true
+# Этап 18а (решение D1): узел живёт в ядре, транспорт окончательный (quinn), UPnP и сверка времени
+# подключаются только по действию пользователя. Новых внешних пакетов нет.
+chervo-transport-quinn.workspace = true
+chervo-upnp.workspace = true
+chervo-timesync.workspace = true
+# `signal`: только для `Node::interrupt_signals` (Ctrl+C и SIGTERM для оболочек, этап 18в).
+tokio = { workspace = true, features = ["signal"] }
+# Нужен только для имени `Zeroizing` в обёртке хранилища ключей (`node/store.rs`); пакет уже в
+# рабочем пространстве.
+zeroize.workspace = true
 
 # Запрет дампов памяти (этап 17, C07): безопасный API rustix без `unsafe`. Крейт уже в
-# `Cargo.lock`; добавлена только возможность `process`.
+# `Cargo.lock`; возможности `process` (запрет дампов, владелец каталога данных) и `fs` (O_NOFOLLOW для
+# файла настроек).
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "=1.1.5", default-features = false, features = ["std", "process"] }
+rustix = { version = "=1.1.5", default-features = false, features = ["std", "process", "fs"] }
+
+[dev-dependencies]
+# Свои тесты используют точки входа за свойствами `fuzzing` и `test-store` (как в chervo-token): в продуктовой
+# сборке её нет.
+chervo-core = { path = ".", features = ["fuzzing", "test-store"] }
+
+[features]
+# Точка входа разбора настроек для libFuzzer (`fuzz/`, вне рабочего пространства), не для продукта.
+fuzzing = []
+# Подставное хранилище ключей и окна для тестов (`node/testing.rs`). Только через dev-зависимость
+# выше; ни один продуктовый манифест не включает его (тест `tests/features_guard.rs`).
+test-store = []
 
 [lints]
 workspace = true

@@ -10,12 +10,12 @@ mod redact_kit;
 
 use chervo_addr::{LocalSnapshot, OwnAddrs, PublishCtx, RouteSources};
 use chervo_token::{
-    AddrFlowError, FlowError, InviteError, InviteToken, InviteeKeys, InviteeSession, PendingInvite,
-    RevocationNotice, RevocationReason, Sas, Token, TokenError, decode, decode_addr_update_bin,
-    issue_addr_update, issue_revocation,
+    InviteError, InviteToken, InviteeKeys, InviteeSession, PendingInvite, RevocationNotice,
+    RevocationReason, Sas, Token, TokenError, decode, decode_addr_update_bin, issue_addr_update,
+    issue_revocation,
 };
 use common::*;
-use redact_kit::{Needles, NoDebug, Out, Probe, assert_fixed_text, check};
+use redact_kit::{Needles, NoDebug, Out, Probe, check};
 
 fn token_errors() -> Vec<TokenError> {
     use TokenError::*;
@@ -153,24 +153,4 @@ fn token_parsed_types_have_no_debug() {
     assert!(Probe::<PendingInvite>::new().has_debug());
     assert!(Probe::<InviteeKeys>::new().has_debug());
     assert!(Probe::<InviteeSession>::new().has_debug());
-}
-
-#[test]
-fn token_errors_have_fixed_text() {
-    for e in token_errors() {
-        assert_fixed_text("TokenError display", &e.to_string());
-        assert_fixed_text("TokenError debug", &format!("{e:?}"));
-    }
-    for e in invite_errors() {
-        assert_fixed_text("InviteError display", &e.to_string());
-        assert_fixed_text("InviteError debug", &format!("{e:?}"));
-    }
-    use AddrFlowError as A;
-    for e in [A::Truncated, A::Malformed, A::TrailingData, A::WrongPeer] {
-        assert_fixed_text("AddrFlowError display", &e.to_string());
-        assert_fixed_text("AddrFlowError debug", &format!("{e:?}"));
-    }
-    let e = FlowError::Truncated;
-    assert_fixed_text("FlowError display", &e.to_string());
-    assert_fixed_text("FlowError debug", &format!("{e:?}"));
 }

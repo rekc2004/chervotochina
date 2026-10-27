@@ -1,2 +1,0 @@
-EVENT auth_ok t=2 side=c to=198.51.100.50:4433 hs_ms=1 auth_ms=0
-EVENT observed_by_peer t=3 addr=198.51.100.40:38757

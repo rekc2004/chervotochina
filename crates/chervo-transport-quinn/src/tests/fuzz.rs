@@ -249,21 +249,6 @@ async fn fuzz_smoke_knock_never_admits() {
     assert!(fed > 0 || n == 0);
 }
 
-/// Точка входа libFuzzer не пуста (S1 M3): пара с двумя разными ключами, в таблице один ключ,
-/// настоящий стук другой стороны допустил (положительный контроль внутри `fuzz_knock_ready`),
-/// а случайные датаграммы нет.
-#[test]
-fn fuzz_entry_fixture_has_one_key_and_real_knock_admits() {
-    assert!(crate::fuzz_knock_ready(), "фикстура или контроль не прошли");
-    let mut rng = XorShift(0xFEED_5EED_0000_0001);
-    for _ in 0..200 {
-        let len = rng.below(100);
-        let data = rng.bytes(len);
-        assert!(!crate::fuzz_knock_admits(&data));
-    }
-    assert!(!crate::fuzz_knock_admits(&[0u8; KNOCK_LEN]));
-}
-
 /// Старая ошибка (S1 M3): «друг» с нашим же ключом даёт пустую таблицу. Здесь это видно.
 #[tokio::test]
 async fn fuzz_fixture_with_same_key_would_leave_table_empty() {

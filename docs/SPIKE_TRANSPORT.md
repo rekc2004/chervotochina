@@ -1,28 +1,30 @@
 # SPIKE_TRANSPORT: спайк транспорта, этап 7 (вариант A и вариант B)
 
-Спецификация: `docs/specs/stage-07-spike.md`. Код: `spikes/transport/` (одноразовый, не член workspace). Часть 1: вариант A (iroh 1.3.0), часть 2: вариант B (quinn 0.11.12 + rustls 0.23.46).
+Спецификация: `docs/specs/stage-07-spike.md`. Код: `spike-transport-final:spikes/transport/` (одноразовый, не член workspace). Часть 1: вариант A (iroh 1.3.0), часть 2: вариант B (quinn 0.11.12 + rustls 0.23.46).
+
+**Каталог `spikes/transport/` удалён из дерева 2026-10-27** (решение владельца, аудит тестов). Весь код и логи гейтов лежат в git-теге `spike-transport-final`: ссылки вида `spike-transport-final:spikes/transport/...` читаются командой `git show spike-transport-final:spikes/transport/ПУТЬ`, весь каталог можно получить через `git worktree add ПУТЬ spike-transport-final`. Команды `bash spikes/transport/run.sh ...` ниже запускаются из такого рабочего каталога.
 Метки: [П] проверено запуском в нашем стенде; [П-ч] проверено чтением исходника; [НП] не проверено.
 
 ## 1. Шапка
 - Дата: прогоны A 2026-10-14/15, прогоны B 2026-10-15. Код спайка: A `7ddf7fa`, B `b01ccea` (spike-b), `1528c43` (run.sh для B и логи прогона B); ветка `claude/hopeful-hawking-2sacz9`, база `664d4bd`.
 - `rustc 1.97.0 (2d8144b78 2026-07-07)`, `uname -r`: `6.18.44-fc-v114`, `tcpdump 4.99.4`, `nftables v1.0.9`.
-- Версии: iroh 1.3.0, noq 1.3.0, quinn 0.11.12, quinn-proto 0.11.19, ed25519-dalek 3.0.0, getrandom 0.4.3. `cargo tree --locked -i rustls`: одна версия `rustls v0.23.46` (её тянут iroh, noq, quinn и сам спайк). `cargo tree -d`: дубликаты только вспомогательных крейтов (base64 0.22.1/0.23.1, cpufeatures 0.2.17/0.3.1 и подобные), на крипто-путь не влияют. Полный вывод обеих команд: `spikes/transport/logs/versions.txt`.
+- Версии: iroh 1.3.0, noq 1.3.0, quinn 0.11.12, quinn-proto 0.11.19, ed25519-dalek 3.0.0, getrandom 0.4.3. `cargo tree --locked -i rustls`: одна версия `rustls v0.23.46` (её тянут iroh, noq, quinn и сам спайк). `cargo tree -d`: дубликаты только вспомогательных крейтов (base64 0.22.1/0.23.1, cpufeatures 0.2.17/0.3.1 и подобные), на крипто-путь не влияют. Полный вывод обеих команд: `spike-transport-final:spikes/transport/logs/versions.txt`.
 - **Эмуляция netns, не реальные операторы и не ТСПУ.**
 - **Ограничение стенда: в ядре выключен IPv6** (`ipv6.disable=1` в командной строке, нет `/proc/net/if_inet6`, `ip addr add fd77::..` даёт `Operation not supported`). Все IPv6-части стенда и ворот пропущены (см. G2 и разд. 6).
-- Захваты `cap-*.pcap` лежат локально в `spikes/transport/logs/<a|b>/<ворота>/` и не коммитятся (кроме `g12-a.pcap` 70 КБ и `g12-b.pcap` 54 КБ). Полные `server.log` G3 (до 12 тыс. строк) тоже не коммитятся: сводка в `g3/incoming-stats.txt`.
+- Захваты `cap-*.pcap` лежат локально в `spike-transport-final:spikes/transport/logs/<a|b>/<ворота>/` и не коммитятся (кроме `g12-a.pcap` 70 КБ и `g12-b.pcap` 54 КБ). Полные `server.log` G3 (до 12 тыс. строк) тоже не коммитятся: сводка в `g3/incoming-stats.txt`.
 
 ## 2. Сводка по воротам
 | Ворота | A (iroh 1.3.0) | B (quinn 0.11.12 + rustls) | доказательство |
 |---|---|---|---|
-| G1 нет трафика третьим сторонам | PASS | PASS | `spikes/transport/logs/{a/g1/{nopm,pm},b/g1/main}/result.txt` |
-| G2 только адрес (id/Ip у A; Ip у B) | INCONCLUSIVE (IPv4 2/2 ok; IPv6 не запускался) | INCONCLUSIVE (IPv4 2/2 ok; IPv6 не запускался) | `spikes/transport/logs/{a,b}/g2/result.txt` |
-| G3 пиннинг/лимит/CPU | PASS | PASS | `spikes/transport/logs/{a,b}/g3/` |
-| G9 (только B) | не применимо | PASS | `spikes/transport/logs/b/g9/p{1..5}.txt` |
-| G10 экспортёр и аутентификация | PASS | PASS | `spikes/transport/logs/{a,b}/g10/part{1,2,3,4}.txt` |
-| G11 одноразовый ключ сервера | **FAIL** | PASS | `spikes/transport/logs/a/g11/evidence.txt`, `spikes/transport/logs/b/g9/p1.txt` |
-| G12 что видит наблюдатель | PASS | PASS | `spikes/transport/logs/{a,b}/g12/observe.txt` |
+| G1 нет трафика третьим сторонам | PASS | PASS | `spike-transport-final:spikes/transport/logs/{a/g1/{nopm,pm},b/g1/main}/result.txt` |
+| G2 только адрес (id/Ip у A; Ip у B) | INCONCLUSIVE (IPv4 2/2 ok; IPv6 не запускался) | INCONCLUSIVE (IPv4 2/2 ok; IPv6 не запускался) | `spike-transport-final:spikes/transport/logs/{a,b}/g2/result.txt` |
+| G3 пиннинг/лимит/CPU | PASS | PASS | `spike-transport-final:spikes/transport/logs/{a,b}/g3/` |
+| G9 (только B) | не применимо | PASS | `spike-transport-final:spikes/transport/logs/b/g9/p{1..5}.txt` |
+| G10 экспортёр и аутентификация | PASS | PASS | `spike-transport-final:spikes/transport/logs/{a,b}/g10/part{1,2,3,4}.txt` |
+| G11 одноразовый ключ сервера | **FAIL** | PASS | `spike-transport-final:spikes/transport/logs/a/g11/evidence.txt`, `spike-transport-final:spikes/transport/logs/b/g9/p1.txt` |
+| G12 что видит наблюдатель | PASS | PASS | `spike-transport-final:spikes/transport/logs/{a,b}/g12/observe.txt` |
 
-Итоги скрипта (`spikes/transport/logs/{a,b}/summary.txt`) совпадают с таблицей. Оговорка по G2 в обоих столбцах: INCONCLUSIVE только из-за выключенного в ядре стенда IPv6 (см. разд. 6); IPv4-часть пройдена полностью.
+Итоги скрипта (`spike-transport-final:spikes/transport/logs/{a,b}/summary.txt`) совпадают с таблицей. Оговорка по G2 в обоих столбцах: INCONCLUSIVE только из-за выключенного в ядре стенда IPv6 (см. разд. 6); IPv4-часть пройдена полностью.
 
 ## 3. Решение
 **DECISION B** (вывод `bash spikes/transport/run.sh decide a` и `decide b`): у A провален G11 (FAIL), поэтому по DECISION 2.4 и U23 выполнен автоматический переход на вариант B без вопроса владельцу; у B нет ни одного FAIL, G1, G3, G9, G10, G11, G12 дали PASS. G2 у обоих вариантов INCONCLUSIVE только из-за выключенного IPv6 в стенде: по решению дирижёра это фиксируется и переход/выбор не блокирует (в `decide` INCONCLUSIVE с причиной "IPv6 в ядре" не считается блокирующим; любой иной INCONCLUSIVE блокировал бы). Вариант B выбран; IPv6-часть G2 для B остаётся непроверенной (разд. 6).
@@ -211,7 +213,7 @@ QUIC v1, ALPN `chervo-spike/1` найден в расшифрованном Init
 5. Всё получено в эмуляции (netns), не на реальных операторах и не на ТСПУ. Побочно: у A сервер принимает 0-RTT и выдаёт тикеты без возможности отключить (из исходника, запуском не проверялось); в B этого нет.
 
 ## 9. Этап 8: замеры (только B)
-Спецификация: `docs/specs/stage-08-measure.md`. Код: `spikes/transport/src/{xfer,natp}.rs`, `src/bin/spike8.rs`, стенд `spikes/transport/run8.sh`, логи `spikes/transport/logs/b8/` (итоговые строки `logs/b8/summary8.txt`). Метки [П] проверено запуском в нашем стенде, [НП] не проверено. **Выполнены все части Ч0-Ч5; Ч0-Ч3 вызовом 1, Ч4 (типы NAT, G6) и Ч5 (G4) вызовом 2 (разд. 9.5, 9.9).**
+Спецификация: `docs/specs/stage-08-measure.md`. Код: `spike-transport-final:spikes/transport/src/{xfer,natp}.rs`, `src/bin/spike8.rs`, стенд `spike-transport-final:spikes/transport/run8.sh`, логи `spike-transport-final:spikes/transport/logs/b8/` (итоговые строки `logs/b8/summary8.txt`). Метки [П] проверено запуском в нашем стенде, [НП] не проверено. **Выполнены все части Ч0-Ч5; Ч0-Ч3 вызовом 1, Ч4 (типы NAT, G6) и Ч5 (G4) вызовом 2 (разд. 9.5, 9.9).**
 
 ### 9.1 Шапка
 - Дата 2026-10-15; ветка `claude/hopeful-hawking-2sacz9`; код этапа 8: коммиты `b14acb7`..`cec9a6f`, прогоны G8 LO/L0 и G7 на бинарнике из `cec9a6f`, G5 на бинарнике до правки вытеснения соединения (правка не затрагивает путь UPnP и данные; см. 9.7 п.10).
@@ -350,7 +352,7 @@ IPv6 целиком; NAT-PMP/PCP; netem-сценарии G8 R1-R4 и G7 по с�
 5. Всё получено в эмуляции netns, не на реальных операторах и не на ТСПУ; IPv6 не проверен.
 
 ### 9.9 Итог этапа 8 (сводка G4-G8)
-Все данные: эмуляция netns, не реальные операторы и не ТСПУ; IPv6 не проверен. Строки: `spikes/transport/logs/b8/summary8.txt`.
+Все данные: эмуляция netns, не реальные операторы и не ТСПУ; IPv6 не проверен. Строки: `spike-transport-final:spikes/transport/logs/b8/summary8.txt`.
 
 | Ворота | Вердикт | Что получено |
 |---|---|---|

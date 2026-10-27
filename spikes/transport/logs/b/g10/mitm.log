@@ -1,8 +1,0 @@
-EVENT bound t=0 id=-
-EVENT bound t=0 id=-
-EVENT incoming t=58 peer=10.77.1.2:37749 validated=0 action=accept
-EVENT server_spki_issued t=59 peer=10.77.1.2:37749 spki=302a300506032b65700321003820e5a388fa90e766414f4a736a4ad12ca0a1190120bcccc703a9e2d814101a
-EVENT hs_done t=60 peer=10.77.1.2:37749 conn=1
-EVENT ekm t=61 side=md conn=1 ekm=a1b65b5414398c2a3a130a3be509c2d5525c0a1ab4a2b7996b35ae4e54f3b5bc
-EVENT ekm t=61 side=mu conn=1 ekm=9dddc51f52307ac6f4975e15fc6144732fca9ab1c582ce60ea3c86d438c6518a
-EVENT mitm_end t=564 conn=1

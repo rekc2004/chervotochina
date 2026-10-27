@@ -13,15 +13,37 @@
 //! Требование к оболочкам: вызывать первой строкой `main`, до загрузки любого ключа
 //! (CLI: `crates/chervo-cli/src/main.rs`; GUI этапа 18 обязан делать то же).
 
+/// Закрытый маркер: вне модуля значение `Sealed` не построить.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Sealed;
+
 /// Что реально применено и подтверждено чтением обратно.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[non_exhaustive]
+///
+/// Отчёт запечатан (этап 18а): у него есть закрытое поле и нет `Default`, поэтому вне
+/// `chervo-core` получить его можно только из [`harden_process`]. `Node::open` принимает
+/// `&HardenReport` как доказательство, что укрепление выполнено до загрузки ключей.
+///
+/// ```compile_fail
+/// // нет `Default`: пустой отчёт «укреплено» построить нельзя
+/// let _ = chervo_core::HardenReport::default();
+/// ```
+///
+/// ```compile_fail
+/// // закрытое поле: литерал структуры вне крейта не собрать
+/// let _ = chervo_core::HardenReport {
+///     not_dumpable: true,
+///     core_limit_zero: true,
+/// };
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HardenReport {
     /// Linux: `PR_SET_DUMPABLE = 0` установлен (процесс не дампится и не трассируется чужим
     /// процессом без прав).
     pub not_dumpable: bool,
     /// Linux и macOS: `RLIMIT_CORE` равен 0 (мягкий и жёсткий пределы): файлы core не создаются.
     pub core_limit_zero: bool,
+    /// Печать запечатывания: поле закрыто, значит `HardenReport` строит только этот модуль.
+    sealed: Sealed,
 }
 
 impl HardenReport {
@@ -34,7 +56,11 @@ impl HardenReport {
 /// Применяет доступные меры против дампов памяти. Вызывать как можно раньше.
 pub fn harden_process() -> HardenReport {
     #[allow(unused_mut)]
-    let mut report = HardenReport::default();
+    let mut report = HardenReport {
+        not_dumpable: false,
+        core_limit_zero: false,
+        sealed: Sealed,
+    };
     #[cfg(target_os = "linux")]
     {
         report.not_dumpable = imp::set_not_dumpable();

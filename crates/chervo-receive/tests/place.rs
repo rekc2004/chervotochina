@@ -10,8 +10,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use chervo_receive::{ReceiveConfig, ReceivePlacement, TestPoint, sanitize_path};
 use chervo_transfer::{PlaceError, Placement};
+#[cfg(windows)]
+use common::Tmp;
 use common::rows::{Exp, rows};
-use common::{Env, Tmp, key, link_dir_or_skip, offered, place_offer, placed_path, stage, tree};
+use common::{Env, key, link_dir_or_skip, offered, place_offer, placed_path, stage, tree};
 
 fn data(seed: u8, n: usize) -> Vec<u8> {
     (0..n)
@@ -348,21 +350,6 @@ fn junction_detected_as_link() {
             .next()
             .is_none()
     );
-}
-
-#[test]
-fn windows_symlink_test_skips_if_unprivileged() {
-    let tmp = Tmp::new("privs");
-    let target = tmp.path().join("t");
-    fs::create_dir(&target).expect("mkdir");
-    match common::link_dir(&target, &tmp.path().join("l")) {
-        Ok(kind) => println!("symlink privilege: directory links work here ({kind})"),
-        Err(why) => println!("symlink privilege: SKIPPED link tests, reason: {why}"),
-    }
-    match common::link_file(&target.join("nope"), &tmp.path().join("lf")) {
-        Ok(()) => println!("symlink privilege: file links work here"),
-        Err(why) => println!("symlink privilege: file link tests skip, reason: {why}"),
-    }
 }
 
 #[test]

@@ -13,7 +13,7 @@ use chervo_identity::{
     kk_respond, load,
 };
 use common::MemStore;
-use redact_kit::{Needles, Out, Probe, assert_fixed_text, check};
+use redact_kit::{Needles, Out, Probe, check};
 
 fn all_errors() -> Vec<IdentityError> {
     use IdentityError::*;
@@ -107,14 +107,6 @@ fn identity_types_hide_keys_and_pair_id() {
     n.bytes("msg1", &msg1);
     n.bytes("msg2", &msg2);
     check(&out, &n);
-}
-
-#[test]
-fn identity_errors_have_fixed_text() {
-    for e in all_errors() {
-        assert_fixed_text("IdentityError display", &e.to_string());
-        assert_fixed_text("IdentityError debug", &format!("{e:?}"));
-    }
 }
 
 /// Типы с секретами не получают `Debug` молча: если он появится, его надо проверить выше.

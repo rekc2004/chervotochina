@@ -1,3 +1,0 @@
-ip=10.77.3.10 hs_done_total=15 max_in_10s_window=5
-ip=10.77.3.11 hs_done_total=17 max_in_10s_window=6
-ip=10.77.3.12 hs_done_total=20 max_in_10s_window=5

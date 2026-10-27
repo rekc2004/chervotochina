@@ -1159,6 +1159,16 @@ pub(crate) async fn finish_session<L: Links>(
                 .await;
     }
     inner.remove_inb(&s.key);
+    if how == Finish::Completed {
+        // сглаживание по `progress_interval` могло оставить последнее `Progress` на первом блоке,
+        // а после снятия с учёта снимка нет: итог отдаём событием перед `Completed`
+        let done = lock(&s.core).sched.done_bytes();
+        s.emit(TransferEvent::Progress {
+            key: s.key,
+            done,
+            total: s.total,
+        });
+    }
     s.emit(match how {
         Finish::Completed => TransferEvent::Completed { key: s.key },
         Finish::Cancelled(by) => TransferEvent::Cancelled { key: s.key, by },

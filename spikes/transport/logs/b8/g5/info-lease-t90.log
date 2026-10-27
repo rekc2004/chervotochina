@@ -1,2 +1,0 @@
-EVENT upnp_gateway t=61 addr=192.168.10.1:5000
-EVENT upnp_ext_ip t=62 ip=11.0.0.10

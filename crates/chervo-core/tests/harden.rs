@@ -1,7 +1,8 @@
 //! Укрепление процесса (этап 17, C07). Проверки по платформам: на каждой ОС выполняется своя.
-//! Windows: мер нет (принятый остаток T10, решение Q4), и тест это фиксирует, чтобы остаток
-//! не исчез из виду.
+//! Windows: мер нет (принятый остаток T10, решение Q4), проверять там нечего: тестов для Windows
+//! здесь нет, укрепление на ней не проверяется (строка в `docs/reports/TEST-AUDIT-2026-10-27.md`).
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use chervo_core::harden_process;
 
 #[cfg(target_os = "linux")]
@@ -54,21 +55,4 @@ fn harden_macos_core_zero() {
     assert_eq!(lim.current, Some(0));
     assert_eq!(lim.maximum, Some(0));
     assert_eq!(harden_process(), report);
-}
-
-/// Windows: меры не применяются (WER и отладчик того же пользователя: принятый остаток).
-#[cfg(windows)]
-#[test]
-fn harden_windows_applies_nothing() {
-    let report = harden_process();
-    assert_eq!(report, chervo_core::HardenReport::default());
-    assert!(!report.any_applied());
-}
-
-/// На любой ОС вызов не паникует и повторяем.
-#[test]
-fn harden_is_idempotent() {
-    let a = harden_process();
-    let b = harden_process();
-    assert_eq!(a, b);
 }

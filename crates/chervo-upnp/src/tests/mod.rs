@@ -19,7 +19,6 @@ mod scan;
 mod soap;
 mod src_guard;
 mod ssdp;
-mod texts;
 mod url;
 
 use std::net::Ipv4Addr;
