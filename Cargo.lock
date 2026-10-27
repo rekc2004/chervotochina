@@ -159,7 +159,10 @@ dependencies = [
 name = "chervo-cli"
 version = "0.0.0"
 dependencies = [
+ "blake2",
  "chervo-core",
+ "chervo-update",
+ "ed25519-dalek",
 ]
 
 [[package]]
@@ -304,6 +307,15 @@ dependencies = [
  "rustls",
  "tokio",
  "zeroize",
+]
+
+[[package]]
+name = "chervo-update"
+version = "0.0.0"
+dependencies = [
+ "blake2",
+ "ed25519-dalek",
+ "ring",
 ]
 
 [[package]]

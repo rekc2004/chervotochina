@@ -12,6 +12,7 @@ members = [
     "crates/chervo-upnp",
     "crates/chervo-transfer",
     "crates/chervo-receive",
+    "crates/chervo-update",
     "crates/chervo-core",
     "crates/chervo-cli",
 ]
@@ -36,6 +37,7 @@ chervo-connect = { path = "crates/chervo-connect", version = "0.0.0" }
 chervo-upnp = { path = "crates/chervo-upnp", version = "0.0.0" }
 chervo-transfer = { path = "crates/chervo-transfer", version = "0.0.0" }
 chervo-receive = { path = "crates/chervo-receive", version = "0.0.0" }
+chervo-update = { path = "crates/chervo-update", version = "0.0.0" }
 chervo-core = { path = "crates/chervo-core", version = "0.0.0" }
 
 ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["zeroize", "fast"] }

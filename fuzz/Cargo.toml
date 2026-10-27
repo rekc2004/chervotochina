@@ -21,6 +21,8 @@ chervo-receive = { path = "../crates/chervo-receive", features = ["fuzzing"] }
 chervo-identity = { path = "../crates/chervo-identity" }
 chervo-upnp = { path = "../crates/chervo-upnp", features = ["fuzzing"] }
 chervo-transport-quinn = { path = "../crates/chervo-transport-quinn", features = ["fuzzing"] }
+# Stage 19a: release verification parsers (public API only, no features).
+chervo-update = { path = "../crates/chervo-update" }
 
 [workspace]
 members = ["."]
@@ -159,6 +161,27 @@ bench = false
 [[bin]]
 name = "transfer_names_file"
 path = "fuzz_targets/transfer_names_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "update_pubkey"
+path = "fuzz_targets/update_pubkey.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "update_minisig"
+path = "fuzz_targets/update_minisig.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "update_manifest"
+path = "fuzz_targets/update_manifest.rs"
 test = false
 doc = false
 bench = false
