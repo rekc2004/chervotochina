@@ -41,8 +41,6 @@ pub const NAV_TRANSFERS: &str = "Передачи";
 pub const NAV_DIAGNOSIS: &str = "Диагностика";
 pub const NAV_SETTINGS: &str = "Настройки";
 pub const PLACEHOLDER: &str = "Этот раздел появится в следующем шаге этапа 18.";
-pub const FRIENDS_COUNT: &str = "Друзей в списке";
-pub const ACTIVE_TRANSFERS: &str = "Активных передач";
 
 // Закрытие (экран 10)
 pub const CLOSE_ASK_TITLE: &str = "Закрыть программу?";
@@ -50,3 +48,166 @@ pub const CLOSE_ASK_TEXT: &str = "Передачи приостановятся 
 pub const BTN_CLOSE: &str = "Закрыть";
 pub const BTN_STAY: &str = "Остаться";
 pub const CLOSING: &str = "Закрываем программу…";
+
+// Друзья, приглашения, отправка, входящие, передачи (экраны 2-6)
+pub const PASTE_EMPTY: &str = "Вставьте текст.";
+pub const BAD_MANUAL_ADDR: &str = "Адрес должен быть вида 203.0.113.5:50000 (IP и порт).";
+pub const SAS_NAME_EMPTY: &str = "Введите имя друга.";
+pub const SEND_NO_FRIEND: &str = "Выберите друга.";
+pub const SEND_NO_FILES: &str = "Выберите файлы или папки.";
+pub const NO_REVOCATION_NEEDED: &str = "Готово. Ключа этой пары уже не было, отзыв не нужен.";
+pub const ADDR_APPLIED: &str = "Адрес друга сохранён, пробуем соединиться.";
+pub const AUTO_ACCEPTED: &str = "Файлы от друга приняты автоматически (автоприём включён).";
+pub const INVITE_ADDED: &str = "Друг добавлен.";
+pub const INVITE_DECLINED: &str = "Код не совпал или вы отказались: друг не добавлен.";
+pub const INVITE_EXPIRED: &str = "Срок приглашения истёк. Создайте новое.";
+pub const INVITE_FAILED: &str = "Не удалось добавить друга.";
+pub const NOTICES_HIDE: &str = "Скрыть";
+/// Токены и приглашения содержат адрес: кто увидит текст, узнает IP.
+pub const IP_WARNING: &str = "Внимание: в этом тексте ваш IP-адрес. Кто увидит текст, узнает ваш адрес. Отправляйте его только другу.";
+pub const BTN_COPY: &str = "Копировать";
+pub const BTN_CANCEL: &str = "Отмена";
+pub const BTN_OK: &str = "Готово";
+
+pub const FRIENDS_EMPTY: &str = "Друзей пока нет. Добавьте друга на вкладке «Добавить друга».";
+pub const BTN_PASTE_FRIEND_TOKEN: &str = "Вставить токен друга";
+pub const BTN_REKEY_ALL: &str = "Пересоздать все ключи";
+pub const BTN_SEND: &str = "Отправить";
+pub const BTN_CONNECT: &str = "Соединить";
+pub const BTN_DIAGNOSE: &str = "Диагностика";
+pub const BTN_RENAME: &str = "Переименовать";
+pub const BTN_BLOCK: &str = "Заблокировать";
+pub const BTN_UNBLOCK: &str = "Разблокировать";
+pub const BTN_REMOVE: &str = "Удалить";
+pub const BTN_REKEY: &str = "Пересоздать ключ";
+pub const BTN_AUTO_ON: &str = "Включить автоприём";
+pub const BTN_AUTO_OFF: &str = "Выключить автоприём";
+pub const BTN_SEND_ADDR: &str = "Отправить свой адрес";
+pub const BTN_SAVE: &str = "Сохранить";
+pub const BTN_YES_TRUST: &str = "Да, доверяю";
+pub const BTN_NO: &str = "Нет";
+pub const BTN_APPLY: &str = "Применить";
+pub const BTN_CREATE_TOKEN: &str = "Создать токен";
+pub const BTN_NEW_INVITE: &str = "Создать приглашение для друга";
+pub const LABEL_NAME: &str = "Имя";
+pub const LABEL_SAME_NETWORK: &str = "мы в одной сети";
+pub const LABEL_PASTE_HERE: &str = "Вставьте текст, который прислал друг";
+pub const STATE_ONLINE: &str = "в сети";
+pub const STATE_OFFLINE: &str = "не в сети";
+pub const STATE_ACTIVE: &str = "друг";
+pub const STATE_BLOCKED: &str = "заблокирован";
+pub const STATE_REVOKED: &str = "друг отозвал ключ";
+pub const STATE_RETIRED: &str = "ключ пересоздан или друг удалён";
+pub const PATH_LAN: &str = "локальная сеть";
+pub const PATH_IPV6: &str = "IPv6";
+pub const PATH_MAPPED: &str = "проброс порта";
+pub const PATH_DIRECT: &str = "прямое соединение";
+pub const AUTO_ON_LABEL: &str = "автоприём включён";
+pub const CONFIRM_REMOVE: &str = "Удалить друга? Покажем текст отзыва: отправьте его другу, иначе он узнает об удалении, только когда не сможет соединиться.";
+pub const CONFIRM_REKEY: &str = "Пересоздать ключ для этого друга? Старый ключ будет отозван, придётся отправить другу текст отзыва и создать новое приглашение.";
+pub const CONFIRM_REKEY_ALL: &str = "Пересоздать ключи для всех друзей? Каждому другу нужно будет отправить текст отзыва и создать новое приглашение.";
+pub const REVOCATION_REMOVED: &str = "Друг удалён. Отправьте этот текст другу любым способом: пока он не вставит его у себя, он не узнает об удалении.";
+pub const REVOCATION_REKEY: &str = "Ключ пересоздан. Отправьте этот текст другу любым способом, затем создайте для него новое приглашение.";
+pub const REKEY_PARTIAL: &str = "Для некоторых друзей ключ пересоздать не удалось";
+pub const ADDR_TOKEN_TITLE: &str = "Отправить свой адрес другу";
+pub const PASTE_TOKEN_TITLE: &str = "Токен адреса друга";
+
+pub const ADD_TAB_INVITE: &str = "Пригласить";
+pub const ADD_TAB_ACCEPT: &str = "Принять приглашение";
+pub const ADD_MANUAL_LABEL: &str = "Свой адрес с пробросом порта (необязательно), IP:порт";
+pub const BTN_CREATE_INVITE: &str = "Создать приглашение";
+pub const BTN_ACCEPT_INVITE: &str = "Принять приглашение";
+pub const INVITE_WAIT: &str =
+    "Отправьте приглашение другу (текстом или QR). Ждём, пока друг примет его.";
+pub const INVITE_ACCEPT_WAIT: &str = "Приглашение принято. Ждём проверочный код.";
+pub const SAS_TITLE: &str = "Проверочный код";
+pub const SAS_HINT: &str = "Сверьте цифры с другом по телефону или лично. Подтверждайте, только если цифры совпадают на обоих экранах.";
+pub const BTN_SAS_MATCH: &str = "Совпадает";
+pub const BTN_SAS_MISMATCH: &str = "Не совпадает";
+
+pub const SEND_TITLE: &str = "Отправить файлы";
+pub const SEND_HINT: &str = "Выберите файлы или папки или перетащите их в окно. Папки отправляются целиком; ссылки не разворачиваются.";
+pub const BTN_PICK_FILES: &str = "Выбрать файлы…";
+pub const BTN_PICK_DIR: &str = "Выбрать папку…";
+pub const BTN_REMOVE_ITEM: &str = "Убрать";
+pub const SEND_TO: &str = "Кому";
+pub const SEND_NO_ACTIVE_FRIENDS: &str = "Нет друзей, которым можно отправить.";
+pub const FOLDER_WORD: &str = "папка";
+
+pub const OFFERS_EMPTY: &str = "Входящих предложений нет.";
+pub const OFFER_FROM: &str = "От";
+pub const OFFER_SPACE_UNKNOWN: &str = "свободное место узнать не удалось";
+pub const BTN_ACCEPT: &str = "Принять";
+pub const BTN_DECLINE: &str = "Отклонить";
+pub const BTN_OTHER_FOLDER: &str = "Выбрать другую папку";
+pub const MARK_RISKY: &str = "(!) ";
+pub const KIND_SAFE: &str = "обычный файл";
+pub const KIND_EXEC: &str = "программа или опасный тип";
+pub const KIND_UNKNOWN: &str = "неизвестный тип";
+
+pub const TRANSFERS_EMPTY: &str = "Передач пока нет.";
+pub const BTN_RETRY_TRANSFER: &str = "Повторить";
+pub const BTN_CANCEL_TRANSFER: &str = "Отменить передачу";
+pub const SIDE_SEND: &str = "отправка";
+pub const SIDE_RECEIVE: &str = "приём";
+pub const STATE_AWAITING_ANSWER: &str = "ждём ответа друга";
+pub const STATE_AWAITING_USER: &str = "ждёт вашего ответа";
+pub const STATE_ACTIVE_TRANSFER: &str = "идёт";
+pub const STATE_PAUSED: &str = "приостановлена";
+pub const STATE_FINISHED: &str = "завершена";
+pub const SAVED_TO: &str = "Файлы лежат в папке";
+
+pub fn offer_summary(count: usize, total: u64) -> String {
+    format!("Файлов: {count}, всего {}", human_size(total))
+}
+
+pub fn space_line(needed: u64, available: u64) -> String {
+    format!(
+        "Места нужно (с запасом): {}, свободно: {}",
+        human_size(needed),
+        human_size(available)
+    )
+}
+
+pub fn progress_text(done: u64, total: u64) -> String {
+    format!("{} из {}", human_size(done), human_size(total))
+}
+
+pub fn send_summary(files: usize, dirs: usize, files_total: u64) -> String {
+    let mut s = format!("Файлов: {files}, размер: {}", human_size(files_total));
+    if dirs > 0 {
+        s.push_str(&format!(
+            ", папок: {dirs} (их размер программа посчитает при отправке)"
+        ));
+    }
+    s
+}
+
+/// Размер человеку: Б, КиБ, МиБ, ГиБ, ТиБ (степени 1024).
+pub fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["Б", "КиБ", "МиБ", "ГиБ", "ТиБ"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} Б")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::human_size;
+
+    #[test]
+    fn human_sizes() {
+        assert_eq!(human_size(0), "0 Б");
+        assert_eq!(human_size(1023), "1023 Б");
+        assert_eq!(human_size(1024), "1.0 КиБ");
+        assert_eq!(human_size(5 * 1024 * 1024 * 1024), "5.0 ГиБ");
+    }
+}

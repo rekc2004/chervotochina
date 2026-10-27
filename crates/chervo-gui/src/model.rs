@@ -6,10 +6,14 @@
 //! настройки`, `папка вне профиля`) никогда не происходят сами. Модель выдаёт соответствующую
 //! команду только по явному намерению, пришедшему из нужного состояния.
 
+use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use chervo_core::{FriendView, NodeError, NodeEvent, RootError, TransferView};
+use chervo_core::{InviteOutcome, NodeError, NodeEvent, RootError};
 
+use crate::main_model::{AddFriend, Dialog, MainIntent, OfferUi, SendUi};
+use crate::rows::{FriendRow, Id, OfferRow, TransferRow};
 use crate::texts;
 
 /// Как открыть узел. `AcceptOlder` и `StartOver` бывают только после явного выбора пользователя.
@@ -35,14 +39,59 @@ pub enum Command {
     ResetSettings,
     RequestUnlock,
     Shutdown,
+    // друзья и приглашения (экраны 2-3)
+    CreateInvite {
+        same_network: bool,
+        manual: Option<SocketAddr>,
+    },
+    AcceptInvite(String),
+    ConfirmSas {
+        invite: Id,
+        yes: bool,
+        name: String,
+    },
+    CancelInvite(Id),
+    Rename {
+        friend: Id,
+        name: String,
+    },
+    Block(Id),
+    Unblock(Id),
+    Remove(Id),
+    Rekey(Id),
+    RekeyAll,
+    /// Только после ответа «да» на `TRUST_QUESTION_TEXT` (охрана `gated_node_actions`).
+    EnableAutoAccept(Id),
+    DisableAutoAccept(Id),
+    IssueAddrToken {
+        friend: Id,
+        same_network: bool,
+    },
+    ApplyAddrToken(String),
+    /// Только из обработчика кнопки «Соединить» (охрана `gated_node_actions`).
+    ConnectNow(Id),
+    // передачи (экраны 4-6)
+    Send {
+        friend: Id,
+        paths: Vec<PathBuf>,
+    },
+    Accept(Id),
+    AcceptInto {
+        transfer: Id,
+        root: PathBuf,
+    },
+    Decline(Id),
+    CancelTransfer(Id),
+    Retry(Id),
 }
 
 /// Снимок состояния узла для окна. Считается в фоновом потоке.
 #[derive(Clone, Default)]
 pub struct Snapshot {
-    pub friends: Vec<FriendView>,
-    #[allow(dead_code)] // читают экраны передач на следующих шагах этапа 18
-    pub transfers: Vec<TransferView>,
+    pub friends: Vec<FriendRow>,
+    pub transfers: Vec<TransferRow>,
+    /// Предложения, ожидающие ответа человека.
+    pub offers: Vec<OfferRow>,
     /// Передачи, которые не завершены (для вопроса при закрытии).
     pub active_transfers: usize,
 }
@@ -61,6 +110,33 @@ pub enum Outcome {
     Snapshot(Snapshot),
     Event(NodeEvent),
     Stopped,
+    // ответы на команды экранов 2-6
+    InviteCreated(Result<(Id, String), NodeError>),
+    InviteAccepted(Result<Id, NodeError>),
+    InviteSas {
+        invite: Id,
+        digits: String,
+        spoken: String,
+    },
+    InviteFinished(InviteOutcome),
+    /// Текст отзыва после «Удалить» (`None`: ключа пары уже не было) или «Пересоздать ключ».
+    Revocation {
+        friend: String,
+        text: Result<Option<String>, NodeError>,
+        rekey: bool,
+    },
+    RekeyAll {
+        items: Vec<(String, String)>,
+        failed: usize,
+    },
+    AddrToken(Result<String, NodeError>),
+    AddrApplied(Result<(), NodeError>),
+    Sent(Result<(), NodeError>),
+    SasAnswered(Result<(), NodeError>),
+    OfferIncoming,
+    AutoAccepted,
+    /// Прочие действия: при ошибке показывается её текст.
+    Done(Result<(), NodeError>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +169,7 @@ pub enum Intent {
     CloseRequested,
     CloseConfirmed,
     CloseCancelled,
+    Main(MainIntent),
 }
 
 /// Форма первого запуска (и смены папки приёма, если прежняя пропала).
@@ -163,6 +240,12 @@ pub struct Model {
     pub snapshot: Snapshot,
     pub notices: Vec<&'static str>,
     pub close: Close,
+    pub dialog: Dialog,
+    pub add: AddFriend,
+    pub send: SendUi,
+    pub offer_ui: HashMap<Id, OfferUi>,
+    /// Просьба к окну привлечь внимание (мигание в панели задач); забирает `take_attention`.
+    pub(crate) attention: bool,
 }
 
 impl Model {
@@ -176,6 +259,11 @@ impl Model {
             snapshot: Snapshot::default(),
             notices: Vec::new(),
             close: Close::None,
+            dialog: Dialog::None,
+            add: AddFriend::default(),
+            send: SendUi::default(),
+            offer_ui: HashMap::new(),
+            attention: false,
         };
         (
             m,
@@ -196,6 +284,11 @@ impl Model {
             snapshot: Snapshot::default(),
             notices: Vec::new(),
             close: Close::None,
+            dialog: Dialog::None,
+            add: AddFriend::default(),
+            send: SendUi::default(),
+            offer_ui: HashMap::new(),
+            attention: false,
         }
     }
 
@@ -349,6 +442,13 @@ impl Model {
                 Vec::new()
             }
             Intent::UsePort => self.use_port(),
+            Intent::Main(m) => {
+                if self.node_open {
+                    self.update_main(m)
+                } else {
+                    Vec::new()
+                }
+            }
             Intent::CloseRequested | Intent::CloseConfirmed | Intent::CloseCancelled => Vec::new(),
         }
     }
@@ -436,7 +536,7 @@ impl Model {
                 self.open_pending = false;
                 self.node_open = true;
                 if !port_saved {
-                    self.notices.push(texts::PORT_NOT_SAVED);
+                    self.push_notice(texts::PORT_NOT_SAVED);
                 }
                 Vec::new()
             }
@@ -487,8 +587,8 @@ impl Model {
             }
             Outcome::Event(ev) => {
                 match ev {
-                    NodeEvent::Warning(w) => self.notices.push(w.user_text()),
-                    NodeEvent::Internal => self.notices.push(texts::INTERNAL_NOTICE),
+                    NodeEvent::Warning(w) => self.push_notice(w.user_text()),
+                    NodeEvent::Internal => self.push_notice(texts::INTERNAL_NOTICE),
                     _ => {}
                 }
                 Vec::new()
@@ -497,6 +597,10 @@ impl Model {
                 self.node_open = false;
                 self.open_pending = false;
                 self.close = Close::Done;
+                Vec::new()
+            }
+            other => {
+                self.outcome_main(other);
                 Vec::new()
             }
         }

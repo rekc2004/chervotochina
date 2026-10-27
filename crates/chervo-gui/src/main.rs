@@ -3,12 +3,15 @@
 #![windows_subsystem = "windows"]
 
 mod app;
+mod main_model;
 mod model;
 mod picker;
 mod qr;
+mod rows;
 mod screens;
 mod texts;
 mod worker;
+mod worker_ops;
 
 use std::process::ExitCode;
 

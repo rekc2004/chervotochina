@@ -3,9 +3,10 @@
 
 use eframe::egui;
 
-use crate::model::{Intent, Model};
-use crate::screens;
+use crate::main_model::MainIntent;
+use crate::model::{Close, Intent, Model};
 use crate::worker::Worker;
+use crate::{picker, screens};
 
 /// Сколько кадров рисует `--render-check` перед выходом.
 const RENDER_CHECK_FRAMES: u32 = 3;
@@ -63,6 +64,29 @@ impl eframe::App for App {
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.dispatch(vec![Intent::CloseRequested]);
+        }
+
+        // файлы, брошенные в окно: добавляются к выбору для отправки (только описание путей, без
+        // чтения содержимого и записи)
+        let dropped: Vec<_> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .filter(|p| !p.as_os_str().is_empty())
+                .collect()
+        });
+        if self.model.node_open && self.model.close == Close::None && !dropped.is_empty() {
+            let picked: Vec<_> = dropped.into_iter().filter_map(picker::describe).collect();
+            if !picked.is_empty() {
+                self.dispatch(vec![Intent::Main(MainIntent::PathsAdded(picked))]);
+            }
+        }
+        // новое предложение или проверочный код: мигнуть окном в панели задач, больше ничего
+        if self.model.take_attention() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                egui::UserAttentionType::Informational,
+            ));
         }
 
         let mut intents = Vec::new();

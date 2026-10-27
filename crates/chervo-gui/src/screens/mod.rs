@@ -1,9 +1,15 @@
 //! Экраны. Каждый только рисует состояние модели и возвращает намерения пользователя. Вызовов
 //! узла здесь нет и быть не может (охрана `tests/ui_thread.rs`).
 
+mod add_friend;
 mod close;
+mod common;
+mod friends;
+mod offers;
 mod placeholder;
+mod send;
 mod start;
+mod transfers;
 
 use eframe::egui;
 

@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use chervo_core::{HardenReport, Node, NodeConfig, NodeError, NodeEvents, ReceiveLimits};
 
-use crate::model::{Command, OpenMode, Outcome, Snapshot};
+use crate::model::{Command, OpenMode, Outcome};
+use crate::worker_ops::{self, Refs};
 
 /// Срок мягкой остановки передач при закрытии окна (экран 10).
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(10);
@@ -61,24 +62,10 @@ fn config(port: Option<u16>) -> NodeConfig {
     }
 }
 
-fn snapshot(node: &Node) -> Snapshot {
-    let friends = node.friends();
-    let transfers = node.transfers();
-    let active_transfers = transfers.iter().filter(|t| is_active(t)).count();
-    Snapshot {
-        friends,
-        transfers,
-        active_transfers,
-    }
-}
-
-fn is_active(t: &chervo_core::TransferView) -> bool {
-    t.result.is_none() && t.state != chervo_core::TransferState::Finished
-}
-
 struct State {
     hardening: HardenReport,
     node: Option<(Node, NodeEvents)>,
+    refs: Refs,
     out: Sender<Outcome>,
     wake: Wake,
 }
@@ -89,9 +76,13 @@ impl State {
         (self.wake)();
     }
 
-    fn post_snapshot(&self) {
-        if let Some((node, _)) = &self.node {
-            self.post(Outcome::Snapshot(snapshot(node)));
+    fn post_snapshot(&mut self) {
+        let snap = self
+            .node
+            .as_ref()
+            .map(|(node, _)| worker_ops::snapshot(node, &mut self.refs));
+        if let Some(snap) = snap {
+            self.post(Outcome::Snapshot(snap));
         }
     }
 
@@ -124,6 +115,14 @@ impl State {
                 }
                 self.post(Outcome::Stopped);
                 return false;
+            }
+            other => {
+                let out = self
+                    .node
+                    .as_ref()
+                    .and_then(|(node, _)| worker_ops::exec(node, &mut self.refs, other));
+                // узла нет (ещё не открыт или уже остановлен): действие невозможно
+                self.post(out.unwrap_or(Outcome::Done(Err(NodeError::Shutdown))));
             }
         }
         true
@@ -170,7 +169,8 @@ impl State {
         }
         for ev in batch {
             got = true;
-            self.post(Outcome::Event(ev));
+            let outcome = worker_ops::event_outcome(&mut self.refs, ev);
+            self.post(outcome);
         }
         if got {
             self.post_snapshot();
@@ -183,6 +183,7 @@ fn run(hardening: HardenReport, commands: Receiver<Command>, out: Sender<Outcome
     let mut st = State {
         hardening,
         node: None,
+        refs: Refs::default(),
         out,
         wake,
     };

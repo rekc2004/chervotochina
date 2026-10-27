@@ -1,9 +1,11 @@
-//! Заглушки разделов главного окна: содержимое экранов 2-9 добавляется следующими шагами
-//! этапа 18. Здесь только навигация и признак того, что узел работает.
+//! Главное окно: навигация, уведомления и выбор экрана раздела. Разделы «Диагностика» и
+//! «Настройки» пока заглушки (следующий шаг этапа 18).
 
 use eframe::egui;
 
+use crate::main_model::MainIntent;
 use crate::model::{Intent, Model, Page};
+use crate::screens::{add_friend, friends, offers, send, transfers};
 use crate::texts;
 
 const PAGES: [(Page, &str); 7] = [
@@ -20,32 +22,35 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
     let mut out = Vec::new();
     ui.horizontal_wrapped(|ui| {
         for (page, label) in PAGES {
-            if ui.selectable_label(model.page == page, label).clicked() {
+            let text = if page == Page::Offers && model.offers_waiting() > 0 {
+                format!("{label} ({})", model.offers_waiting())
+            } else {
+                label.to_owned()
+            };
+            if ui.selectable_label(model.page == page, text).clicked() {
                 out.push(Intent::Go(page));
             }
         }
     });
     ui.separator();
-    for notice in &model.notices {
-        ui.label(*notice);
+    if !model.notices.is_empty() {
+        for notice in &model.notices {
+            ui.label(*notice);
+        }
+        if ui.small_button(texts::NOTICES_HIDE).clicked() {
+            out.push(Intent::Main(MainIntent::DismissNotices));
+        }
+        ui.separator();
     }
-    let title = PAGES
-        .iter()
-        .find(|(p, _)| *p == model.page)
-        .map_or("", |(_, l)| *l);
-    ui.heading(title);
-    ui.add_space(8.0);
-    ui.label(texts::PLACEHOLDER);
-    ui.add_space(8.0);
-    ui.label(format!(
-        "{}: {}",
-        texts::FRIENDS_COUNT,
-        model.snapshot.friends.len()
-    ));
-    ui.label(format!(
-        "{}: {}",
-        texts::ACTIVE_TRANSFERS,
-        model.snapshot.active_transfers
-    ));
+    match model.page {
+        Page::Friends => out.extend(friends::show(ui, model)),
+        Page::AddFriend => out.extend(add_friend::show(ui, model)),
+        Page::Send => out.extend(send::show(ui, model)),
+        Page::Offers => out.extend(offers::show(ui, model)),
+        Page::Transfers => out.extend(transfers::show(ui, model)),
+        Page::Diagnosis | Page::Settings => {
+            ui.label(texts::PLACEHOLDER);
+        }
+    }
     out
 }
