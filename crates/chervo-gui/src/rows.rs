@@ -5,7 +5,8 @@
 use std::path::PathBuf;
 
 use chervo_core::{
-    FileKind, FriendStatus, PathKind, PauseReason, Side, SpaceView, TransferResult, TransferState,
+    FileKind, FriendStatus, KeyStoreKind, PathKind, PauseReason, Side, SpaceView, TransferResult,
+    TransferState,
 };
 
 /// Локальный номер друга, приглашения или передачи. Выдаёт фоновый поток.
@@ -63,6 +64,47 @@ impl TransferRow {
     pub fn is_active(&self) -> bool {
         self.result.is_none() && self.state != TransferState::Finished
     }
+}
+
+/// Разрешённый роутер в списке настроек. `id` это позиция в списке на момент снимка.
+#[derive(Clone)]
+pub struct RouterRow {
+    pub id: Id,
+    pub permanent_ok: bool,
+}
+
+/// Снимок настроек для экрана 8.
+#[derive(Clone)]
+pub struct SettingsRow {
+    pub port: u16,
+    pub receive_root: String,
+    pub extra_roots: Vec<String>,
+    pub min_free_percent: u8,
+    pub manual_forward: Option<u16>,
+    pub routers: Vec<RouterRow>,
+    pub clock_offset_ms: i64,
+    pub ntp_servers: Vec<String>,
+    pub key_store: KeyStoreKind,
+    pub restart_needed: bool,
+}
+
+/// Текст отзыва, который ещё не снят с учёта (удалённый или пересозданный друг).
+#[derive(Clone)]
+pub struct RetiredRow {
+    pub id: Id,
+    pub friend: String,
+    pub text: String,
+}
+
+/// Почему друг недоступен (экран 7).
+#[derive(Clone)]
+pub struct DiagRow {
+    pub friend: Id,
+    pub text: &'static str,
+    pub could_help: bool,
+    /// Последний путь был по локальной сети, а адреса больше нет: подсказка про токен «мы в одной
+    /// сети» (адреса локальной сети живут сутки).
+    pub lan_hint: bool,
 }
 
 /// Выбранный для отправки путь с тем, что известно без обхода папки.

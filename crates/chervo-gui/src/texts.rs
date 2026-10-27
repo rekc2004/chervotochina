@@ -40,7 +40,6 @@ pub const NAV_OFFERS: &str = "Входящие";
 pub const NAV_TRANSFERS: &str = "Передачи";
 pub const NAV_DIAGNOSIS: &str = "Диагностика";
 pub const NAV_SETTINGS: &str = "Настройки";
-pub const PLACEHOLDER: &str = "Этот раздел появится в следующем шаге этапа 18.";
 
 // Закрытие (экран 10)
 pub const CLOSE_ASK_TITLE: &str = "Закрыть программу?";
@@ -156,6 +155,89 @@ pub const STATE_ACTIVE_TRANSFER: &str = "идёт";
 pub const STATE_PAUSED: &str = "приостановлена";
 pub const STATE_FINISHED: &str = "завершена";
 pub const SAVED_TO: &str = "Файлы лежат в папке";
+
+// Диагностика (7), настройки (8), уведомления (9)
+pub const OWN_ADDR_CHANGED: &str = "Ваш адрес изменился. Если друзья не могут соединиться, отправьте им новый токен адреса (кнопка «Отправить свой адрес»).";
+pub const MIN_FREE_BAD: &str = "Запас места: число от 0 до 100.";
+pub const FORWARD_BAD: &str = "Внешний порт: число от 1 до 65535 или пусто, чтобы убрать.";
+pub const UPNP_ALLOWED: &str = "Роутер разрешён. Состояние проброса показано в этом разделе.";
+pub const CLOCK_APPLIED: &str = "Поправка часов применена.";
+pub const CLOCK_RESET: &str = "Поправка часов сброшена.";
+pub const ROOT_CHANGED: &str =
+    "Папка приёма изменена. Изменение вступит в силу после перезапуска программы.";
+pub const CLOCK_SKEW_HINT: &str =
+    "Возможно, часы у вас или у друга идут неверно. Сверьте свои часы в настройках.";
+pub const LAN_EXPIRED_HINT: &str = "Адрес в локальной сети устарел (он живёт сутки). Отправьте токен адреса с отметкой «мы в одной сети».";
+pub const BTN_CLOCK_HINT: &str = "Сверить часы";
+
+pub const DIAG_TITLE: &str = "Диагностика соединения";
+pub const DIAG_NAT_TITLE: &str = "Ваша сеть";
+pub const DIAG_CONNECTED: &str = "соединение есть";
+pub const DIAG_NO_REASON: &str = "причина пока не ясна";
+pub const MEDIATOR_LATER: &str = "Сервер-посредник мог бы помочь; он появится в следующей версии.";
+pub const DIAG_NO_FRIENDS: &str = "Друзей пока нет.";
+pub const NAT_NO_IPV4: &str = "IPv4-адреса нет.";
+pub const NAT_PUBLIC: &str = "У вас белый IP: друзья могут звонить вам напрямую.";
+pub const NAT_MAPPED: &str = "Порт открыт через роутер.";
+pub const NAT_EIM: &str = "NAT подходит для прямых соединений.";
+pub const NAT_MANUAL: &str = "Задан ручной проброс порта.";
+pub const NAT_CONFLICT: &str = "Сведения о вашем адресе противоречат друг другу.";
+pub const BTN_REFRESH_MAPPING: &str = "Обновить проброс";
+
+pub const SET_TITLE_FOLDERS: &str = "Папка приёма";
+pub const SET_CURRENT: &str = "Сейчас";
+pub const SET_EXTRA_FOLDERS: &str = "Дополнительные папки (недокачанные передачи)";
+pub const BTN_CHANGE_FOLDER: &str = "Сменить папку";
+pub const SET_MIN_FREE: &str = "Запас свободного места, % тома";
+pub const SET_PORT: &str = "Порт UDP (вступит в силу после перезапуска)";
+pub const SET_FORWARD: &str = "Внешний порт ручного проброса (пусто: нет)";
+pub const SET_RESTART: &str = "Есть изменения, которые вступят в силу после перезапуска программы.";
+pub const SET_TITLE_UPNP: &str = "Проброс порта на роутере";
+pub const BTN_FIND_ROUTER: &str = "Найти роутер";
+pub const BTN_YES: &str = "Да";
+pub const SET_ROUTERS: &str = "Разрешённые роутеры";
+pub const SET_ROUTER_ITEM: &str = "Роутер";
+pub const SET_ROUTER_PERMANENT: &str = "бессрочная аренда разрешена";
+pub const BTN_FORGET: &str = "Забыть";
+pub const SET_NO_ROUTERS: &str = "Разрешённых роутеров нет.";
+pub const SET_TITLE_CLOCK: &str = "Часы";
+pub const BTN_SYNC_CLOCK: &str = "Сверить часы";
+pub const BTN_RESET_CLOCK: &str = "Сбросить поправку";
+pub const SET_NTP: &str = "Серверы времени";
+pub const SET_CLOCK_NOTE: &str = "Сверка идёт только по кнопке и обращается к серверам времени.";
+pub const BTN_APPLY_OFFSET: &str = "Применить поправку";
+pub const SET_TITLE_KEYS: &str = "Ключи";
+pub const SET_KEY_STORE: &str = "Хранилище ключей";
+pub const KEYS_CREDENTIAL: &str = "Диспетчер учётных данных Windows";
+pub const KEYS_KEYCHAIN: &str = "Связка ключей macOS";
+pub const KEYS_SECRET: &str = "Secret Service (Linux)";
+pub const KEYS_OTHER: &str = "хранилище ОС";
+pub const KEYS_LOCAL_UNAVAILABLE: &str = "Режим «локальные ключи» в этой версии недоступен.";
+pub const SET_RETIRED: &str = "Тексты отзыва, которые ещё не сняты с учёта";
+pub const SET_NO_RETIRED: &str = "Таких текстов нет.";
+pub const BTN_FORGET_RETIRED: &str = "Друг получил, убрать";
+pub const SET_TITLE_ABOUT: &str = "О программе";
+pub const ABOUT_VERSION: &str = "Версия";
+pub const ABOUT_LICENCES: &str =
+    "Список лицензий сторонних библиотек появится вместе с выпуском программы (этап 19).";
+
+pub fn clock_proposal_text(offset_ms: i64) -> String {
+    let secs = offset_ms / 1000;
+    format!(
+        "Часы расходятся с серверами времени на {} мин {} с ({}). Поправка больше 5 минут: применить?",
+        secs.abs() / 60,
+        secs.abs() % 60,
+        if offset_ms >= 0 {
+            "ваши отстают"
+        } else {
+            "ваши спешат"
+        }
+    )
+}
+
+pub fn clock_offset_text(offset_ms: i64) -> String {
+    format!("Текущая поправка: {} мс", offset_ms)
+}
 
 pub fn offer_summary(count: usize, total: u64) -> String {
     format!("Файлов: {count}, всего {}", human_size(total))

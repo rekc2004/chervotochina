@@ -1,11 +1,10 @@
-//! Главное окно: навигация, уведомления и выбор экрана раздела. Разделы «Диагностика» и
-//! «Настройки» пока заглушки (следующий шаг этапа 18).
+//! Главное окно: навигация, уведомления (экран 9) и выбор экрана раздела.
 
 use eframe::egui;
 
 use crate::main_model::MainIntent;
 use crate::model::{Intent, Model, Page};
-use crate::screens::{add_friend, friends, offers, send, transfers};
+use crate::screens::{add_friend, diagnosis, friends, offers, send, settings, transfers};
 use crate::texts;
 
 const PAGES: [(Page, &str); 7] = [
@@ -35,7 +34,10 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
     ui.separator();
     if !model.notices.is_empty() {
         for notice in &model.notices {
-            ui.label(*notice);
+            ui.label(notice);
+        }
+        if model.clock_hint && ui.button(texts::BTN_CLOCK_HINT).clicked() {
+            out.push(Intent::Go(Page::Settings));
         }
         if ui.small_button(texts::NOTICES_HIDE).clicked() {
             out.push(Intent::Main(MainIntent::DismissNotices));
@@ -48,9 +50,8 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
         Page::Send => out.extend(send::show(ui, model)),
         Page::Offers => out.extend(offers::show(ui, model)),
         Page::Transfers => out.extend(transfers::show(ui, model)),
-        Page::Diagnosis | Page::Settings => {
-            ui.label(texts::PLACEHOLDER);
-        }
+        Page::Diagnosis => out.extend(diagnosis::show(ui, model)),
+        Page::Settings => out.extend(settings::show(ui, model)),
     }
     out
 }

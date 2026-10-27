@@ -82,7 +82,7 @@ impl State {
             .as_ref()
             .map(|(node, _)| worker_ops::snapshot(node, &mut self.refs));
         if let Some(snap) = snap {
-            self.post(Outcome::Snapshot(snap));
+            self.post(Outcome::Snapshot(Box::new(snap)));
         }
     }
 
@@ -169,7 +169,8 @@ impl State {
         }
         for ev in batch {
             got = true;
-            let outcome = worker_ops::event_outcome(&mut self.refs, ev);
+            let outcome =
+                worker_ops::event_outcome(self.node.as_ref().map(|(n, _)| n), &mut self.refs, ev);
             self.post(outcome);
         }
         if got {

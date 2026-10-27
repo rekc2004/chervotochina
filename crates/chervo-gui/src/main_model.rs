@@ -12,6 +12,7 @@ use chervo_core::{FriendStatus, InviteOutcome};
 use crate::model::{Command, Model, Outcome, Page};
 use crate::qr::{self, QrMatrix};
 use crate::rows::{Id, PickedPath};
+use crate::settings_model::SettingsIntent;
 use crate::texts;
 
 /// Предел вставленного текста (приглашение, токен), байт: как в узле, чтобы отказывать раньше.
@@ -90,6 +91,7 @@ pub enum MainIntent {
     // передачи
     TransferCancel(Id),
     TransferRetry(Id),
+    Settings(SettingsIntent),
 }
 
 /// Один диалог за раз; пока он открыт, он занимает место списка друзей.
@@ -194,7 +196,8 @@ pub struct OfferUi {
 }
 
 impl Model {
-    pub fn push_notice(&mut self, text: &'static str) {
+    pub fn push_notice(&mut self, text: impl Into<String>) {
+        let text = text.into();
         if self.notices.last() == Some(&text) {
             return;
         }
@@ -425,6 +428,7 @@ impl Model {
                 self.notices.clear();
                 Vec::new()
             }
+            I::Settings(s) => self.update_settings(s),
             other => self.update_add_send(other),
         }
     }
@@ -788,7 +792,7 @@ impl Model {
                 self.clear_busy();
                 self.push_notice(e.user_text());
             }
-            _ => {}
+            other => self.outcome_settings(other),
         }
     }
 
@@ -861,7 +865,7 @@ mod tests {
     fn with_snapshot(m: &mut Model, f: impl FnOnce(&mut Snapshot)) {
         let mut s = Snapshot::default();
         f(&mut s);
-        m.on_outcome(Outcome::Snapshot(s));
+        m.on_outcome(Outcome::Snapshot(Box::new(s)));
     }
 
     fn ask(m: &mut Model, i: MainIntent) -> Vec<Command> {

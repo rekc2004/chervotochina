@@ -8,12 +8,14 @@
 mod common;
 
 /// (команда, ветка намерения, в которой она одна может появиться)
-const GATED: [(&str, &str); 2] = [
+const GATED: [(&str, &str); 4] = [
     ("Command::ConnectNow", "I::ConnectNow("),
     ("Command::EnableAutoAccept", "I::TrustYes"),
+    ("Command::UpnpIdentify", "S::UpnpFind"),
+    ("Command::SyncClock", "S::ClockSync"),
 ];
 /// Окно строк после заголовка ветки, в которое должна попасть команда.
-const ARM_WINDOW: usize = 8;
+const ARM_WINDOW: usize = 14;
 
 /// Нарушения для текста модели (без модуля тестов).
 fn model_violations(text: &str) -> Vec<String> {
@@ -58,11 +60,19 @@ fn files_containing(files: &[(String, String)], needle: &str) -> Vec<String> {
 #[test]
 fn gated_commands_are_built_only_in_their_handlers() {
     let files = common::src_files();
-    let model = files
+    // модели с обработчиками намерений
+    let handlers: Vec<&str> = ["src/main_model.rs", "src/settings_model.rs"]
         .iter()
-        .find(|(n, _)| n == "src/main_model.rs")
-        .expect("main_model.rs");
-    let bad = model_violations(&model.1);
+        .map(|want| {
+            files
+                .iter()
+                .find(|(n, _)| n == want)
+                .map(|(_, t)| t.as_str())
+                .expect("model file")
+        })
+        .map(|t| t.split("\n#[cfg(test)]").next().unwrap_or(t))
+        .collect();
+    let bad = model_violations(&handlers.join("\n"));
     assert!(bad.is_empty(), "{bad:#?}");
     // и нигде больше в src/ эти команды не создаются
     for (command, _) in GATED {
@@ -70,7 +80,13 @@ fn gated_commands_are_built_only_in_their_handlers() {
         // main_model.rs создаёт, worker_ops.rs разбирает команду
         for p in &places {
             assert!(
-                p == "src/main_model.rs" || p == "src/worker_ops.rs" || p == "src/model.rs",
+                matches!(
+                    p.as_str(),
+                    "src/main_model.rs"
+                        | "src/settings_model.rs"
+                        | "src/worker_ops.rs"
+                        | "src/model.rs"
+                ),
                 "{command} в {p}"
             );
         }
@@ -98,6 +114,8 @@ fn node_calls_for_gated_actions_live_in_worker_ops_only() {
     for needle in [
         ".connect_now(",
         ".enable_auto_accept(",
+        ".upnp_identify(",
+        ".sync_clock(",
         "user_confirmed_trust",
         "TrustConfirmation",
     ] {
@@ -108,11 +126,16 @@ fn node_calls_for_gated_actions_live_in_worker_ops_only() {
 
 #[test]
 fn control_guard_can_fail() {
-    let good = "match i {\n    I::ConnectNow(id) => {\n        vec![Command::ConnectNow(id)]\n    }\n    I::TrustYes => {\n        vec![Command::EnableAutoAccept(id)]\n    }\n}\n";
+    let good = "match i {\n    I::ConnectNow(id) => {\n        vec![Command::ConnectNow(id)]\n    }\n    I::TrustYes => {\n        vec![Command::EnableAutoAccept(id)]\n    }\n    S::UpnpFind => {\n        vec![Command::UpnpIdentify]\n    }\n    S::ClockSync => {\n        vec![Command::SyncClock]\n    }\n}\n";
     assert!(model_violations(good).is_empty());
     // команда в чужой ветке
-    let wrong = "match i {\n    I::Block(id) => {\n        vec![Command::ConnectNow(id)]\n    }\n    I::TrustYes => {\n        vec![Command::EnableAutoAccept(id)]\n    }\n}\n";
+    let wrong = "match i {\n    I::Block(id) => {\n        vec![Command::ConnectNow(id)]\n    }\n    I::TrustYes => {\n        vec![Command::EnableAutoAccept(id)]\n    }\n    S::UpnpFind => {\n        vec![Command::UpnpIdentify]\n    }\n    S::ClockSync => {\n        vec![Command::SyncClock]\n    }\n}\n";
     assert!(!model_violations(wrong).is_empty());
+    // сверка часов в чужой ветке
+    let clock_wrong = good.replace("S::ClockSync", "S::ClockReset");
+    assert!(!model_violations(&clock_wrong).is_empty());
+    let upnp_wrong = good.replace("S::UpnpFind", "S::UpnpDecline");
+    assert!(!model_violations(&upnp_wrong).is_empty());
     // второе место создания
     let twice = format!("{good}fn other() {{ Command::EnableAutoAccept(x); }}\n");
     assert!(!model_violations(&twice).is_empty());

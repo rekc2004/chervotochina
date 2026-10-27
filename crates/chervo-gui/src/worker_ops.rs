@@ -6,12 +6,15 @@ use std::collections::HashMap;
 use std::hash::Hash;
 
 use chervo_core::{
-    FriendRef, FriendsError, InviteRef, Node, NodeError, NodeEvent, Side, TransferRef,
-    TransferState, TrustConfirmation,
+    ClockProposal, ClockSync, FriendRef, FriendStatus, FriendsError, InviteRef, NoDirectPath, Node,
+    NodeError, NodeEvent, PathKind, RouterCandidate, Side, TransferRef, TransferState,
+    TrustConfirmation,
 };
 
-use crate::model::{Command, Outcome, Snapshot};
-use crate::rows::{FileRow, FriendRow, Id, OfferRow, TransferRow};
+use crate::model::{ClockResult, Command, FriendEventKind, Outcome, Snapshot};
+use crate::rows::{
+    DiagRow, FileRow, FriendRow, Id, OfferRow, RetiredRow, RouterRow, SettingsRow, TransferRow,
+};
 
 /// Таблица «ссылка ядра <-> локальный номер».
 pub struct Table<T: Copy + Eq + Hash> {
@@ -52,6 +55,10 @@ pub struct Refs {
     pub friends: Table<FriendRef>,
     pub transfers: Table<TransferRef>,
     pub invites: Table<InviteRef>,
+    /// Роутер, найденный кнопкой «Найти роутер» и ожидающий ответа «да/нет».
+    pub found_router: Option<RouterCandidate>,
+    /// Поправка часов больше 5 минут, ждущая подтверждения.
+    pub clock_proposal: Option<ClockProposal>,
 }
 
 fn unknown() -> NodeError {
@@ -71,7 +78,7 @@ pub fn snapshot(node: &Node, refs: &mut Refs) -> Snapshot {
     let fviews = node.friends();
     let names: HashMap<FriendRef, String> =
         fviews.iter().map(|v| (v.friend, v.name.clone())).collect();
-    let friends = fviews
+    let friends: Vec<FriendRow> = fviews
         .into_iter()
         .map(|v| FriendRow {
             id: refs.friends.id(v.friend),
@@ -126,17 +133,107 @@ pub fn snapshot(node: &Node, refs: &mut Refs) -> Snapshot {
         });
     }
     let active_transfers = transfers.iter().filter(|t| t.is_active()).count();
+    let diagnoses = diagnoses(node, refs, &friends);
+    let retired = node
+        .retired()
+        .into_iter()
+        .map(|(f, t)| RetiredRow {
+            id: refs.friends.id(f),
+            friend: names.get(&f).cloned().unwrap_or_default(),
+            text: t.as_str().to_owned(),
+        })
+        .collect();
+    let sv = node.settings();
+    let settings = SettingsRow {
+        port: sv.port,
+        receive_root: sv.receive_root,
+        extra_roots: sv.extra_roots,
+        min_free_percent: sv.min_free_percent,
+        manual_forward: sv.manual_forward,
+        routers: sv
+            .routers
+            .iter()
+            .enumerate()
+            .map(|(i, r)| RouterRow {
+                id: Id(u32::try_from(i).unwrap_or(u32::MAX)),
+                permanent_ok: r.permanent_ok,
+            })
+            .collect(),
+        clock_offset_ms: sv.clock_offset_ms,
+        ntp_servers: sv.ntp_servers,
+        key_store: sv.key_store,
+        restart_needed: sv.restart_needed,
+    };
     Snapshot {
         friends,
         transfers,
         offers,
         active_transfers,
+        settings: Some(settings),
+        nat: Some(node.nat_view()),
+        mapping: node.mapping_status(),
+        retired,
+        diagnoses,
     }
 }
 
+/// Диагноз для каждого активного друга, с которым нет соединения.
+fn diagnoses(node: &Node, refs: &Refs, friends: &[FriendRow]) -> Vec<DiagRow> {
+    let mut out = Vec::new();
+    for f in friends {
+        if f.status != FriendStatus::Active || f.key_problem || f.online {
+            continue;
+        }
+        let Some(r) = refs.friends.get(f.id) else {
+            continue;
+        };
+        if let Ok(Some(d)) = node.diagnose(r) {
+            out.push(DiagRow {
+                friend: f.id,
+                text: d.text,
+                could_help: d.rendezvous_could_help,
+                lan_hint: lan_hint(f.path, d.reason),
+            });
+        }
+    }
+    out
+}
+
+/// Последний путь был по локальной сети, а адрес для звонка пропал или не отвечает: частные
+/// адреса живут сутки (16а, Q1), нужен токен с отметкой «мы в одной сети».
+pub fn lan_hint(last_path: Option<PathKind>, reason: NoDirectPath) -> bool {
+    last_path == Some(PathKind::Lan)
+        && matches!(
+            reason,
+            NoDirectPath::NoKnownAddress | NoDirectPath::NeedToken | NoDirectPath::Unknown
+        )
+}
+
 /// Событие узла -> ответ окну. `None`: событие только повод обновить снимок.
-pub fn event_outcome(refs: &mut Refs, ev: NodeEvent) -> Outcome {
+pub fn event_outcome(node: Option<&Node>, refs: &mut Refs, ev: NodeEvent) -> Outcome {
+    let view = |f: FriendRef| {
+        node.and_then(|n| n.friends().into_iter().find(|v| v.friend == f))
+            .map(|v| (v.name, v.last_path))
+    };
     match ev {
+        NodeEvent::FriendKeyProblem { friend } => Outcome::FriendEvent {
+            name: view(friend).map(|v| v.0).unwrap_or_default(),
+            kind: FriendEventKind::KeyProblem,
+        },
+        NodeEvent::ClockSkewSuspected { friend } => Outcome::FriendEvent {
+            name: view(friend).map(|v| v.0).unwrap_or_default(),
+            kind: FriendEventKind::ClockSkew,
+        },
+        NodeEvent::Unreachable { friend, diagnosis } => {
+            let (name, path) = view(friend).unwrap_or_default();
+            Outcome::FriendEvent {
+                name,
+                kind: FriendEventKind::Unreachable {
+                    text: diagnosis.text,
+                    lan_hint: lan_hint(path, diagnosis.reason),
+                },
+            }
+        }
         NodeEvent::InviteSas { invite, sas } => Outcome::InviteSas {
             invite: refs.invites.id(invite),
             digits: sas.digits(),
@@ -290,6 +387,77 @@ pub fn exec(node: &Node, refs: &mut Refs, cmd: Command) -> Option<Outcome> {
         }),
         Command::Retry(id) => done(match refs.transfers.get(id) {
             Some(t) => node.retry(t),
+            None => Err(unknown()),
+        }),
+        Command::SetReceiveRoot {
+            root,
+            confirm_shared,
+        } => Some(Outcome::RootSet(
+            node.set_receive_root(&root, confirm_shared),
+        )),
+        Command::SetMinFree(p) => done(node.set_min_free_percent(p)),
+        Command::SetPort(p) => done(node.set_port(p)),
+        Command::SetManualForward(p) => done(node.set_manual_forward(p)),
+        // кнопка «Найти роутер»: сам узел это не делает
+        Command::UpnpIdentify => {
+            let r = node.upnp_identify().map(|c| {
+                refs.found_router = Some(c);
+            });
+            Some(Outcome::UpnpFound(r))
+        }
+        Command::UpnpAllow { router, permanent } => {
+            let candidate = match router {
+                None => refs.found_router.clone(),
+                Some(i) => node
+                    .settings()
+                    .routers
+                    .get(i.0 as usize)
+                    .map(|r| r.router.clone()),
+            };
+            let r = match candidate {
+                Some(c) => node.upnp_allow(&c, permanent),
+                None => Err(unknown()),
+            };
+            if r.is_ok() && router.is_none() {
+                refs.found_router = None;
+            }
+            done(r)
+        }
+        Command::UpnpForget(i) => {
+            let candidate = node
+                .settings()
+                .routers
+                .get(i.0 as usize)
+                .map(|r| r.router.clone());
+            done(match candidate {
+                Some(c) => node.upnp_forget(&c),
+                None => Err(unknown()),
+            })
+        }
+        Command::RefreshMapping => {
+            node.refresh_mapping();
+            done(Ok(()))
+        }
+        // кнопка «Сверить часы»: автоматической сверки нет
+        Command::SyncClock => {
+            let r = node.sync_clock().map(|s| match s {
+                ClockSync::Applied { offset_ms } => ClockResult::Applied(offset_ms),
+                ClockSync::NeedsConfirm(p) => {
+                    let ms = p.offset_ms();
+                    refs.clock_proposal = Some(p);
+                    ClockResult::NeedsConfirm(ms)
+                }
+                _ => ClockResult::Applied(0),
+            });
+            Some(Outcome::ClockSynced(r))
+        }
+        Command::ConfirmClock => done(match refs.clock_proposal.take() {
+            Some(p) => node.confirm_clock(p),
+            None => Err(unknown()),
+        }),
+        Command::ResetClock => done(node.reset_clock()),
+        Command::ForgetRetired(id) => done(match refs.friends.get(id) {
+            Some(f) => node.forget_retired(f),
             None => Err(unknown()),
         }),
         _ => None,

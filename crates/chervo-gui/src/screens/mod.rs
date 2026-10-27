@@ -4,10 +4,12 @@
 mod add_friend;
 mod close;
 mod common;
+mod diagnosis;
 mod friends;
 mod offers;
 mod placeholder;
 mod send;
+mod settings;
 mod start;
 mod transfers;
 

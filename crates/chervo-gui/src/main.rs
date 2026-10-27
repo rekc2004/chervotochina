@@ -3,12 +3,14 @@
 #![windows_subsystem = "windows"]
 
 mod app;
+mod fixtures;
 mod main_model;
 mod model;
 mod picker;
 mod qr;
 mod rows;
 mod screens;
+mod settings_model;
 mod texts;
 mod worker;
 mod worker_ops;
@@ -29,7 +31,10 @@ fn main() -> ExitCode {
     // Рендер: wgpu, при ошибке запуска glow (DECISION 2.9).
     let ok = run(eframe::Renderer::Wgpu, render_check, _hardening)
         || run(eframe::Renderer::Glow, render_check, _hardening);
-    if ok {
+    // `--render-check` успешен, только если нарисованы все состояния
+    let complete =
+        !render_check || app::RENDER_CHECK_DONE.load(std::sync::atomic::Ordering::SeqCst);
+    if ok && complete {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
@@ -50,7 +55,7 @@ fn run(renderer: eframe::Renderer, render_check: bool, hardening: HardenReport) 
         Box::new(move |cc| {
             let app = if render_check {
                 // проверка отрисовки: без узла, ключей и файлов
-                App::new(Model::preview(), None, true)
+                App::render_check(fixtures::all())
             } else {
                 let (model, commands) = Model::start();
                 let ctx = cc.egui_ctx.clone();

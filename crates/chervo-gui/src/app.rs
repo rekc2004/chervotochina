@@ -1,6 +1,8 @@
 //! Оболочка eframe: рисует экраны по состоянию модели, превращает намерения в команды
 //! фоновому потоку и забирает его ответы. Узла здесь нет: он живёт только в фоновом потоке.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use eframe::egui;
 
 use crate::main_model::MainIntent;
@@ -8,13 +10,19 @@ use crate::model::{Close, Intent, Model};
 use crate::worker::Worker;
 use crate::{picker, screens};
 
-/// Сколько кадров рисует `--render-check` перед выходом.
-const RENDER_CHECK_FRAMES: u32 = 3;
+/// Сколько кадров рисуется на каждое состояние в `--render-check` (второй кадр нужен, чтобы
+/// раскладка установилась).
+const FRAMES_PER_FIXTURE: u32 = 2;
+
+/// `--render-check` дошёл до конца списка состояний (иначе окно закрыли раньше: это провал).
+pub static RENDER_CHECK_DONE: AtomicBool = AtomicBool::new(false);
 
 pub struct App {
     model: Model,
     worker: Option<Worker>,
     render_check: bool,
+    /// Состояния для `--render-check`.
+    fixtures: Vec<Model>,
     frames: u32,
 }
 
@@ -24,8 +32,16 @@ impl App {
             model,
             worker,
             render_check,
+            fixtures: Vec::new(),
             frames: 0,
         }
+    }
+
+    /// Проверка отрисовки: без узла, ключей и файлов, по готовым состояниям всех экранов.
+    pub fn render_check(fixtures: Vec<Model>) -> Self {
+        let mut app = Self::new(Model::preview(), None, true);
+        app.fixtures = fixtures;
+        app
     }
 
     fn dispatch(&mut self, intents: Vec<Intent>) {
@@ -55,13 +71,24 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.frames += 1;
+        if self.render_check {
+            let idx = ((self.frames - 1) / FRAMES_PER_FIXTURE) as usize;
+            if let Some(m) = self.fixtures.get(idx) {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    // намерения в этом режиме никому не нужны
+                    let _ = screens::show(ui, m);
+                });
+                ctx.request_repaint();
+            } else {
+                RENDER_CHECK_DONE.store(true, Ordering::SeqCst);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            return;
+        }
         self.drain_worker();
 
         // закрытие окна: сначала вопрос и упорядоченная остановка узла
-        if !self.render_check
-            && ctx.input(|i| i.viewport().close_requested())
-            && !self.model.may_close_window()
-        {
+        if ctx.input(|i| i.viewport().close_requested()) && !self.model.may_close_window() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.dispatch(vec![Intent::CloseRequested]);
         }
@@ -97,12 +124,6 @@ impl eframe::App for App {
 
         if self.model.may_close_window() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-        }
-        if self.render_check {
-            if self.frames >= RENDER_CHECK_FRAMES {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
-            ctx.request_repaint();
         }
     }
 }

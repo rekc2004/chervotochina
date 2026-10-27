@@ -10,10 +10,11 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use chervo_core::{InviteOutcome, NodeError, NodeEvent, RootError};
+use chervo_core::{InviteOutcome, MapStatus, NatView, NodeError, NodeEvent, RootError};
 
 use crate::main_model::{AddFriend, Dialog, MainIntent, OfferUi, SendUi};
-use crate::rows::{FriendRow, Id, OfferRow, TransferRow};
+use crate::rows::{DiagRow, FriendRow, Id, OfferRow, RetiredRow, SettingsRow, TransferRow};
+use crate::settings_model::SettingsUi;
 use crate::texts;
 
 /// Как открыть узел. `AcceptOlder` и `StartOver` бывают только после явного выбора пользователя.
@@ -83,6 +84,28 @@ pub enum Command {
     Decline(Id),
     CancelTransfer(Id),
     Retry(Id),
+    // настройки, сеть, часы (экран 8)
+    SetReceiveRoot {
+        root: PathBuf,
+        confirm_shared: bool,
+    },
+    SetMinFree(u8),
+    SetPort(u16),
+    SetManualForward(Option<u16>),
+    /// Только из обработчика кнопки «Найти роутер» (охрана `gated_node_actions`).
+    UpnpIdentify,
+    /// `router`: `None` значит найденный только что, иначе позиция в списке разрешённых.
+    UpnpAllow {
+        router: Option<Id>,
+        permanent: bool,
+    },
+    UpnpForget(Id),
+    RefreshMapping,
+    /// Только из обработчика кнопки «Сверить часы» (охрана `gated_node_actions`).
+    SyncClock,
+    ConfirmClock,
+    ResetClock,
+    ForgetRetired(Id),
 }
 
 /// Снимок состояния узла для окна. Считается в фоновом потоке.
@@ -94,6 +117,29 @@ pub struct Snapshot {
     pub offers: Vec<OfferRow>,
     /// Передачи, которые не завершены (для вопроса при закрытии).
     pub active_transfers: usize,
+    pub settings: Option<SettingsRow>,
+    pub nat: Option<NatView>,
+    pub mapping: Option<MapStatus>,
+    pub retired: Vec<RetiredRow>,
+    pub diagnoses: Vec<DiagRow>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FriendEventKind {
+    KeyProblem,
+    ClockSkew,
+    /// `lan_hint`: был путь по локальной сети, адрес устарел.
+    Unreachable {
+        text: &'static str,
+        lan_hint: bool,
+    },
+}
+
+/// Итог кнопки «Сверить часы» (смещение в миллисекундах).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClockResult {
+    Applied(i64),
+    NeedsConfirm(i64),
 }
 
 /// Итоги работы фонового потока.
@@ -107,7 +153,7 @@ pub enum Outcome {
     SetupFailed(NodeError),
     SettingsReset(Result<(), NodeError>),
     Unlocked(Result<(), NodeError>),
-    Snapshot(Snapshot),
+    Snapshot(Box<Snapshot>),
     Event(NodeEvent),
     Stopped,
     // ответы на команды экранов 2-6
@@ -133,6 +179,15 @@ pub enum Outcome {
     AddrApplied(Result<(), NodeError>),
     Sent(Result<(), NodeError>),
     SasAnswered(Result<(), NodeError>),
+    /// Событие, относящееся к другу (имя берёт фоновый поток).
+    FriendEvent {
+        name: String,
+        kind: FriendEventKind,
+    },
+    /// Итог смены папки приёма (нужен отдельно: `OutsideProfile` ведёт к вопросу).
+    RootSet(Result<(), NodeError>),
+    UpnpFound(Result<(), NodeError>),
+    ClockSynced(Result<ClockResult, NodeError>),
     OfferIncoming,
     AutoAccepted,
     /// Прочие действия: при ошибке показывается её текст.
@@ -238,7 +293,10 @@ pub struct Model {
     open_pending: bool,
     pub page: Page,
     pub snapshot: Snapshot,
-    pub notices: Vec<&'static str>,
+    pub notices: Vec<String>,
+    /// Предложить «Сверить часы» рядом с уведомлениями (`ClockSkewSuspected`).
+    pub clock_hint: bool,
+    pub settings_ui: SettingsUi,
     pub close: Close,
     pub dialog: Dialog,
     pub add: AddFriend,
@@ -258,6 +316,8 @@ impl Model {
             page: Page::Friends,
             snapshot: Snapshot::default(),
             notices: Vec::new(),
+            clock_hint: false,
+            settings_ui: SettingsUi::default(),
             close: Close::None,
             dialog: Dialog::None,
             add: AddFriend::default(),
@@ -283,6 +343,8 @@ impl Model {
             page: Page::Friends,
             snapshot: Snapshot::default(),
             notices: Vec::new(),
+            clock_hint: false,
+            settings_ui: SettingsUi::default(),
             close: Close::None,
             dialog: Dialog::None,
             add: AddFriend::default(),
@@ -582,13 +644,17 @@ impl Model {
                 Vec::new()
             }
             Outcome::Snapshot(s) => {
-                self.snapshot = s;
+                self.snapshot = *s;
                 Vec::new()
             }
             Outcome::Event(ev) => {
                 match ev {
                     NodeEvent::Warning(w) => self.push_notice(w.user_text()),
                     NodeEvent::Internal => self.push_notice(texts::INTERNAL_NOTICE),
+                    NodeEvent::OwnAddressChanged => self.push_notice(texts::OWN_ADDR_CHANGED),
+                    NodeEvent::MappingChanged { status } => {
+                        self.push_notice(chervo_core::texts::mapping_text(status));
+                    }
                     _ => {}
                 }
                 Vec::new()
@@ -706,10 +772,10 @@ mod tests {
     fn close_with_transfers_asks() {
         let (mut m, _) = Model::start();
         m.on_outcome(Outcome::Opened { port_saved: true });
-        m.on_outcome(Outcome::Snapshot(Snapshot {
+        m.on_outcome(Outcome::Snapshot(Box::new(Snapshot {
             active_transfers: 2,
             ..Snapshot::default()
-        }));
+        })));
         // с активными передачами: вопрос, никакой остановки
         assert!(m.update(Intent::CloseRequested).is_empty());
         assert_eq!(m.close, Close::Asking);
