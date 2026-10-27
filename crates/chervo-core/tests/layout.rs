@@ -103,6 +103,7 @@ fn workspace_layout() {
         "chervo-receive",
         "chervo-core",
         "chervo-cli",
+        "chervo-gui",
     ];
     for name in crates {
         let rel = format!("crates/{name}");

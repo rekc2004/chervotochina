@@ -1,0 +1,29 @@
+[package]
+name = "chervo-gui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "chervotochina"
+path = "src/main.rs"
+
+# Stage 18b (SPEC 4.3, DECISION 2.9): exactly chervo-core plus the framework crates below.
+# The test `manifest_only_core` enforces the list.
+[dependencies]
+chervo-core.workspace = true
+eframe.workspace = true
+rfd.workspace = true
+qrcode.workspace = true
+
+# AccessKit only where it does not pull accesskit_unix -> zbus 5 / zvariant (owner decision
+# "Доступность на Linux"); the Linux tree is guarded in CI (scripts/check-gui-linux-tree.sh).
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+eframe = { workspace = true, features = ["accesskit"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rfd = { workspace = true, features = ["xdg-portal"] }
+
+[lints]
+workspace = true
