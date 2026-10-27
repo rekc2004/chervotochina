@@ -50,3 +50,12 @@ jobs:
         run: objdump -p target/release/gui-probe.exe | grep "DLL Name" || dumpbin /dependents target/release/gui-probe.exe
       # V9: size
       - run: ls -l target/release/gui-probe*
+      # binaries for the owner's manual checks on clean VMs (V3-V7); macOS build is unsigned
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: gui-probe-${{ runner.os }}-${{ github.sha }}
+          path: |
+            spikes/gui-probe/target/release/gui-probe
+            spikes/gui-probe/target/release/gui-probe.exe
+          if-no-files-found: error
+          retention-days: 30
