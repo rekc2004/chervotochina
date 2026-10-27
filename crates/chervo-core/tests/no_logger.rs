@@ -1,6 +1,6 @@
 //! Охрана «в продукте нет журнала» (этап 17, B3, решение 1a, C21): в продуктовых крейтах нет
 //! ни крейта `log`/`tracing`, ни реализации журнала, ни макросов журнала, ни печати в `src/`
-//! (кроме заглушки CLI). Журнал в оболочке этапа 18 можно добавить только осознанно, правкой
+//! (кроме модуля вывода CLI `chervo-cli/src/out.rs`, этап 18в). Журнал в оболочке этапа 18 можно добавить только осознанно, правкой
 //! этого теста и новым ревью.
 //!
 //! Без запуска `cargo`: текстовый разбор манифестов и `Cargo.lock` (работает офлайн). Граф из
@@ -317,23 +317,33 @@ fn no_logger_macros_in_product_src() {
 }
 
 #[test]
-fn no_print_in_product_src_except_cli_stub() {
+fn no_print_in_product_src_except_cli_out() {
+    // Этап 18в: охрана расширена с `chervo-cli/src/main.rs` на весь `chervo-cli/src/`. Печать
+    // макросами запрещена везде; единственное место, где продукт открывает стандартный вывод
+    // или вывод ошибок, это `chervo-cli/src/out.rs` (вывод CLI намеренный: это его интерфейс).
+    assert!(has_word("    println!(\"x\");", "println!("));
+    assert!(has_word("let o = std::io::stdout();", "stdout"));
+    assert!(!has_word("fn my_stdout(", "stdout"));
+
     let srcs = product_sources();
-    let mut cli_hits = 0;
+    let mut sink_hits = 0;
     for (rel, code) in &srcs {
         for w in ["println!(", "eprintln!(", "print!(", "eprint!(", "dbg!("] {
+            assert!(!has_word(code, w), "{rel}: `{w}` в продуктовом коде");
+        }
+        for w in ["stdout", "stderr"] {
             if has_word(code, w) {
                 assert_eq!(
-                    rel, "chervo-cli/src/main.rs",
-                    "{rel}: `{w}` в продуктовом коде"
+                    rel, "chervo-cli/src/out.rs",
+                    "{rel}: `{w}` вне модуля вывода CLI"
                 );
-                cli_hits += 1;
+                sink_hits += 1;
             }
         }
     }
-    // заглушка CLI печатает версию и «not implemented» (положительный контроль охраны)
+    // положительный контроль: модуль вывода CLI открывает оба потока
     assert!(
-        cli_hits >= 2,
-        "ожидались println!/eprintln! в main.rs CLI, найдено {cli_hits}"
+        sink_hits >= 2,
+        "ожидались stdout и stderr в chervo-cli/src/out.rs, найдено {sink_hits}"
     );
 }
