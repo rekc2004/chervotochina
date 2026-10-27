@@ -35,9 +35,16 @@ fn main() -> ExitCode {
     // уже было создано: его фоновый поток держит замок профиля, и новый узел получил бы
     // `AlreadyRunning` от нашего же замка.
     let session = Rc::new(Session::default());
-    let mut ok = run(eframe::Renderer::Wgpu, render_check, _hardening, &session);
-    if !ok && !session.created.get() {
-        ok = run(eframe::Renderer::Glow, render_check, _hardening, &session);
+    // Паника в потоке окна (профиль без `panic = "abort"`, проверено: в корневом Cargo.toml такого
+    // нет) не должна обходить остановку узла: ловим её, затем всё равно доходим до `finish`.
+    let mut panicked = false;
+    let mut ok = guarded(&mut panicked, || {
+        run(eframe::Renderer::Wgpu, render_check, _hardening, &session)
+    });
+    if !ok && !panicked && !session.created.get() {
+        ok = guarded(&mut panicked, || {
+            run(eframe::Renderer::Glow, render_check, _hardening, &session)
+        });
     }
     // На любом пути выхода узел останавливается по порядку (снятие проброса порта), а поток
     // ждётся не дольше `JOIN_BOUND`.
@@ -46,10 +53,21 @@ fn main() -> ExitCode {
     // `--render-check` успешен, только если нарисованы все состояния
     let complete =
         !render_check || app::RENDER_CHECK_DONE.load(std::sync::atomic::Ordering::SeqCst);
-    if ok && complete && joined {
+    if ok && complete && joined && !panicked {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+/// Выполняет запуск окна, превращая панику в `false` (и отметку `panicked`).
+fn guarded(panicked: &mut bool, f: impl FnOnce() -> bool) -> bool {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(v) => v,
+        Err(_) => {
+            *panicked = true;
+            false
+        }
     }
 }
 

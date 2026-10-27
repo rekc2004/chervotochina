@@ -19,6 +19,32 @@ use crate::rows::{
 /// Как долго держится построенное предложение (имена не меняются, место на диске обновляется).
 const OFFER_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Кэш построенных предложений. Метка времени ставится только при построении (`put`), попадание
+/// её не продлевает: иначе при частых событиях запись не устаревала бы и строка о месте на диске
+/// навсегда осталась бы прежней.
+#[derive(Default)]
+pub struct OfferCache {
+    rows: HashMap<u32, (std::time::Instant, OfferRow)>,
+}
+
+impl OfferCache {
+    pub fn get(&self, id: Id, now: std::time::Instant) -> Option<OfferRow> {
+        self.rows
+            .get(&id.0)
+            .filter(|(built, _)| now.saturating_duration_since(*built) < OFFER_TTL)
+            .map(|(_, row)| row.clone())
+    }
+
+    pub fn put(&mut self, id: Id, built: std::time::Instant, row: OfferRow) {
+        self.rows.insert(id.0, (built, row));
+    }
+
+    /// Оставить только предложения, которые ещё ждут ответа.
+    pub fn retain_ids(&mut self, keep: impl Fn(u32) -> bool) {
+        self.rows.retain(|k, _| keep(*k));
+    }
+}
+
 /// Таблица «ссылка ядра <-> локальный номер».
 pub struct Table<T: Copy + Eq + Hash> {
     next: u32,
@@ -88,7 +114,7 @@ pub struct Refs {
     /// роутер при выполнении действия ищется по равенству в текущих настройках узла.
     pub routers: Vec<RouterCandidate>,
     /// Построенные предложения: номер передачи -> (когда построено, строка).
-    pub offers: HashMap<u32, (std::time::Instant, OfferRow)>,
+    pub offers: OfferCache,
     /// Поправка часов больше 5 минут, ждущая подтверждения.
     pub clock_proposal: Option<ClockProposal>,
 }
@@ -131,11 +157,8 @@ pub fn snapshot(node: &Node, refs: &mut Refs) -> Snapshot {
         if t.side == Side::Receiver && t.state == TransferState::AwaitingUser {
             // план приёма (имена, типы) считается узлом дорого: берём из кэша, пока он свежий
             // (место на диске при этом тоже обновляется не реже, чем раз в `OFFER_TTL`)
-            let cached = refs
-                .offers
-                .get(&id.0)
-                .filter(|(at, _)| at.elapsed() < OFFER_TTL)
-                .map(|(_, row)| row.clone());
+            let cached = refs.offers.get(id, std::time::Instant::now());
+            let hit = cached.is_some();
             let row = match cached {
                 Some(row) => Some(row),
                 None => node.offer(t.transfer).ok().map(|o| OfferRow {
@@ -159,8 +182,10 @@ pub fn snapshot(node: &Node, refs: &mut Refs) -> Snapshot {
             };
             if let Some(mut row) = row {
                 row.friend = friend.clone();
-                refs.offers
-                    .insert(id.0, (std::time::Instant::now(), row.clone()));
+                // кэш обновляется только после нового построения, не после попадания
+                if !hit {
+                    refs.offers.put(id, std::time::Instant::now(), row.clone());
+                }
                 offers.push(row);
             }
         }
@@ -178,7 +203,7 @@ pub fn snapshot(node: &Node, refs: &mut Refs) -> Snapshot {
         });
     }
     refs.offers
-        .retain(|k, _| offers.iter().any(|o: &OfferRow| o.id.0 == *k));
+        .retain_ids(|k| offers.iter().any(|o: &OfferRow| o.id.0 == k));
     let active_transfers = transfers.iter().filter(|t| t.is_active()).count();
     let diagnoses = diagnoses(node, refs, &friends);
     let retired = node
@@ -500,5 +525,58 @@ pub fn exec(node: &Node, refs: &mut Refs, cmd: Command) -> Option<Outcome> {
             None => Err(unknown()),
         }),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chervo_core::SpaceView;
+    use std::time::{Duration, Instant};
+
+    fn row() -> OfferRow {
+        OfferRow {
+            id: Id(1),
+            friend: String::new(),
+            files: Vec::new(),
+            total: 0,
+            space: SpaceView {
+                needed: 1,
+                available: Some(2),
+                short: false,
+            },
+            needs_question: false,
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn cache_hit_does_not_extend_the_ttl() {
+        let t0 = Instant::now();
+        let mut c = OfferCache::default();
+        c.put(Id(1), t0, row());
+        // частые попадания внутри срока ничего не продлевают (get только читает)
+        for secs in [1, 2, 3, 4] {
+            assert!(c.get(Id(1), t0 + Duration::from_secs(secs)).is_some());
+        }
+        // срок считается от построения: на 6-й секунде запись устарела
+        assert!(
+            c.get(Id(1), t0 + OFFER_TTL + Duration::from_secs(1))
+                .is_none()
+        );
+        // после нового построения срок начинается заново
+        let t1 = t0 + Duration::from_secs(6);
+        c.put(Id(1), t1, row());
+        assert!(c.get(Id(1), t1 + Duration::from_secs(4)).is_some());
+        assert!(c.get(Id(1), t1 + OFFER_TTL).is_none());
+    }
+
+    #[test]
+    fn cache_drops_finished_offers() {
+        let t0 = Instant::now();
+        let mut c = OfferCache::default();
+        c.put(Id(1), t0, row());
+        c.retain_ids(|_| false);
+        assert!(c.get(Id(1), t0).is_none());
     }
 }

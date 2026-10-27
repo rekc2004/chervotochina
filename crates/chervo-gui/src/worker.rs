@@ -3,6 +3,8 @@
 //! вызывает никогда. Здесь команды выполняются по порядку, события узла превращаются в
 //! сообщения окну, а окно будится запросом перерисовки.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -25,12 +27,24 @@ pub struct Worker {
     outcomes: Receiver<Outcome>,
     /// Поток шлёт сюда один знак, когда выходит (для ограниченного ожидания в `finish`).
     exited: Receiver<()>,
+    /// Остановка запрошена: поток не начинает новых команд, кроме `Shutdown`.
+    stop: Arc<AtomicBool>,
     _thread: JoinHandle<()>,
 }
 
-/// Сколько `main` ждёт фоновый поток после закрытия окна: срок мягкой остановки передач, потолок
-/// остановки узла (`deadline` + 11 с, SPEC 2.3 п.7) и запас.
-pub const JOIN_BOUND: Duration = Duration::from_secs(10 + 11 + 1);
+/// Потолок одной долгой операции, которая уже идёт в момент закрытия (она не прерывается):
+/// `Node::open` (до ~12 с на Secret Service и запуск сети), «Найти роутер» (поиск 2 с и запросы
+/// по 3 с), «Сверить часы» (на каждый сервер времени 2 с плюс разрешение имён). Число 30 с это
+/// инженерный запас, а не доказанная граница: разрешение имён в «Сверить часы» ядром по времени
+/// не ограничено [не проверено].
+pub const LONG_OP_BOUND: Duration = Duration::from_secs(30);
+
+/// Сколько `main` ждёт фоновый поток после закрытия окна: самая долгая начатая операция
+/// (`LONG_OP_BOUND`) + срок мягкой остановки передач (`SHUTDOWN_DEADLINE`, 10 с) + потолок
+/// остановки узла сверх срока (11 с, SPEC 2.3 п.7) + запас 1 с. Новых долгих операций после
+/// запроса остановки поток не начинает (флаг `stop`), поэтому больше этой суммы ждать нечего.
+pub const JOIN_BOUND: Duration =
+    Duration::from_secs(LONG_OP_BOUND.as_secs() + SHUTDOWN_DEADLINE.as_secs() + 11 + 1);
 
 impl Worker {
     /// `wake` вызывается после каждого сообщения окну (запрос перерисовки).
@@ -38,10 +52,12 @@ impl Worker {
         let (cmd_tx, commands) = channel::<Command>();
         let (out_tx, outcomes) = channel::<Outcome>();
         let (exit_tx, exited) = channel::<()>();
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = stop.clone();
         let thread = std::thread::Builder::new()
             .name("chervo-gui-worker".to_owned())
             .spawn(move || {
-                run(hardening, commands, out_tx, std::sync::Arc::new(wake));
+                run(hardening, commands, out_tx, Arc::new(wake), &thread_stop);
                 let _ = exit_tx.send(());
             })
             .ok()?;
@@ -49,6 +65,7 @@ impl Worker {
             commands: cmd_tx,
             outcomes,
             exited,
+            stop,
             _thread: thread,
         })
     }
@@ -57,6 +74,8 @@ impl Worker {
     /// просьба ничего не меняет) и ждёт выхода потока не дольше `JOIN_BOUND`. Так `release()`
     /// проброса порта и снятие замка выполняются, даже если окно закрыли мимо нашего диалога.
     pub fn finish(&self) -> bool {
+        // сначала флаг: очередь команд после него отбрасывается, долгие операции не стартуют
+        self.stop.store(true, Ordering::SeqCst);
         self.send(Command::Shutdown);
         self.exited.recv_timeout(JOIN_BOUND).is_ok()
     }
@@ -199,7 +218,13 @@ impl State {
     }
 }
 
-fn run(hardening: HardenReport, commands: Receiver<Command>, out: Sender<Outcome>, wake: Wake) {
+fn run(
+    hardening: HardenReport,
+    commands: Receiver<Command>,
+    out: Sender<Outcome>,
+    wake: Wake,
+    stop: &AtomicBool,
+) {
     let mut st = State {
         hardening,
         node: None,
@@ -210,6 +235,10 @@ fn run(hardening: HardenReport, commands: Receiver<Command>, out: Sender<Outcome
     loop {
         match commands.recv_timeout(POLL) {
             Ok(cmd) => {
+                // остановка запрошена: всё, кроме `Shutdown`, отбрасывается без выполнения
+                if stop.load(Ordering::SeqCst) && !matches!(cmd, Command::Shutdown) {
+                    continue;
+                }
                 if !st.handle(cmd) {
                     return;
                 }
@@ -226,5 +255,17 @@ fn run(hardening: HardenReport, commands: Receiver<Command>, out: Sender<Outcome
             }
         }
         st.pump_events();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn join_bound_covers_longest_op_plus_shutdown() {
+        // 30 (долгая операция) + 10 (передачи) + 11 (потолок остановки узла) + 1 (запас)
+        assert_eq!(JOIN_BOUND, Duration::from_secs(52));
+        assert!(JOIN_BOUND > LONG_OP_BOUND + SHUTDOWN_DEADLINE + Duration::from_secs(11));
     }
 }

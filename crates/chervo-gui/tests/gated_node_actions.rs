@@ -22,22 +22,22 @@ const GATED: [Gate; 4] = [
     Gate {
         command: "Command::ConnectNow",
         intent_arm: "I::ConnectNow(",
-        node_call: ".connect_now(",
+        node_call: "connect_now(",
     },
     Gate {
         command: "Command::EnableAutoAccept",
         intent_arm: "I::TrustYes",
-        node_call: ".enable_auto_accept(",
+        node_call: "enable_auto_accept(",
     },
     Gate {
         command: "Command::UpnpIdentify",
         intent_arm: "S::UpnpFind",
-        node_call: ".upnp_identify(",
+        node_call: "upnp_identify(",
     },
     Gate {
         command: "Command::SyncClock",
         intent_arm: "S::ClockSync",
-        node_call: ".sync_clock(",
+        node_call: "sync_clock(",
     },
 ];
 
@@ -158,10 +158,10 @@ fn node_calls_for_gated_actions_are_in_their_worker_arms() {
     assert!(bad.is_empty(), "{bad:#?}");
     // эти вызовы и тип доверия нигде больше не встречаются
     for needle in [
-        ".connect_now(",
-        ".enable_auto_accept(",
-        ".upnp_identify(",
-        ".sync_clock(",
+        "connect_now(",
+        "enable_auto_accept(",
+        "upnp_identify(",
+        "sync_clock(",
         "user_confirmed_trust",
         "TrustConfirmation",
     ] {
@@ -277,6 +277,31 @@ fn control_worker_guard_can_fail() {
         "Command::SyncClock => {\n            node.upnp_identify();",
     );
     assert!(!worker_violations(&twice).is_empty());
+    // вызов в форме `Node::метод(&node, ..)` (UFCS) в чужой ветке тоже ловится
+    let ufcs = GOOD_WORKER.replace(
+        "Command::SyncClock => {",
+        "Command::SyncClock => {\n            Node::connect_now(&node, f);",
+    );
+    assert!(!worker_violations(&ufcs).is_empty());
+    let ufcs_clock = GOOD_WORKER.replace(
+        "let r = node.sync_clock();",
+        "let r = Node::sync_clock(node);",
+    );
+    assert!(worker_violations(&ufcs_clock).is_empty());
+    let ufcs_elsewhere = GOOD_WORKER.replace(
+        "Command::UpnpIdentify => {",
+        "Command::UpnpIdentify => {\n            let c = Node::sync_clock(node);",
+    );
+    assert!(!worker_violations(&ufcs_elsewhere).is_empty());
+    // и во всех остальных файлах src/ такие имена не встречаются
+    let other = vec![(
+        "src/screens/x.rs".to_owned(),
+        "let r = Node::upnp_identify(n);".to_owned(),
+    )];
+    assert_eq!(
+        files_containing(&other, "upnp_identify("),
+        vec!["src/screens/x.rs"]
+    );
     // доверие создаётся вне ветки автоприёма
     let trust = GOOD_WORKER.replace(
         "Some(f) => node.connect_now(f),",

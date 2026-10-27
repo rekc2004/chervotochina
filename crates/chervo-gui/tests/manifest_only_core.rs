@@ -21,38 +21,79 @@ const EFRAME_FEATURES: [&str; 6] = [
 ];
 const NOT_LINUX: &str = "target.'cfg(not(target_os = \"linux\"))'.dependencies";
 
-/// Таблица манифеста: заголовок без скобок и пары `ключ = значение` (значение как в тексте).
+/// Разница скобок `[`/`{` и `]`/`}` в тексте вне кавычек (для значений на несколько строк).
+fn depth_delta(text: &str) -> i32 {
+    let mut d = 0;
+    let mut in_str = false;
+    for c in text.chars() {
+        match c {
+            '"' => in_str = !in_str,
+            '[' | '{' if !in_str => d += 1,
+            ']' | '}' if !in_str => d -= 1,
+            _ => {}
+        }
+    }
+    d
+}
+
+/// Таблица манифеста: заголовок без скобок и пары `ключ = значение` (значение как в тексте;
+/// значение на несколько строк склеивается в одну через пробел).
 fn tables(manifest: &str) -> Vec<(String, Vec<(String, String)>)> {
     let mut out: Vec<(String, Vec<(String, String)>)> = Vec::new();
+    let mut pending: Option<(String, String, i32)> = None;
     for line in manifest.replace("\r\n", "\n").lines() {
         let t = line.trim();
         if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v, depth)) = pending.take() {
+            let v = format!("{v} {t}");
+            let depth = depth + depth_delta(t);
+            if depth > 0 {
+                pending = Some((k, v, depth));
+            } else if let Some((_, rows)) = out.last_mut() {
+                rows.push((k, v));
+            }
             continue;
         }
         if t.starts_with('[') {
             let name = t.trim_matches(|c| c == '[' || c == ']').trim().to_owned();
             out.push((name, Vec::new()));
         } else if let (Some((_, rows)), Some((k, v))) = (out.last_mut(), t.split_once('=')) {
-            rows.push((k.trim().to_owned(), v.trim().to_owned()));
+            let (k, v) = (k.trim().to_owned(), v.trim().to_owned());
+            let depth = depth_delta(&v);
+            if depth > 0 {
+                pending = Some((k, v, depth));
+            } else {
+                rows.push((k, v));
+            }
         }
     }
     out
 }
 
-/// Возможности из строки вида `{ ..., features = ["a", "b"] }`, по алфавиту.
+/// Возможности из строки вида `{ ..., features = ["a", "b"] }` (пробелы и переводы строк внутри
+/// допустимы), по алфавиту.
 fn features_of(row: &str) -> Vec<String> {
-    let Some(at) = row.find("features = [") else {
-        return Vec::new();
-    };
-    let rest = &row[at + "features = [".len()..];
-    let list = rest.split(']').next().unwrap_or("");
-    let mut v: Vec<String> = list
-        .split(',')
-        .map(|x| x.trim().trim_matches('"').to_owned())
-        .filter(|x| !x.is_empty())
-        .collect();
-    v.sort();
-    v
+    let mut from = 0;
+    while let Some(i) = row[from..].find("features") {
+        let start = from + i;
+        let rest = row[start + "features".len()..].trim_start();
+        if let Some(rest) = rest.strip_prefix('=')
+            && let Some(rest) = rest.trim_start().strip_prefix('[')
+        {
+            let list = rest.split(']').next().unwrap_or("");
+            let mut v: Vec<String> = list
+                .split(',')
+                .map(|x| x.trim().trim_matches('"').to_owned())
+                .filter(|x| !x.is_empty())
+                .collect();
+            v.sort();
+            return v;
+        }
+        from = start + "features".len();
+    }
+    Vec::new()
 }
 
 /// Нарушения для манифеста крейта и корневого манифеста рабочего пространства.
@@ -228,6 +269,31 @@ fn control_guard_can_fail() {
         violations(&rfd_extra, root, false)
             .iter()
             .any(|v| v.contains("rfd"))
+    );
+    // многострочный массив возможностей: `persistence` не спрятать переносом строки
+    let multi_root = root
+        .replace("\"x11\"] }", "\"x11\",\n    \"persistence\",\n] }")
+        .replace("features = [", "features = [\n   ");
+    assert_ne!(multi_root, root);
+    assert!(
+        violations(good, &multi_root, false)
+            .iter()
+            .any(|v| v.contains("набор возможностей")),
+        "многострочный массив с persistence должен быть пойман"
+    );
+    // и допустимый многострочный массив разбирается как обычный
+    let multi_ok = root.replace("features = [", "features = [\n   ");
+    assert_eq!(violations(good, &multi_ok, false), Vec::<String>::new());
+    // в манифесте крейта тоже
+    let multi_crate = good.replace(
+        "features = [\"accesskit\"]",
+        "features = [\n    \"accesskit\",\n    \"persistence\",\n]",
+    );
+    assert_ne!(multi_crate, good);
+    assert!(
+        violations(&multi_crate, root, false)
+            .iter()
+            .any(|v| v.contains("лишние"))
     );
     // пропавшая зависимость
     let missing = "[dependencies]\nchervo-core.workspace = true\n";
