@@ -1,2 +1,0 @@
-EVENT upnp_gateway t=88 addr=192.168.40.1:5000
-EVENT upnp_error t=99 op=get_external_ip msg=Request Error. Invalid response from gateway: <?xml version='1.0'?>''<s:Envelope xmlns:s='http://schemas.xmlsoap.org/soap/envelope/' s:encodingStyle='http://schemas.xmlsoap.org/soap/encoding/'><s:Body><u:GetExternalIPAddressResponse xmlns:u='urn:schemas-upnp-org:service:WANIPConnection:2'><NewExternalIPAddress></NewExternalIPAddress></u:GetExternalIPAddressResponse></s:Body></s:Envelope>''

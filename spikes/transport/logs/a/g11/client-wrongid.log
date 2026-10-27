@@ -1,3 +1,0 @@
-EVENT bound t=2 id=a6c05d06e8564b8ee6f421e5bc45109f3d9d1d3739d3c447d0d32522a85ef6db
-EVENT attempt_start t=2 n=1
-EVENT client_result t=31 hs_error err="the cryptographic handshake failed: error 48: invalid peer certificate: UnknownIssuer" app_bytes_received=0 app_bytes_sent=0

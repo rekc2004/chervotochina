@@ -1,7 +1,0 @@
-EVENT bound t=2 id=a6c05d06e8564b8ee6f421e5bc45109f3d9d1d3739d3c447d0d32522a85ef6db
-EVENT attempt_start t=2 n=1
-EVENT hs_done t=5 peer=10.77.2.2:4433 conn=1
-EVENT ekm t=5 side=c conn=1 ekm=e86a36373ed6f8c0129212e33c3887fa1ffe304457546d2a54d98a705d94a081
-EVENT peer_identity t=5 some conn=1
-EVENT auth_fail t=6 side=c conn=1 reason=peer_sig app_bytes_sent=0
-EVENT client_result t=6 closed err="peer_sig" app_bytes_received=0 app_bytes_sent=0

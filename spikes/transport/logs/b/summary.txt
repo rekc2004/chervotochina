@@ -1,7 +1,0 @@
-G1 PASS logs/b/g1 dns=0 other=0 fwd_drop=0, кортежи вне списка пусты, peer>0; без порт-маппера portmap=0
-G2 INCONCLUSIVE logs/b/g2 IPv4: 2/2 ok, счётчики чисты; IPv6-соединения (2 из 4) не запускались: IPv6 в ядре стенда выключен (ipv6.disable=1)
-G3 PASS logs/b/g3 (а) не применимо к B (id сервера нет); (в) retry=1794, окно ≤6 на IP, друг 5/5 ≤2 с; CPU в /home/user/chervotochina/spikes/transport/logs/b/g3/cpu.txt
-G9 PASS logs/b/g9 1) 3 разных server_spki, совпадают с выданными сервером; 2) peer_identity none (3/3); 3) mismatch -> hs_error; 4) zero_rtt refused; 5) TLS13 в обоих конфигах
-G11 PASS logs/b/g9/p1.txt на одном сокете (Incoming::accept_with, новый rustls::ServerConfig на входящее) 3 соединения получили 3 разных ключа сервера; клиент без пиннинга, ключ заранее не знал; peer_identity none
-G10 PASS logs/b/g10 ekm совпадает и различается между соединениями; 8 режимов отказа до прикладных данных; peer_sig; MITM с разными ekm отвергнут (sig)
-G12 PASS logs/b/g12/observe.txt совпадений нет; положительные контроли выполнены

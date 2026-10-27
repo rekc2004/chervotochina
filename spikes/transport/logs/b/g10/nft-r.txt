@@ -1,8 +1,0 @@
-table inet chv {
-	counter fwd_ok {
-		packets 41550 bytes 36468906
-	}
-	counter fwd_drop {
-		packets 0 bytes 0
-	}
-}
