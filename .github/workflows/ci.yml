@@ -2,13 +2,15 @@ name: ci
 on:
   push:
   pull_request:
+  # Stage 19b: release.yml calls this workflow (all jobs) before it makes a draft.
+  workflow_call:
 permissions:
   contents: read
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
@@ -16,6 +18,14 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: bash scripts/check-forbidden.sh
       - run: bash scripts/check-forbidden.sh --self-test
+      # Stage 19b: supply-chain guards of the release pipeline (each with its own self-test).
+      - run: bash scripts/check-actions-pinned.sh
+      - run: bash scripts/check-actions-pinned.sh --self-test
+      - run: bash scripts/check-release-guards.sh
+      - run: bash scripts/check-release-guards.sh --self-test
+      - run: bash scripts/release/check-whitelist.sh --self-test
+      - run: bash scripts/release/check-deps.sh --self-test
+      - run: bash scripts/release/version.sh --self-test
   test:
     strategy:
       fail-fast: false
@@ -23,7 +33,7 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - run: rustup toolchain install 1.99.1 --profile minimal
@@ -33,7 +43,7 @@ jobs:
   secret-service-live:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - run: rustup toolchain install 1.99.1 --profile minimal
@@ -43,7 +53,7 @@ jobs:
   supply-chain:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - run: cargo install --locked --version =0.22.2 cargo-audit
@@ -53,15 +63,14 @@ jobs:
   sbom:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - run: rustup toolchain install 1.99.1 --profile minimal
       - run: cargo install --locked --version =0.5.9 cargo-cyclonedx
       - run: cargo cyclonedx --format json --override-filename sbom
-      # SHA pinning of the other actions is stage 19.
-      # Spec 17 decision 9 (S1 L4): pinned by commit SHA; tag v4 resolved via GitHub API 2026-10-18.
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      # Stage 19b (C31): all actions are pinned by commit SHA (scripts/check-actions-pinned.sh).
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: sbom-${{ github.sha }}
           path: "**/sbom.json"

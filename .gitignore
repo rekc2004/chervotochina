@@ -5,3 +5,4 @@ __pycache__/
 *.local.json
 .claude/worktrees/
 tools/fuzz/logs/
+*.key

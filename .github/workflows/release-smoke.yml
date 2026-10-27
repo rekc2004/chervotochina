@@ -1,0 +1,86 @@
+# Stage 19b (3a). The owner runs this by hand after scripts/release/sign.sh, BEFORE publishing:
+# it downloads the signed draft and checks it with the released binary of each OS.
+# Two jobs on purpose (review 19b, M1): a downloaded binary must never run in a job whose token can write.
+#   fetch  - holds `contents: write` (a draft release is visible only with write access to contents)
+#            and only downloads the draft and hands it over as an artifact; it executes nothing downloaded.
+#   check  - `permissions: {}`; downloads the artifact and runs the released binary of its own OS.
+# scripts/check-release-guards.sh forbids every gh command that changes anything (create, upload,
+# edit, delete, api) in this file, allows `write` only in `fetch`, and requires `permissions: {}` in `check`.
+name: release-smoke
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag of the signed draft release, e.g. v0.1.0'
+        required: true
+        type: string
+permissions: {}
+defaults:
+  run:
+    shell: bash
+jobs:
+  fetch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Download the draft into a new empty directory
+        env:
+          TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "bad tag input" >&2
+            exit 1
+          fi
+          mkdir draft-files
+          gh release download "$TAG" --repo "$REPO" --dir draft-files
+          ls -l draft-files
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: draft-files
+          path: draft-files/*
+          if-no-files-found: error
+          retention-days: 1
+      # The two scripts of this commit travel as data for the next job (it has no checkout and no token).
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: smoke-scripts
+          path: |
+            scripts/release/lib.sh
+            scripts/release/release-smoke.sh
+          if-no-files-found: error
+          retention-days: 1
+
+  check:
+    needs: [fetch]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-22.04, target: linux-x86_64, ext: '' }
+          - { os: macos-15, target: macos-aarch64, ext: '' }
+          - { os: windows-2025, target: windows-x86_64, ext: '.exe' }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    permissions: {}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: draft-files
+          path: draft-files
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: smoke-scripts
+          path: tools/scripts/release
+      - name: Check the downloaded release with its own binary
+        env:
+          TARGET: ${{ matrix.target }}
+          EXT: ${{ matrix.ext }}
+        run: bash tools/scripts/release/release-smoke.sh draft-files "$TARGET" "$EXT"
