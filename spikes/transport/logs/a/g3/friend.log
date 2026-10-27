@@ -1,0 +1,36 @@
+EVENT bound t=3 id=a6c05d06e8564b8ee6f421e5bc45109f3d9d1d3739d3c447d0d32522a85ef6db
+EVENT attempt_start t=3 n=1
+EVENT hs_done t=33 peer=10.77.2.2:4433 conn=1
+EVENT ekm t=34 side=c conn=1 ekm=a013ddf70ed1115390c0331163679bd98c25e08399d086bb320403b2e9ddb2ab
+EVENT peer_identity t=34 some conn=1
+EVENT auth_ok t=35 side=c conn=1 dur_ms=32
+EVENT app_ok t=36 bytes=1024 echo_eq=1
+EVENT client_result t=36 ok err="" app_bytes_received=1024 app_bytes_sent=1024
+EVENT attempt_start t=36 n=2
+EVENT hs_done t=66 peer=10.77.2.2:4433 conn=2
+EVENT ekm t=66 side=c conn=2 ekm=46e7ee28fea3afdc9ef34fb907f9d38e2d0b8af76c3913f799e9d5245c79f787
+EVENT peer_identity t=66 some conn=2
+EVENT auth_ok t=67 side=c conn=2 dur_ms=31
+EVENT app_ok t=67 bytes=1024 echo_eq=1
+EVENT client_result t=67 ok err="" app_bytes_received=1024 app_bytes_sent=1024
+EVENT attempt_start t=67 n=3
+EVENT hs_done t=97 peer=10.77.2.2:4433 conn=3
+EVENT ekm t=97 side=c conn=3 ekm=4f59345a168cb583e6080c645cc6fb8664575f42765bba441fba0673d40a503f
+EVENT peer_identity t=97 some conn=3
+EVENT auth_ok t=98 side=c conn=3 dur_ms=30
+EVENT app_ok t=98 bytes=1024 echo_eq=1
+EVENT client_result t=98 ok err="" app_bytes_received=1024 app_bytes_sent=1024
+EVENT attempt_start t=98 n=4
+EVENT hs_done t=128 peer=10.77.2.2:4433 conn=4
+EVENT ekm t=128 side=c conn=4 ekm=591ded4caeacca2df5ad4ca07d9e105c58653b63722a9d3b47c0840a0215daa4
+EVENT peer_identity t=128 some conn=4
+EVENT auth_ok t=129 side=c conn=4 dur_ms=30
+EVENT app_ok t=129 bytes=1024 echo_eq=1
+EVENT client_result t=129 ok err="" app_bytes_received=1024 app_bytes_sent=1024
+EVENT attempt_start t=129 n=5
+EVENT hs_done t=158 peer=10.77.2.2:4433 conn=5
+EVENT ekm t=158 side=c conn=5 ekm=73bcaa5f401dcae681f386ddb38ad8b3e38d2587f233639666dcd7434290e53b
+EVENT peer_identity t=158 some conn=5
+EVENT auth_ok t=159 side=c conn=5 dur_ms=30
+EVENT app_ok t=159 bytes=1024 echo_eq=1
+EVENT client_result t=159 ok err="" app_bytes_received=1024 app_bytes_sent=1024

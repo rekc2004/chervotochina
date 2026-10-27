@@ -1,6 +1,33 @@
+[advisories]
+# No exceptions. The RUSTSEC-2026-0370/0371/0372 ignores (zvariant 5.x via the old Secret Service
+# client) were removed in stage 17a together with the crates.
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+deny = [
+  { name = "igd-next" },
+  { name = "keyring" },
+  { name = "keyutils" },
+  # Stage 17a: the old Secret Service client and its zbus 5 / zvariant 5 tree must not come back.
+  # zbus 5 requires zvariant, so banning zvariant keeps zbus 5 out as well.
+  { name = "secret-service" },
+  { name = "zbus-secret-service-keyring-store" },
+  { name = "zvariant" },
+  { name = "zvariant_derive" },
+  { name = "zvariant_utils" },
+  { name = "zbus_names" },
+]
+
 [licenses]
 allow = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib"]
 confidence-threshold = 0.93
+
+# Stage 19d (Q4 = a): root certificate data from Mozilla, license CDLA-Permissive-2.0 (permissive).
+# An exception for this one crate only, not added to the general allow list.
+[[licenses.exceptions]]
+name = "webpki-roots"
+allow = ["CDLA-Permissive-2.0"]
 
 [licenses.private]
 ignore = true

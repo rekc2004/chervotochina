@@ -1,0 +1,196 @@
+[package]
+name = "chervo-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Stage 17 (B4): libFuzzer targets, cargo-fuzz 0.13.2 layout. NIGHTLY ONLY (see rust-toolchain.toml).
+# Not a member of the root workspace (root Cargo.toml: exclude = ["fuzz"]); own [workspace] and own Cargo.lock.
+# Product builds stay on the pinned stable toolchain and never see this crate.
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+# S1 L5: exact version (the one resolved by `cargo fuzz build` on the owner's Linux box, 2026-10-18).
+libfuzzer-sys = "=0.4.13"
+chervo-token = { path = "../crates/chervo-token", features = ["fuzzing"] }
+chervo-timesync = { path = "../crates/chervo-timesync" }
+chervo-transfer = { path = "../crates/chervo-transfer", features = ["fuzzing"] }
+chervo-receive = { path = "../crates/chervo-receive", features = ["fuzzing"] }
+# Stage 17 (B6): newly reachable entry points (doc(hidden) pub, no behaviour change).
+chervo-identity = { path = "../crates/chervo-identity" }
+chervo-upnp = { path = "../crates/chervo-upnp", features = ["fuzzing"] }
+chervo-transport-quinn = { path = "../crates/chervo-transport-quinn", features = ["fuzzing"] }
+# Stage 19a: release verification parsers (public API only, no features).
+chervo-update = { path = "../crates/chervo-update" }
+# Stage 19d: HTTP response parser of the update notice (feature `fuzzing`: only the parser, no network hook).
+chervo-update-check = { path = "../crates/chervo-update-check", features = ["fuzzing"] }
+
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "token_decode"
+path = "fuzz_targets/token_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "addr_update"
+path = "fuzz_targets/addr_update.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "addr_info"
+path = "fuzz_targets/addr_info.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transfer_codec"
+path = "fuzz_targets/transfer_codec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transfer_offer"
+path = "fuzz_targets/transfer_offer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transfer_state"
+path = "fuzz_targets/transfer_state.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transfer_names"
+path = "fuzz_targets/transfer_names.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "receive_sanitizer"
+path = "fuzz_targets/receive_sanitizer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "receive_plan"
+path = "fuzz_targets/receive_plan.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sntp"
+path = "fuzz_targets/sntp.rs"
+test = false
+doc = false
+bench = false
+
+# Stage 17 (B6): targets added once the owning crate got a doc(hidden) pub entry point.
+
+[[bin]]
+name = "upnp_desc"
+path = "fuzz_targets/upnp_desc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "upnp_http"
+path = "fuzz_targets/upnp_http.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "upnp_ssdp"
+path = "fuzz_targets/upnp_ssdp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "upnp_soap"
+path = "fuzz_targets/upnp_soap.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "upnp_url"
+path = "fuzz_targets/upnp_url.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "knock_check"
+path = "fuzz_targets/knock_check.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "receive_dirs"
+path = "fuzz_targets/receive_dirs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "receive_placed"
+path = "fuzz_targets/receive_placed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transfer_names_file"
+path = "fuzz_targets/transfer_names_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "update_pubkey"
+path = "fuzz_targets/update_pubkey.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "update_minisig"
+path = "fuzz_targets/update_minisig.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "update_manifest"
+path = "fuzz_targets/update_manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "update_http_response"
+path = "fuzz_targets/update_http_response.rs"
+test = false
+doc = false
+bench = false

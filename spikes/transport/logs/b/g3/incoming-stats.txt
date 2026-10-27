@@ -1,0 +1,21 @@
+== сервер с лимитом: события incoming по действиям и IP (полный server.log не коммитится, он большой) ==
+      5 10.77.1.2 validated=0 retry
+      5 10.77.1.2 validated=1 accept
+    597 10.77.3.10 validated=0 retry
+     20 10.77.3.10 validated=1 accept
+   2337 10.77.3.10 validated=1 ignore
+    595 10.77.3.11 validated=0 retry
+     20 10.77.3.11 validated=1 accept
+   2330 10.77.3.11 validated=1 ignore
+    597 10.77.3.12 validated=0 retry
+     20 10.77.3.12 validated=1 accept
+   2336 10.77.3.12 validated=1 ignore
+== hs_done по IP ==
+      5 10.77.1.2
+     17 10.77.3.10
+     16 10.77.3.11
+     17 10.77.3.12
+== сервер без лимита: hs_done по IP ==
+    601 10.77.3.10
+    601 10.77.3.11
+    601 10.77.3.12

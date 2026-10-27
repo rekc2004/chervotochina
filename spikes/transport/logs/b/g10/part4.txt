@@ -1,0 +1,3 @@
+mitm ekm down=a1b65b5414398c2a3a130a3be509c2d5525c0a1ab4a2b7996b35ae4e54f3b5bc up=9dddc51f52307ac6f4975e15fc6144732fca9ab1c582ce60ea3c86d438c6518a
+EVENT auth_fail t=123 side=s conn=1 reason=sig app_bytes_read=0
+EVENT client_result t=3 closed err="connection lost" app_bytes_received=0 app_bytes_sent=0

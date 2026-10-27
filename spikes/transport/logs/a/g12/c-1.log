@@ -1,0 +1,8 @@
+EVENT bound t=2 id=a6c05d06e8564b8ee6f421e5bc45109f3d9d1d3739d3c447d0d32522a85ef6db
+EVENT attempt_start t=2 n=1
+EVENT hs_done t=33 peer=10.77.2.2:4433 conn=1
+EVENT ekm t=33 side=c conn=1 ekm=9faf5ac44e7b229225ef2817708b2d1bd521697f9c75216d2c3ec7172ecee766
+EVENT peer_identity t=33 some conn=1
+EVENT auth_ok t=34 side=c conn=1 dur_ms=31
+EVENT app_ok t=36 bytes=4096 echo_eq=1
+EVENT client_result t=36 ok err="" app_bytes_received=4096 app_bytes_sent=4096

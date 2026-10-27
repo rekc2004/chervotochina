@@ -2,7 +2,10 @@ mod common;
 
 use std::path::{Path, PathBuf};
 
-use chervo_identity::{PairId, SignDomain, create, load, rekey};
+use chervo_identity::{
+    BINDING_LEN, ChannelBinding, KxPeer, PairId, SignDomain, create, kk_initiate, kk_respond, load,
+    rekey,
+};
 use common::MemStore;
 
 const STD: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -102,6 +105,29 @@ fn key_bytes_not_written_to_data_dir() {
 
     let store = MemStore::new();
     let mut secrets: Vec<Vec<u8>> = Vec::new();
+
+    // одно рукопожатие KK (into_kx, kk_initiate, kk_respond) до сканирования
+    {
+        let pid = PairId::generate().unwrap();
+        let (sa, sb) = (MemStore::new(), MemStore::new());
+        let ka = create(&sa, &pid).unwrap();
+        let kb = create(&sb, &pid).unwrap();
+        let (pa, pb) = (ka.kx_public(), kb.kx_public());
+        for st in [&sa, &sb] {
+            let blob = st.raw(&pid).unwrap();
+            secrets.push(blob[1..33].to_vec());
+            secrets.push(blob[65..97].to_vec());
+            secrets.push(blob);
+        }
+        let caller = KxPeer::new(pid, ka.into_kx(), pb);
+        let callee = KxPeer::new(pid, kb.into_kx(), pa);
+        let bind = ChannelBinding::from_bytes([7; BINDING_LEN]);
+        let (init, m1) = kk_initiate(&caller, &bind).unwrap();
+        let (resp, m2) = kk_respond(&[&callee], &bind, &m1).unwrap();
+        let m3 = init.finish(&m2).unwrap();
+        assert_eq!(resp.finish(&m3), Ok(pid));
+    }
+
     for _ in 0..5 {
         let p = PairId::generate().unwrap();
         let key = create(&store, &p).unwrap();
@@ -111,6 +137,7 @@ fn key_bytes_not_written_to_data_dir() {
         expected.verify(SignDomain::Invite, b"msg", &sig).unwrap();
         let blob = store.raw(&p).unwrap();
         secrets.push(blob[1..33].to_vec());
+        secrets.push(blob[65..97].to_vec());
         secrets.push(blob);
         drop(key);
         drop(loaded);
@@ -118,10 +145,11 @@ fn key_bytes_not_written_to_data_dir() {
         let new = rekey(&store, &p).unwrap();
         let blob = store.raw(&p).unwrap();
         secrets.push(blob[1..33].to_vec());
+        secrets.push(blob[65..97].to_vec());
         secrets.push(blob);
         drop(new);
     }
-    assert_eq!(secrets.len(), 20);
+    assert_eq!(secrets.len(), 36);
 
     std::env::set_current_dir(&old).unwrap();
     let found = scan(&d, &secrets);
@@ -137,10 +165,12 @@ fn scan_detects_planted_key() {
     create(&store, &p).unwrap();
     let blob = store.raw(&p).unwrap();
     let seed = blob[1..33].to_vec();
+    let x_secret = blob[65..97].to_vec();
+    assert_eq!(blob.len(), 129);
 
-    for secret in [&seed, &blob] {
+    for (i, secret) in [&seed, &x_secret, &blob].into_iter().enumerate() {
         for (name, bytes) in forms(secret) {
-            let dir = d2.join(format!("{}-{name}", secret.len()));
+            let dir = d2.join(format!("{i}-{}-{name}", secret.len()));
             std::fs::create_dir_all(&dir).unwrap();
             let mut data = b"prefix-".to_vec();
             data.extend_from_slice(&bytes);
@@ -148,7 +178,7 @@ fn scan_detects_planted_key() {
             let found = scan(&dir, std::slice::from_ref(secret));
             assert!(
                 found.iter().any(|(_, n)| *n == name),
-                "сканер не нашёл форму {name} для длины {}",
+                "сканер не нашёл форму {name} для секрета {i} длины {}",
                 secret.len()
             );
         }

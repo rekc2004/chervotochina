@@ -7,7 +7,16 @@ publish.workspace = true
 
 [dependencies]
 chervo-identity.workspace = true
+chervo-addr.workspace = true
 chervo-transport.workspace = true
+chervo-token.workspace = true
+chervo-friends.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+chervo-transport-quinn.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+zeroize.workspace = true
 
 [lints]
 workspace = true

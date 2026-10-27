@@ -1,0 +1,4 @@
+EVENT bound t=2 id=c945bf9cb1b303bb510a99bed1444bfda3a7351eff901bddfd536fa76026354e
+EVENT incoming t=63 peer=10.77.1.2:51137 validated=0 action=retry
+EVENT incoming t=90 peer=10.77.1.2:51137 validated=1 action=accept
+EVENT hs_fail t=91 peer=10.77.1.2:51137 conn=1 err="aborted by peer: the cryptographic handshake failed: error 48: invalid peer certificate: UnknownIssuer"

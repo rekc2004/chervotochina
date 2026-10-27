@@ -6,6 +6,26 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+chervo-identity.workspace = true
+chervo-transport.workspace = true
+chervo-connect.workspace = true
+chervo-friends.workspace = true
+getrandom.workspace = true
+ring.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+chervo-addr.workspace = true
+chervo-upnp.workspace = true
+chervo-transport-quinn.workspace = true
+tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }
+zeroize.workspace = true
+# Свои тесты и примеры используют точки входа за свойством `fuzzing` (S1 L6): в продуктовой сборке их нет.
+chervo-transfer = { path = ".", features = ["fuzzing"] }
+
+[features]
+# Тестовые и фаззинг-точки входа, не для продукта (S1 L6); fuzz/Cargo.toml включает его.
+fuzzing = []
 
 [lints]
 workspace = true

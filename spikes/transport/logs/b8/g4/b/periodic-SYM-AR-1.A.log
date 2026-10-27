@@ -1,0 +1,6 @@
+EVENT punch_start t=0 epoch_ms=1792081518888 mode=periodic
+EVENT bound t=0 id=- local=0.0.0.0:4433
+EVENT punch_attempt t=0 to=198.51.100.30:4433 epoch_ms=1792081518889
+EVENT punch_attempt t=5010 to=198.51.100.30:4433 epoch_ms=1792081523899
+EVENT auth_ok t=8013 side=c to=198.51.100.30:4433 hs_ms=3001 auth_ms=0
+EVENT punch_ok t=9517 dir=out ms=8013 epoch_ms=1792081528406

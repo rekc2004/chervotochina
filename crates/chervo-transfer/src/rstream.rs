@@ -1,0 +1,673 @@
+//! Задачи попытки получателя: запись и чтение потока управления и потоки данных. Получатель
+//! сам просит блоки; ответы идут по порядку запросов потока. Блок уходит писателю только
+//! после совпадения хэша.
+
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::mpsc::Sender;
+use std::time::Duration;
+
+use chervo_transport::{Connection, RecvStream, SendStream};
+use tokio::sync::mpsc;
+use tokio::time::timeout;
+
+use crate::codec::{BlockErrCode, CancelReason, FileErrCode, Message, ProtocolError, encode};
+use crate::events::{FileFailure, PauseReason};
+use crate::hash::{BlockHash, FileRoot, file_root, leaf_hash};
+use crate::layout::check_manifest_layout;
+use crate::limits::STREAM_TRANSFER_DATA;
+use crate::liveness::{idle_limit, stall_limit};
+use crate::receiver::{Attempt, End, RecvSession};
+use crate::sched::{BadBlock, Work};
+use crate::shared::{Acquired, HookPoint, Permits, acquire_pair, io_deadline, kib, lock};
+use crate::wire_io::{read_exact, read_message};
+use crate::writer::WCmd;
+
+/// Запись сообщения в поток с ограничением по времени.
+pub(crate) async fn write_msg<T: SendStream>(tx: &mut T, m: &Message, limit: Duration) -> bool {
+    let mut out = Vec::new();
+    if encode(m, &mut out).is_err() {
+        return false;
+    }
+    matches!(timeout(limit, tx.write_all(&out)).await, Ok(Ok(())))
+}
+
+/// Нарушение протокола отправителем: CANCEL{Protocol} и конец передачи. Вызывается РАНЬШЕ,
+/// чем нарушивший поток освободит свои блоки и разбудит соседей: после этого `take` попытки
+/// не выдаёт работы (`Attempt::is_over`), а итоговая проверка файла не размещает (`halt`).
+/// Иначе сосед перезапросил бы освобождённый блок, довёл файл до конца и разместил его в
+/// передаче, закончившейся `Failed(Protocol)`. Повторный вызов ничего не делает.
+fn protocol_fail(s: &RecvSession, att: &Attempt) {
+    if s.halt.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let _ = s.sh.hook(HookPoint::ProtocolFail);
+    s.ctl_send(Message::Cancel {
+        id: s.key.id,
+        reason: CancelReason::Protocol,
+    });
+    att.finish(End::Protocol);
+}
+
+/// Поток данных закончился нарушением: остановить попытку (см. `protocol_fail`).
+fn stop_on_violation(s: &RecvSession, att: &Attempt, e: StreamEnd) {
+    if e == StreamEnd::Protocol {
+        protocol_fail(s, att);
+    }
+}
+
+/// Пишет сообщения потока управления; на остановке дописывает очередь (CANCEL, DONE).
+pub(crate) async fn ctl_writer<T: SendStream>(
+    tx: T,
+    rx: mpsc::UnboundedReceiver<Message>,
+    att: Arc<Attempt>,
+    s: Arc<RecvSession>,
+) {
+    let ok = write_loop(
+        tx,
+        rx,
+        att.stop.watcher(),
+        s.sh.cfg.stall_timeout,
+        s.sh.cfg.msg_timeout,
+    )
+    .await;
+    if !ok {
+        att.finish(End::Disconnected);
+    }
+}
+
+/// Общий цикл записи потока управления (обе роли). `false`: запись не удалась.
+pub(crate) async fn write_loop<T: SendStream>(
+    mut tx: T,
+    mut rx: mpsc::UnboundedReceiver<Message>,
+    mut stop: crate::util::StopWatch,
+    stall: Duration,
+    flush: Duration,
+) -> bool {
+    let mut ok = true;
+    loop {
+        tokio::select! {
+            m = rx.recv() => match m {
+                Some(m) => {
+                    if !write_msg(&mut tx, &m, stall).await {
+                        ok = false;
+                        break;
+                    }
+                }
+                None => break,
+            },
+            () = stop.stopped() => {
+                while let Ok(m) = rx.try_recv() {
+                    if !write_msg(&mut tx, &m, flush).await {
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+    }
+    let _ = tx.finish();
+    ok
+}
+
+fn file_failure(code: FileErrCode) -> Option<FileFailure> {
+    match code {
+        FileErrCode::SourceChanged => Some(FileFailure::SourceChanged),
+        FileErrCode::ReadError => Some(FileFailure::SourceUnreadable),
+        _ => None,
+    }
+}
+
+/// Что ctl_reader помнит о кадрах HASH_PROGRESS этой попытки.
+#[derive(Default)]
+struct HashFrames {
+    prev: Option<u64>,
+    at_total: bool,
+}
+
+/// Правила кадра HASH_PROGRESS: первый кадр попытки не меньше значения сессии, дальше строго
+/// больше предыдущего, не больше `total`, после `total` кадров нет. `false`: нарушение.
+fn accept_hash_progress(s: &RecvSession, att: &Attempt, st: &mut HashFrames, hashed: u64) -> bool {
+    if st.at_total || hashed > s.total {
+        return false;
+    }
+    let before = {
+        let mut c = lock(&s.core);
+        let ok = match st.prev {
+            None => hashed >= c.sched.hashed,
+            Some(p) => hashed > p,
+        };
+        if !ok {
+            return false;
+        }
+        std::mem::replace(&mut c.sched.hashed, hashed)
+    };
+    st.prev = Some(hashed);
+    st.at_total = hashed == s.total;
+    att.note_frame();
+    // продвижением считается только настоящий рост относительно сессии, а не повтор прежнего
+    // значения в новой попытке
+    if hashed > before {
+        lock(&s.live).hash_grew(tokio::time::Instant::now());
+    }
+    s.wake.notify_waiters();
+    s.note_preparing(hashed);
+    true
+}
+
+/// Что сторожу нужно знать о сессии в данный момент. `core` берётся и отпускается до `live`.
+/// Возвращает (срок наступил, когда проверить снова).
+fn evaluate(
+    s: &RecvSession,
+    att: &Attempt,
+    now: tokio::time::Instant,
+    was_demand: &mut bool,
+) -> (bool, tokio::time::Instant) {
+    let cfg = &s.sh.cfg;
+    let (needs_hash, wants, hashed) = {
+        let c = lock(&s.core);
+        (c.sched.needs_hash(), c.sched.wants_data(), c.sched.hashed)
+    };
+    let mut next = now
+        .checked_add(cfg.stall_timeout)
+        .unwrap_or(now + Duration::from_secs(1));
+    let mut due = false;
+    let mut lv = lock(&s.live);
+    let mut check = |d: Option<tokio::time::Instant>| {
+        if let Some(d) = d {
+            due |= now >= d;
+            next = next.min(d);
+        }
+    };
+    if needs_hash {
+        lv.begin_wait(now, hashed);
+        // молчание отправителя и предел по скорости: сроки сессии, а не попытки
+        let grace = att.grace();
+        check(lv.silence_deadline(cfg.stall_timeout, grace));
+        check(lv.rate_deadline(cfg.stall_timeout, cfg.min_hash_rate, s.total, grace));
+    }
+    if wants {
+        if !*was_demand {
+            // спрос начался только что: время своей работы до этого не считается
+            lv.skip_idle(now);
+        }
+        check(lv.idle_deadline(idle_limit(cfg)));
+    }
+    *was_demand = wants;
+    (due, next)
+}
+
+/// Сторож живости (одна задача на попытку). Пауза `Stalled`, когда у отправителя, ведущего
+/// хэширование, нет роста `hashed` `stall_timeout` или средняя скорость ниже `min_hash_rate`,
+/// либо при спросе на данные нет ни одного принятого блока слишком долго. Сроки лежат в
+/// сессии: новая попытка их не обнуляет.
+pub(crate) async fn liveness_watchdog(s: Arc<RecvSession>, att: Arc<Attempt>) {
+    let mut stop = att.stop.watcher();
+    let mut was_demand = false;
+    loop {
+        let news = s.wake.notified();
+        tokio::pin!(news);
+        news.as_mut().enable();
+        let now = tokio::time::Instant::now();
+        let (due, next) = evaluate(&s, &att, now, &mut was_demand);
+        if due {
+            att.finish(End::Pause(PauseReason::Stalled));
+            return;
+        }
+        tokio::select! {
+            () = tokio::time::sleep_until(next) => {}
+            () = &mut news => {}
+            () = stop.stopped() => return,
+        }
+    }
+}
+
+/// Читает сообщения отправителя на потоке управления. Допустимы CANCEL, FILE_ERROR с кодами
+/// отправителя, HASH_PROGRESS и DONE; всё остальное это нарушение протокола.
+pub(crate) async fn ctl_reader<R: RecvStream>(
+    mut rx: R,
+    mut buf: Vec<u8>,
+    att: Arc<Attempt>,
+    s: Arc<RecvSession>,
+) {
+    let mut stop = att.stop.watcher();
+    let mut frames = HashFrames::default();
+    loop {
+        let r = tokio::select! {
+            r = read_message(&mut rx, &mut buf, s.sh.cfg.msg_timeout) => r,
+            () = stop.stopped() => return,
+        };
+        match r {
+            Ok(Some(Message::Cancel { id, .. })) if id == s.key.id => {
+                att.finish(End::PeerCancelled);
+                return;
+            }
+            Ok(Some(Message::FileError { index, code })) if index < s.file_count() => {
+                match file_failure(code) {
+                    Some(why) => s.fail_file(index, why, None),
+                    None => {
+                        protocol_fail(&s, &att);
+                        return;
+                    }
+                }
+            }
+            Ok(Some(Message::HashProgress { hashed })) => {
+                if !accept_hash_progress(&s, &att, &mut frames, hashed) {
+                    protocol_fail(&s, &att);
+                    return;
+                }
+            }
+            Ok(Some(Message::Done { id })) if id == s.key.id => att.note_echo(),
+            // поток закрыт или оборван: соединение живо, но передача на паузе
+            Ok(None) | Err(ProtocolError::Closed | ProtocolError::TimedOut) => {
+                att.finish(End::Disconnected);
+                return;
+            }
+            Ok(Some(_)) | Err(_) => {
+                protocol_fail(&s, &att);
+                return;
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamEnd {
+    Stopped,
+    Done,
+    Failed,
+    Stalled,
+    Protocol,
+}
+
+enum Pend {
+    Manifest {
+        file: u32,
+    },
+    Block {
+        file: u32,
+        block: u32,
+        len: u32,
+        _permit: Permits,
+    },
+}
+
+enum Fill {
+    Full,
+    NoBudget,
+    Idle { all_done: bool },
+}
+
+fn map_read(e: ProtocolError) -> StreamEnd {
+    match e {
+        ProtocolError::TimedOut => StreamEnd::Stalled,
+        ProtocolError::Closed => StreamEnd::Failed,
+        _ => StreamEnd::Protocol,
+    }
+}
+
+/// Обёртка потока данных: оборванный или молчащий поток заменяется новым. Подряд идущие
+/// обрывы без единого принятого блока (3 на поток) ставят передачу на паузу `Stalled`.
+pub(crate) async fn data_stream_loop<C: Connection>(
+    s: Arc<RecvSession>,
+    att: Arc<Attempt>,
+    conn: C,
+    wtx: Sender<WCmd>,
+) {
+    let limit = stall_limit(&s.sh.cfg);
+    let mut stop = att.stop.watcher();
+    loop {
+        if att.stop.is_stopped() {
+            return;
+        }
+        let end = data_stream(&s, &att, &conn, &wtx).await;
+        match end {
+            StreamEnd::Stopped | StreamEnd::Done => return,
+            // обычно `protocol_fail` уже вызван в `data_stream` до освобождения блоков;
+            // повтор безвреден
+            StreamEnd::Protocol => {
+                protocol_fail(&s, &att);
+                return;
+            }
+            StreamEnd::Failed | StreamEnd::Stalled => {
+                let closed = timeout(Duration::ZERO, conn.closed()).await.is_ok();
+                if closed {
+                    att.finish(End::Disconnected);
+                    return;
+                }
+                // счётчик сессии: новая попытка его не обнуляет
+                let n = lock(&s.live).stall();
+                if n >= limit {
+                    att.finish(End::Pause(PauseReason::Stalled));
+                    return;
+                }
+                tokio::select! {
+                    () = tokio::time::sleep(Duration::from_millis(50)) => {}
+                    () = stop.stopped() => return,
+                }
+            }
+        }
+    }
+}
+
+async fn send_request<T: SendStream>(
+    tx: &mut T,
+    m: &Message,
+    limit: Duration,
+) -> Result<(), StreamEnd> {
+    if write_msg(tx, m, limit).await {
+        Ok(())
+    } else {
+        Err(StreamEnd::Failed)
+    }
+}
+
+async fn fill<T: SendStream>(
+    s: &Arc<RecvSession>,
+    att: &Attempt,
+    tx: &mut T,
+    pending: &mut VecDeque<Pend>,
+    stop: &mut crate::util::StopWatch,
+) -> Result<Fill, StreamEnd> {
+    let cfg = &s.sh.cfg;
+    let window = usize::from(cfg.per_stream_window);
+    while pending.len() < window {
+        // Проверка конца попытки и взятие работы под одним замком: кто освобождает блоки после
+        // `finish` (под этим же замком), тот гарантирует, что освобождённое никто не возьмёт.
+        let work = {
+            let mut c = lock(&s.core);
+            if att.is_over() {
+                return Err(StreamEnd::Stopped);
+            }
+            c.sched.take()
+        };
+        match work {
+            Work::Wait => return Ok(Fill::Idle { all_done: false }),
+            Work::AllDone => return Ok(Fill::Idle { all_done: true }),
+            Work::Zero { file } => s.start_zero(file),
+            Work::Manifest { file } => {
+                pending.push_back(Pend::Manifest { file });
+                send_request(tx, &Message::GetManifest { index: file }, cfg.msg_timeout).await?;
+            }
+            Work::Block { file, block, len } => {
+                let need = kib(len);
+                // Память берётся из доли этой передачи и из общего бюджета. Свои же
+                // невычитанные ответы держат память: пока они есть, не ждём, а читаем.
+                let permit =
+                    match acquire_pair(&s.share, &s.sh.recv_budget, need, pending.is_empty(), stop)
+                        .await
+                    {
+                        Acquired::Got(p) => p,
+                        Acquired::Busy => {
+                            lock(&s.core).sched.release_block(file, block);
+                            return Ok(Fill::NoBudget);
+                        }
+                        Acquired::Stopped => {
+                            lock(&s.core).sched.release_block(file, block);
+                            return Err(StreamEnd::Stopped);
+                        }
+                    };
+                pending.push_back(Pend::Block {
+                    file,
+                    block,
+                    len,
+                    _permit: permit,
+                });
+                send_request(
+                    tx,
+                    &Message::GetBlock { index: file, block },
+                    cfg.msg_timeout,
+                )
+                .await?;
+            }
+        }
+    }
+    Ok(Fill::Full)
+}
+
+async fn data_stream<C: Connection>(
+    s: &Arc<RecvSession>,
+    att: &Arc<Attempt>,
+    conn: &C,
+    wtx: &Sender<WCmd>,
+) -> StreamEnd {
+    let cfg = &s.sh.cfg;
+    let Ok(Ok((mut tx, mut rx))) = timeout(cfg.msg_timeout, conn.open_bi()).await else {
+        return StreamEnd::Failed;
+    };
+    let mut head = vec![STREAM_TRANSFER_DATA];
+    if encode(&Message::Bind { id: s.key.id }, &mut head).is_err() {
+        return StreamEnd::Protocol;
+    }
+    if !matches!(
+        timeout(cfg.msg_timeout, tx.write_all(&head)).await,
+        Ok(Ok(()))
+    ) {
+        return StreamEnd::Failed;
+    }
+    let mut pending: VecDeque<Pend> = VecDeque::new();
+    let mut buf: Vec<u8> = Vec::new();
+    let mut stop = att.stop.watcher();
+    let end = loop {
+        let news = s.wake.notified();
+        tokio::pin!(news);
+        news.as_mut().enable();
+        match fill(s, att, &mut tx, &mut pending, &mut stop).await {
+            Err(e) => break e,
+            Ok(Fill::Idle { all_done: true }) if pending.is_empty() => break StreamEnd::Done,
+            Ok(Fill::Full | Fill::NoBudget | Fill::Idle { .. }) => {}
+        }
+        if pending.is_empty() {
+            tokio::select! {
+                () = &mut news => continue,
+                () = stop.stopped() => break StreamEnd::Stopped,
+            }
+        }
+        let got = tokio::select! {
+            r = timeout(cfg.stall_timeout, read_message(&mut rx, &mut buf, cfg.msg_timeout)) => r,
+            () = stop.stopped() => break StreamEnd::Stopped,
+        };
+        let msg = match got {
+            Err(_) => break StreamEnd::Stalled,
+            Ok(Err(e)) => break map_read(e),
+            Ok(Ok(None)) => break StreamEnd::Failed,
+            Ok(Ok(Some(m))) => m,
+        };
+        let Some(front) = pending.pop_front() else {
+            break StreamEnd::Protocol;
+        };
+        let step = match (front, msg) {
+            (
+                Pend::Manifest { file },
+                Message::Manifest {
+                    index,
+                    block_size,
+                    block_count,
+                    root,
+                },
+            ) if index == file => {
+                let r = handle_manifest(s, att, &mut rx, file, block_size, block_count, root).await;
+                if let Err(e) = r {
+                    // нарушение останавливает попытку раньше, чем что-либо освободится
+                    stop_on_violation(s, att, e);
+                    // запрос уже снят с очереди потока: без этого файл остался бы «запрошенным»
+                    lock(&s.core).sched.release_manifest(file);
+                }
+                r
+            }
+            (Pend::Manifest { file }, Message::BlockErr { index, code, .. }) if index == file => {
+                s.fail_file(file, block_failure(code), None);
+                Ok(())
+            }
+            (
+                Pend::Block {
+                    file,
+                    block,
+                    len,
+                    _permit,
+                },
+                Message::Block {
+                    index,
+                    block: b,
+                    len: l,
+                },
+            ) if index == file && b == block => {
+                if l != len {
+                    // длина не равна `block_len`: тело не читается. Попытка останавливается
+                    // раньше, чем блок освободится: иначе сосед перезапросит его, получит
+                    // честный ответ и разместит файл в провалившейся передаче.
+                    stop_on_violation(s, att, StreamEnd::Protocol);
+                    lock(&s.core).sched.release_block(file, block);
+                    Err(StreamEnd::Protocol)
+                } else {
+                    let r = handle_block(s, wtx, &mut rx, file, block, len, _permit).await;
+                    if let Err(e) = r {
+                        stop_on_violation(s, att, e);
+                        // блок не дочитан (обрыв, срок на блок): он снова свободен, иначе он
+                        // остался бы «в полёте» до конца попытки
+                        lock(&s.core).sched.release_block(file, block);
+                    }
+                    r
+                }
+            }
+            (
+                Pend::Block { file, block, .. },
+                Message::BlockErr {
+                    index,
+                    block: b,
+                    code,
+                },
+            ) if index == file && b == block => {
+                s.fail_file(file, block_failure(code), None);
+                Ok(())
+            }
+            _ => Err(StreamEnd::Protocol),
+        };
+        if let Err(e) = step {
+            break e;
+        }
+    };
+    // любое нарушение (в том числе не пойманное выше) останавливает попытку до освобождения
+    stop_on_violation(s, att, end);
+    // запросы без ответа снова свободны
+    {
+        let mut c = lock(&s.core);
+        for p in pending.drain(..) {
+            match p {
+                Pend::Manifest { file } => c.sched.release_manifest(file),
+                Pend::Block { file, block, .. } => c.sched.release_block(file, block),
+            }
+        }
+    }
+    s.wake.notify_waiters();
+    let _ = tx.finish();
+    end
+}
+
+fn block_failure(code: BlockErrCode) -> FileFailure {
+    match code {
+        BlockErrCode::SourceChanged => FileFailure::SourceChanged,
+        BlockErrCode::ReadError => FileFailure::SourceUnreadable,
+    }
+}
+
+/// Сырые данные ровно в `out`: таймер потока сбрасывается каждым куском, но весь блок
+/// должен прийти за `stall_timeout + длина / min_block_rate`. Узел, капающий по байту, не
+/// держит память бесконечно.
+async fn read_bounded<R: RecvStream>(
+    rx: &mut R,
+    out: &mut [u8],
+    cfg: &crate::config::TransferConfig,
+) -> Result<(), StreamEnd> {
+    let limit = io_deadline(cfg, out.len());
+    match timeout(limit, read_exact(rx, out, cfg.stall_timeout)).await {
+        Ok(r) => r.map_err(map_read),
+        Err(_) => Err(StreamEnd::Stalled),
+    }
+}
+
+async fn handle_manifest<R: RecvStream>(
+    s: &Arc<RecvSession>,
+    att: &Arc<Attempt>,
+    rx: &mut R,
+    file: u32,
+    block_size: u32,
+    block_count: u32,
+    root: FileRoot,
+) -> Result<(), StreamEnd> {
+    let size = s
+        .sizes
+        .get(usize::try_from(file).unwrap_or(usize::MAX))
+        .copied()
+        .ok_or(StreamEnd::Protocol)?;
+    // раскладку считаем сами; число хэшей решаем мы, до чтения
+    let l =
+        check_manifest_layout(size, block_size, block_count).map_err(|_| StreamEnd::Protocol)?;
+    let n = usize::try_from(l.block_count)
+        .ok()
+        .and_then(|c| c.checked_mul(32))
+        .ok_or(StreamEnd::Protocol)?;
+    let mut raw = vec![0u8; n];
+    read_bounded(rx, &mut raw, &s.sh.cfg).await?;
+    let (chunks, _) = raw.as_chunks::<32>();
+    let leaves: Vec<BlockHash> = chunks.iter().map(|c| BlockHash(*c)).collect();
+    // список хэшей обязан воспроизвести корень, который прислал отправитель
+    match file_root(size, l, &leaves) {
+        Ok(r) if r == root => {}
+        _ => return Err(StreamEnd::Protocol),
+    }
+    s.live_progress();
+    match s.setup_file(file, l, root, leaves).await {
+        Ok(()) => Ok(()),
+        Err(reason) => {
+            att.finish(End::Pause(reason));
+            Err(StreamEnd::Stopped)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_block<R: RecvStream>(
+    s: &Arc<RecvSession>,
+    wtx: &Sender<WCmd>,
+    rx: &mut R,
+    file: u32,
+    block: u32,
+    len: u32,
+    permit: Permits,
+) -> Result<(), StreamEnd> {
+    let n = usize::try_from(len).map_err(|_| StreamEnd::Protocol)?;
+    let mut data = vec![0u8; n];
+    read_bounded(rx, &mut data, &s.sh.cfg).await?;
+    let job = tokio::task::spawn_blocking(move || {
+        let h = leaf_hash(block, &data);
+        (data, h)
+    });
+    let (data, got) = job.await.map_err(|_| StreamEnd::Failed)?;
+    let want = lock(&s.core).sched.leaf(file, block);
+    match want {
+        // файл уже закрыт или блок не нужен: данные отбрасываются
+        None => Ok(()),
+        Some(w) if w == got => {
+            // принятый блок это продвижение (испорченный им не считается)
+            s.live_progress();
+            wtx.send(WCmd::Write {
+                file,
+                block,
+                data,
+                permit,
+            })
+            .map_err(|_| StreamEnd::Stopped)
+        }
+        Some(_) => {
+            let r = lock(&s.core).sched.bad_block(file, block);
+            match r {
+                BadBlock::Requeue => s.wake.notify_waiters(),
+                BadBlock::FileFailed => {
+                    s.fail_file(file, FileFailure::Damaged, Some(FileErrCode::Damaged));
+                }
+            }
+            Ok(())
+        }
+    }
+}

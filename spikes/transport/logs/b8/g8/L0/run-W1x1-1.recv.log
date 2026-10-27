@@ -1,0 +1,15 @@
+EVENT bound t=0 id=- listen=0.0.0.0:4433
+EVENT server_spki_issued t=68 peer=10.77.0.2:51002 spki=302a300506032b657003210046cebda678e62af96edbb419fc9e768d49c82b6a2bc47a2bd2c18dc8b41e4c2b
+EVENT auth_ok t=70 side=s peer=10.77.0.2:51002 dur_ms=1
+EVENT xfer_start t=71 id=cae01a1bce4d3d9da092f0a4b330838a size=536870912 streams=1 resume_from=0
+EVENT cpu_ticks t=88 phase=start ticks=0
+EVENT xfer_progress t=321 bytes=66302346
+EVENT xfer_progress t=572 bytes=145458631
+EVENT xfer_progress t=825 bytes=234152836
+EVENT xfer_progress t=1075 bytes=307749568
+EVENT xfer_progress t=1326 bytes=378288115
+EVENT xfer_progress t=1577 bytes=467792577
+EVENT cpu_ticks t=1796 phase=end ticks=176
+EVENT xfer_done t=1796 bytes=536870912 ms=1708 conns=1
+EVENT recv_done t=1813 bytes=536870912
+EVENT xfer_progress t=1829 bytes=536870912

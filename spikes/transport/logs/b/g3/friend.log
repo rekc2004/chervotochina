@@ -1,0 +1,41 @@
+EVENT bound t=0 id=-
+EVENT attempt_start t=0 n=1
+EVENT hs_done t=2 peer=10.77.2.2:4433 conn=1
+EVENT ekm t=2 side=c conn=1 ekm=4cea028726bb60e4fc6e8fa245d79fa2fa0f730ed469869e62d5cb7e132fadca
+EVENT server_spki t=2 conn=1 spki=302a300506032b6570032100fd54f4017613346c3ce6c90b9b6239cd1a10edd1693080a31f0c8a2765411397
+EVENT peer_identity t=2 some conn=1
+EVENT auth_ok t=3 side=c conn=1 dur_ms=2
+EVENT app_ok t=3 bytes=1024 echo_eq=1
+EVENT client_result t=3 ok err="" app_bytes_received=1024 app_bytes_sent=1024
+EVENT attempt_start t=3 n=2
+EVENT hs_done t=5 peer=10.77.2.2:4433 conn=2
+EVENT ekm t=5 side=c conn=2 ekm=006ea8f39a8dd288e82c03ac60a947dd1de95938c92e8a3a3523bc7d729f4149
+EVENT server_spki t=5 conn=2 spki=302a300506032b6570032100a7ee41a11d045a88e21d3b203e143dd96b33d8182bfcccdb9dc771d718486e70
+EVENT peer_identity t=5 some conn=2
+EVENT auth_ok t=6 side=c conn=2 dur_ms=2
+EVENT app_ok t=6 bytes=1024 echo_eq=1
+EVENT client_result t=6 ok err="" app_bytes_received=1024 app_bytes_sent=1024
+EVENT attempt_start t=6 n=3
+EVENT hs_done t=7 peer=10.77.2.2:4433 conn=3
+EVENT ekm t=7 side=c conn=3 ekm=543ddd2ec445e5de6d974e104335d96fd13fd417f63d3279c6d42192c3b44d54
+EVENT server_spki t=7 conn=3 spki=302a300506032b6570032100d6093813e163c6f27ff512c7267fe858e8abf8bb73e93e827ec5c6529a255b7c
+EVENT peer_identity t=7 some conn=3
+EVENT auth_ok t=8 side=c conn=3 dur_ms=2
+EVENT app_ok t=9 bytes=1024 echo_eq=1
+EVENT client_result t=9 ok err="" app_bytes_received=1024 app_bytes_sent=1024
+EVENT attempt_start t=9 n=4
+EVENT hs_done t=10 peer=10.77.2.2:4433 conn=4
+EVENT ekm t=10 side=c conn=4 ekm=51c54a8a82935980328d8c499d92ba1dbb1bc41e2acd24099dc1f7574a97ae14
+EVENT server_spki t=10 conn=4 spki=302a300506032b6570032100fa0ee623247b96f48e76ecff763e052a8c6e5d9bcf5a6864d4719fe40f954a82
+EVENT peer_identity t=10 some conn=4
+EVENT auth_ok t=11 side=c conn=4 dur_ms=2
+EVENT app_ok t=11 bytes=1024 echo_eq=1
+EVENT client_result t=11 ok err="" app_bytes_received=1024 app_bytes_sent=1024
+EVENT attempt_start t=11 n=5
+EVENT hs_done t=13 peer=10.77.2.2:4433 conn=5
+EVENT ekm t=13 side=c conn=5 ekm=cd315ac32bc37ddd3b0b63287bfb3e32738222ec9f3a9f64ac47889d5269d0a7
+EVENT server_spki t=13 conn=5 spki=302a300506032b657003210088a1fa874bdf7ee8aaed1a0b682ac31699b2fa22420b5758403db815d436239f
+EVENT peer_identity t=13 some conn=5
+EVENT auth_ok t=14 side=c conn=5 dur_ms=2
+EVENT app_ok t=15 bytes=1024 echo_eq=1
+EVENT client_result t=15 ok err="" app_bytes_received=1024 app_bytes_sent=1024

@@ -1,0 +1,11 @@
+EVENT punch_start t=0 epoch_ms=1792081762427 mode=periodic
+EVENT bound t=0 id=- local=0.0.0.0:4434
+EVENT punch_attempt t=0 to=198.51.100.10:4433 epoch_ms=1792081762427
+EVENT punch_attempt t=5008 to=198.51.100.10:4433 epoch_ms=1792081767436
+EVENT punch_attempt t=10012 to=198.51.100.10:4433 epoch_ms=1792081772440
+EVENT punch_attempt t=15025 to=198.51.100.10:4433 epoch_ms=1792081777453
+EVENT punch_attempt t=20039 to=198.51.100.10:4433 epoch_ms=1792081782466
+EVENT punch_attempt t=25043 to=198.51.100.10:4433 epoch_ms=1792081787470
+EVENT punch_attempt t=30051 to=198.51.100.10:4433 epoch_ms=1792081792479
+EVENT punch_attempt t=35072 to=198.51.100.10:4433 epoch_ms=1792081797500
+EVENT punch_fail t=40007 reason=deadline

@@ -1,0 +1,34 @@
+table inet nat8 {
+	chain pre {
+		type nat hook prerouting priority dstnat; policy accept;
+		jump prerouting_miniupnpd
+	}
+
+	chain post {
+		type nat hook postrouting priority srcnat; policy accept;
+		jump postrouting_miniupnpd
+		oifname "wan" ip saddr 192.168.40.0/24 masquerade
+	}
+
+	chain fwd8 {
+		type filter hook forward priority filter; policy drop;
+		jump miniupnpd
+		iifname "lan" oifname "wan" accept
+		iifname "wan" ct state established,related accept
+		iifname "wan" ct status dnat accept
+	}
+
+	chain inp8 {
+		type filter hook input priority filter; policy accept;
+		iifname "wan" drop
+	}
+
+	chain miniupnpd {
+	}
+
+	chain prerouting_miniupnpd {
+	}
+
+	chain postrouting_miniupnpd {
+	}
+}

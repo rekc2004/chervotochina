@@ -2,20 +2,30 @@ name: ci
 on:
   push:
   pull_request:
+  # Stage 19b: release.yml calls this workflow (all jobs) before it makes a draft.
+  workflow_call:
 permissions:
   contents: read
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      - run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: bash scripts/check-forbidden.sh
       - run: bash scripts/check-forbidden.sh --self-test
+      # Stage 19b: supply-chain guards of the release pipeline (each with its own self-test).
+      - run: bash scripts/check-actions-pinned.sh
+      - run: bash scripts/check-actions-pinned.sh --self-test
+      - run: bash scripts/check-release-guards.sh
+      - run: bash scripts/check-release-guards.sh --self-test
+      - run: bash scripts/release/check-whitelist.sh --self-test
+      - run: bash scripts/release/check-deps.sh --self-test
+      - run: bash scripts/release/version.sh --self-test
   test:
     strategy:
       fail-fast: false
@@ -23,20 +33,45 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - run: rustup toolchain install stable --profile minimal
+      - run: rustup toolchain install 1.99.1 --profile minimal
       - run: cargo build --workspace --locked
       - run: cargo test --workspace --locked
+  # Stage 17a: our Secret Service client against a real gnome-keyring in a private session bus.
+  secret-service-live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.99.1 --profile minimal
+      - run: sudo apt-get update
+      - run: sudo apt-get install -y --no-install-recommends gnome-keyring dbus-daemon
+      - run: dbus-run-session -- bash scripts/ci-secret-service.sh
   supply-chain:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      # TODO pin version: cargo search недоступен при скелете, версии не закреплены
-      - run: cargo install cargo-audit --locked
+      - run: cargo install --locked --version =0.22.2 cargo-audit
       - run: cargo audit --deny warnings
-      - run: cargo install cargo-deny --locked
-      - run: cargo deny check licenses sources
+      - run: cargo install --locked --version =0.20.2 cargo-deny
+      - run: cargo deny check advisories bans licenses sources
+  sbom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.99.1 --profile minimal
+      - run: cargo install --locked --version =0.5.9 cargo-cyclonedx
+      - run: cargo cyclonedx --format json --override-filename sbom
+      # Stage 19b (C31): all actions are pinned by commit SHA (scripts/check-actions-pinned.sh).
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sbom-${{ github.sha }}
+          path: "**/sbom.json"
+          if-no-files-found: error

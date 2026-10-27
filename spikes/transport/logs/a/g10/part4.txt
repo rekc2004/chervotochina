@@ -1,0 +1,3 @@
+mitm ekm down=0d28fce93d1b142ff8bb39349e19036933150cbabb22f6907a1b43362722a9ad up=4e65566cdf46169133d791ce4f61f755856c3c70885f9be02ef427716e95cfe1
+EVENT auth_fail t=134 side=s conn=1 reason=sig app_bytes_read=0
+EVENT client_result t=8 closed err="eof" app_bytes_received=0 app_bytes_sent=0

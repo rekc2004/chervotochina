@@ -1,0 +1,19 @@
+EVENT bound t=0 id=- listen=0.0.0.0:4433
+EVENT server_spki_issued t=271 peer=198.51.100.10:4433 spki=302a300506032b65700321005c892e54fb95aadefd891cece480caf17bade905fb1886bbf3491ecf129087d2
+EVENT auth_ok t=273 side=s peer=198.51.100.10:4433 dur_ms=1
+EVENT hello_served t=273 peer=198.51.100.10:4433
+EVENT server_spki_issued t=602 peer=198.51.100.10:4433 spki=302a300506032b65700321008939165d263741c98b997450d1b789404cf157abcf551789f274397283b628a4
+EVENT auth_ok t=603 side=s peer=198.51.100.10:4433 dur_ms=1
+EVENT hello_served t=603 peer=198.51.100.10:4433
+EVENT server_spki_issued t=888 peer=198.51.100.10:4433 spki=302a300506032b6570032100c68579ef59b3aa4da620713ee850d9b8d32215690b03be6cc49d35fdd2cc1da4
+EVENT auth_ok t=889 side=s peer=198.51.100.10:4433 dur_ms=1
+EVENT hello_served t=890 peer=198.51.100.10:4433
+EVENT server_spki_issued t=1185 peer=198.51.100.10:65313 spki=302a300506032b6570032100156387fd950bf4dab3b7ad87cc260162fb888877d0eb3aae26acf82bda55a5a9
+EVENT auth_ok t=1187 side=s peer=198.51.100.10:65313 dur_ms=1
+EVENT hello_served t=1187 peer=198.51.100.10:65313
+EVENT server_spki_issued t=1527 peer=198.51.100.40:4433 spki=302a300506032b65700321008cbf607fa3ed830ccd103c9d4474a7553e98a27e201513eb1f3b56c94323ff38
+EVENT auth_ok t=1528 side=s peer=198.51.100.40:4433 dur_ms=1
+EVENT hello_served t=1529 peer=198.51.100.40:4433
+EVENT server_spki_issued t=1854 peer=198.51.100.40:38757 spki=302a300506032b657003210073827fd95c0f7048c8f2009b2a5411a4d59f9925e50a8c54d5c64fd3474f11db
+EVENT auth_ok t=1855 side=s peer=198.51.100.40:38757 dur_ms=1
+EVENT hello_served t=1856 peer=198.51.100.40:38757

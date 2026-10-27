@@ -1,49 +1,46 @@
-//! Установка прямого соединения: типы путей и заглушка. Relay-варианта нет и не будет.
+//! Слой соединения (этап 13, часть C3: ядро движка).
+//! Спецификация: `docs/specs/stage-13-connect.md`.
+//!
+//! Слой решает, по каким адресам, в каком порядке и как часто звонить каждому активному
+//! другу (один исходящий звонок на пару), следит за собственными адресами, обменивается
+//! ADDR_INFO и называет причину, когда прямого пути нет. Сокетов, DNS и обращений к третьим
+//! лицам в крейте нет; транспорт приходит снаружи через `ManagedTransport`.
+#![deny(clippy::unwrap_used)]
+#![deny(clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
+#![deny(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    clippy::dbg_macro,
+    clippy::todo
+)]
 
-use std::fmt;
-use std::future::Future;
+mod addrinfo;
+mod allow;
+mod clock;
+mod config;
+mod diag;
+mod dispatch;
+mod engine;
+mod gateway;
+mod inbox;
+mod invite;
+mod limiter;
+mod plan;
+mod texts;
+mod watch;
 
-use chervo_transport::{PeerAddr, Transport};
+#[cfg(test)]
+mod tests;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PathKind {
-    Lan,
-    Ipv6,
-    PortMapped,
-    SimultaneousOpen,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NoDirectPath {
-    BothBehindCgnat,
-    SymmetricNat,
-    UdpBlocked,
-    NoIpv6,
-    NoKnownAddress,
-    Unknown,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConnectError {
-    NoDirectPath(NoDirectPath),
-    NotImplemented,
-}
-
-impl fmt::Display for ConnectError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NoDirectPath(reason) => write!(f, "no direct path: {reason:?}"),
-            Self::NotImplemented => f.write_str("not implemented"),
-        }
-    }
-}
-
-impl std::error::Error for ConnectError {}
-
-/// Заглушка: всегда `NotImplemented`.
-pub fn connect_direct<T: Transport>(
-    _transport: &T,
-    _peer: &PeerAddr,
-) -> impl Future<Output = Result<(T::Conn, PathKind), ConnectError>> + Send {
-    std::future::ready(Err(ConnectError::NotImplemented))
-}
+pub use allow::AllowSet;
+pub use clock::{Clock, ClockRangeError, RouteProbe, SystemClock, SystemProbe};
+pub use config::ConnectConfig;
+pub use diag::{Diagnosis, NoDirectPath};
+pub use engine::{ConnectError, Engine, EngineEvent, EngineEvents, InviteAddrs, InviteOutcome};
+pub use inbox::{ConnHold, IncomingStream, StreamInbox};
+pub use plan::PathKind;
+pub use texts::{
+    CGNAT_TEXT, DOUBLE_NAT_TEXT, NO_IPV6_TEXT, NO_KNOWN_ADDRESS_TEXT, PEER_UNREACHABLE_INVITE_TEXT,
+    REVOCATION_FAILED_TEXT, REVOCATION_NOT_SENT_TEXT, SYMMETRIC_TEXT, UDP_BLOCKED_TEXT,
+    UNKNOWN_TEXT, revocation_error_text, user_text,
+};

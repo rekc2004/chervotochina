@@ -1,8 +1,10 @@
 mod common;
 
 use chervo_identity::{
-    ACCOUNT_PREFIX, DEFAULT_SERVICE, DeviceId, IdentityError, KEY_BLOB_LEN, PairId, PairKey,
-    PublicKey, SecretStore, SignDomain, UnavailableKeyStore, create, load, rekey,
+    ACCOUNT_PREFIX, ChannelBinding, DEFAULT_SERVICE, GuestSecret, IdentityError, KEY_BLOB_LEN,
+    KK_PROLOGUE_TAG, KNOCK_ID_LABEL, KNOCK_KDF_LABEL, KNOCK_TAG_LABEL, KxPeer, KxPublicKey,
+    LIST_KEY_ACCOUNT, LIST_KEY_LEN, ListKeyStore, PairId, PairKey, PairKx, PublicKey, SecretStore,
+    SignDomain, UnavailableKeyStore, create, load, rekey,
 };
 use common::{FailingStore, FixedStore, LossyStore, MemStore};
 use zeroize::{ZeroizeOnDrop, Zeroizing};
@@ -23,19 +25,113 @@ fn some_public() -> PublicKey {
     k.public_key()
 }
 
-// ---------- заглушка DeviceId ----------
+// ---------- гостевой секрет приглашения ----------
 
 #[test]
-fn device_id_roundtrip() {
-    assert_eq!(DeviceId::from_bytes([7; 32]).as_bytes(), &[7; 32]);
+fn guest_generate_public_valid() {
+    let g = GuestSecret::generate().unwrap();
+    let p = g.public();
+    assert!(KxPublicKey::try_from_slice(&p.to_bytes()).is_ok());
+    assert_ne!(
+        g.public(),
+        GuestSecret::generate().unwrap().public(),
+        "два секрета не совпадают"
+    );
 }
 
 #[test]
-fn debug_does_not_leak_key() {
+fn guest_from_bytes_roundtrip() {
+    let g = GuestSecret::generate().unwrap();
+    let bytes = g.to_token_bytes();
+    let back = GuestSecret::from_bytes(bytes.as_slice()).unwrap();
+    assert_eq!(back.public(), g.public());
+    assert_eq!(*back.to_token_bytes(), *bytes);
+}
+
+#[test]
+fn guest_from_bytes_bad_len() {
+    for n in [0usize, 1, 31, 33, 64] {
+        assert_eq!(
+            GuestSecret::from_bytes(&vec![7u8; n]).err(),
+            Some(IdentityError::InvalidGuestSecret),
+            "длина {n}"
+        );
+    }
+    assert!(GuestSecret::from_bytes(&[7u8; 32]).is_ok());
+}
+
+#[test]
+fn guest_debug_redacted() {
+    let g = GuestSecret::from_bytes(&[0xAB; 32]).unwrap();
+    assert_eq!(format!("{g:?}"), "GuestSecret(..)");
     assert_eq!(
-        format!("{:?}", DeviceId::from_bytes([0xAB; 32])),
-        "DeviceId(..)"
+        IdentityError::InvalidGuestSecret.to_string(),
+        "invalid invite secret"
     );
+    fn z<T: ZeroizeOnDrop>() {}
+    z::<GuestSecret>();
+}
+
+#[test]
+fn sign_domains_pairwise_not_prefix() {
+    let mut all: Vec<&[u8]> = SignDomain::ALL.iter().map(|d| d.tag()).collect();
+    assert_eq!(all.len(), 4);
+    all.push(KK_PROLOGUE_TAG);
+    all.push(KNOCK_KDF_LABEL);
+    all.push(KNOCK_ID_LABEL);
+    all.push(KNOCK_TAG_LABEL);
+    for (i, a) in all.iter().enumerate() {
+        for (j, b) in all.iter().enumerate() {
+            if i != j {
+                assert_ne!(a, b, "теги {i} и {j} равны");
+                assert!(!b.starts_with(a), "тег {i} префикс тега {j}");
+            }
+        }
+    }
+}
+
+#[test]
+fn invite_accept_domain_separated() {
+    assert_eq!(
+        SignDomain::InviteAccept.tag(),
+        b"chervotochina/v1/invite-accept\0"
+    );
+    let (_, _, k) = fresh();
+    let pk = k.public_key();
+    let msg = b"payload";
+    let a = k.sign(SignDomain::InviteAccept, msg).unwrap();
+    let i = k.sign(SignDomain::Invite, msg).unwrap();
+    assert!(pk.verify(SignDomain::InviteAccept, msg, &a).is_ok());
+    assert!(pk.verify(SignDomain::Invite, msg, &i).is_ok());
+    assert_eq!(
+        pk.verify(SignDomain::Invite, msg, &a),
+        Err(IdentityError::BadSignature)
+    );
+    assert_eq!(
+        pk.verify(SignDomain::InviteAccept, msg, &i),
+        Err(IdentityError::BadSignature)
+    );
+}
+
+// ---------- ключ списка друзей ----------
+
+#[test]
+fn unavailable_list_key_store() {
+    assert_eq!(
+        UnavailableKeyStore.read_list_key().err(),
+        Some(IdentityError::NotImplemented)
+    );
+    assert_eq!(
+        UnavailableKeyStore.write_list_key(&[0; LIST_KEY_LEN]),
+        Err(IdentityError::NotImplemented)
+    );
+    assert_eq!(
+        UnavailableKeyStore.delete_list_key(),
+        Err(IdentityError::NotImplemented)
+    );
+    assert_eq!(LIST_KEY_ACCOUNT, "friends-key-v1");
+    assert!(!LIST_KEY_ACCOUNT.starts_with(ACCOUNT_PREFIX));
+    assert_eq!(LIST_KEY_LEN, 32);
 }
 
 // ---------- позитивные ----------
@@ -157,6 +253,15 @@ fn error_display_fixed_strings() {
         (IdentityError::InvalidPublicKey, "invalid public key"),
         (IdentityError::BadSignature, "bad signature"),
         (IdentityError::SigningFailed, "signing failed"),
+        (
+            IdentityError::InvalidKxPublicKey,
+            "invalid key-exchange public key",
+        ),
+        (
+            IdentityError::AuthFailed,
+            "connection authentication failed",
+        ),
+        (IdentityError::InvalidGuestSecret, "invalid invite secret"),
     ];
     for (e, text) in all {
         assert_eq!(e.to_string(), text);
@@ -164,9 +269,82 @@ fn error_display_fixed_strings() {
 }
 
 #[test]
+fn create_then_load_same_kx() {
+    let (s, p, k) = fresh();
+    let kx = k.kx_public();
+    let loaded = load(&s, &p, &k.public_key()).unwrap();
+    assert_eq!(loaded.kx_public(), kx);
+    let raw = s.raw(&p).unwrap();
+    assert_eq!(raw.len(), KEY_BLOB_LEN);
+    assert_eq!(raw[0], 2);
+    assert_eq!(&raw[97..129], kx.to_bytes().as_slice());
+    assert_eq!(&raw[33..65], k.public_key().to_bytes().as_slice());
+}
+
+#[test]
+fn rekey_replaces_kx() {
+    let (s, p, k) = fresh();
+    let old = k.kx_public();
+    let new = rekey(&s, &p).unwrap();
+    assert_ne!(old, new.kx_public());
+    assert_eq!(s.raw(&p).unwrap()[97..129], new.kx_public().to_bytes());
+}
+
+#[test]
+fn kx_public_roundtrip() {
+    let (_, _, k) = fresh();
+    let kx = k.kx_public();
+    assert_eq!(KxPublicKey::try_from_slice(&kx.to_bytes()).unwrap(), kx);
+}
+
+#[test]
+fn into_kx_keeps_public() {
+    let (_, _, k) = fresh();
+    let kx = k.kx_public();
+    assert_eq!(k.into_kx().public(), kx);
+}
+
+#[test]
+fn kx_debug_redacted() {
+    let (_, _, k) = fresh();
+    let (_, _, other) = fresh();
+    let theirs = other.kx_public();
+    assert_eq!(format!("{theirs:?}"), "KxPublicKey(..)");
+    let kx = k.into_kx();
+    assert_eq!(format!("{kx:?}"), "PairKx(..)");
+    let peer = KxPeer::new(pair(), kx, theirs);
+    assert_eq!(format!("{peer:?}"), "KxPeer(..)");
+    let binding = ChannelBinding::from_bytes([3; 32]);
+    assert_eq!(format!("{binding:?}"), "ChannelBinding(..)");
+    let (init, _msg1) = chervo_identity::kk_initiate(&peer, &binding).unwrap();
+    assert_eq!(format!("{init:?}"), "KkInitiator(..)");
+    // вызываемый: тот же набор ключей с другой стороны
+    let (_, _, a) = fresh();
+    let (_, _, b) = fresh();
+    let (pa, pb) = (a.kx_public(), b.kx_public());
+    let caller = KxPeer::new(pair(), a.into_kx(), pb);
+    let callee = KxPeer::new(caller.pair(), b.into_kx(), pa);
+    let (_, m1) = chervo_identity::kk_initiate(&caller, &binding).unwrap();
+    let (resp, _) = chervo_identity::kk_respond(&[&callee], &binding, &m1).unwrap();
+    assert_eq!(format!("{resp:?}"), "KkResponder(..)");
+}
+
+#[test]
+fn prologue_tag_distinct_from_sign_domains() {
+    assert_eq!(KK_PROLOGUE_TAG.iter().filter(|b| **b == 0).count(), 1);
+    assert_eq!(KK_PROLOGUE_TAG.last(), Some(&0));
+    for d in SignDomain::ALL {
+        let t = d.tag();
+        assert_ne!(KK_PROLOGUE_TAG, t);
+        assert!(!KK_PROLOGUE_TAG.starts_with(t), "тег домена префикс KK");
+        assert!(!t.starts_with(KK_PROLOGUE_TAG), "KK префикс тега домена");
+    }
+}
+
+#[test]
 fn domain_tags_prefix_free() {
     let tags: Vec<&[u8]> = SignDomain::ALL.iter().map(|d| d.tag()).collect();
-    assert_eq!(tags.len(), 3);
+    assert_eq!(tags.len(), 4);
     for (i, a) in tags.iter().enumerate() {
         assert_eq!(a.iter().filter(|b| **b == 0).count(), 1);
         assert_eq!(a.last(), Some(&0));
@@ -184,6 +362,8 @@ fn domain_tags_prefix_free() {
 fn secret_types_zeroize_on_drop() {
     fn f<T: ZeroizeOnDrop>() {}
     f::<PairKey>();
+    f::<PairKx>();
+    f::<x25519_dalek::StaticSecret>();
     f::<ed25519_dalek::SigningKey>();
     f::<Zeroizing<Vec<u8>>>();
 }
@@ -236,6 +416,13 @@ fn src_has_no_io_or_default_store() {
         "Entry::new(",
         "keyring::",
         ".sign(",
+        "generate_keypair",
+        "fixed_ephemeral",
+        "risky",
+        "dangerously",
+        "to_scalar_bytes",
+        ".to_scalar(",
+        "StaticSecret::random",
     ];
     for f in files {
         let mut text = std::fs::read_to_string(&f).unwrap();
@@ -365,17 +552,17 @@ fn blob_empty_rejected() {
 
 #[test]
 fn blob_wrong_length_rejected() {
-    for len in [64usize, 66, 1 << 20] {
+    for len in [128usize, 130, 65, 1 << 20] {
         let mut b = vec![0x5A; len];
-        b[0] = 1;
+        b[0] = 2;
         assert_eq!(load_fixed(b), IdentityError::CorruptKey, "len {len}");
     }
 }
 
 #[test]
 fn blob_unknown_version_rejected() {
-    for v in [0x00u8, 0x02, 0xFF] {
-        for len in [65usize, 10] {
+    for v in [0x00u8, 0x01, 0x03, 0xFF] {
+        for len in [129usize, 65, 10] {
             let mut b = vec![0x5A; len];
             b[0] = v;
             assert_eq!(
@@ -410,6 +597,55 @@ fn blob_seed_bit_flip_rejected() {
 }
 
 #[test]
+fn blob_kx_secret_bit_flip_rejected() {
+    let (s, p, k) = fresh();
+    let mut b = s.raw(&p).unwrap();
+    b[70] ^= 1;
+    assert_eq!(
+        load(&FixedStore(b), &p, &k.public_key()).unwrap_err(),
+        IdentityError::CorruptKey
+    );
+}
+
+#[test]
+fn blob_kx_public_mismatch_rejected() {
+    let (s, p, k) = fresh();
+    let mut b = s.raw(&p).unwrap();
+    b[100] ^= 1;
+    assert_eq!(
+        load(&FixedStore(b), &p, &k.public_key()).unwrap_err(),
+        IdentityError::CorruptKey
+    );
+}
+
+#[test]
+fn v1_record_not_migrated() {
+    let p = pair();
+    let seed = [0x42u8; 32];
+    let public = ed25519_dalek::SigningKey::from_bytes(&seed)
+        .verifying_key()
+        .to_bytes();
+    let mut v1 = vec![1u8];
+    v1.extend_from_slice(&seed);
+    v1.extend_from_slice(&public);
+    assert_eq!(v1.len(), 65);
+    let s = MemStore::with_raw(&p, v1.clone());
+    let expected = PublicKey::try_from_slice(&public).unwrap();
+    assert_eq!(
+        load(&s, &p, &expected).unwrap_err(),
+        IdentityError::UnsupportedKeyVersion
+    );
+    assert_eq!(s.raw(&p), Some(v1.clone()));
+    assert_eq!(create(&s, &p).unwrap_err(), IdentityError::KeyAlreadyExists);
+    assert_eq!(s.raw(&p), Some(v1));
+    let new = rekey(&s, &p).unwrap();
+    let raw = s.raw(&p).unwrap();
+    assert_eq!(raw.len(), 129);
+    assert_eq!(raw[0], 2);
+    assert!(load(&s, &p, &new.public_key()).is_ok());
+}
+
+#[test]
 fn corrupt_blob_not_overwritten() {
     let (s, p, k) = fresh();
     let mut b = s.raw(&p).unwrap();
@@ -424,17 +660,17 @@ fn corrupt_blob_not_overwritten() {
 
 #[test]
 fn blob_exhaustive_lengths_and_versions() {
-    for len in 0..=130usize {
+    for len in 0..=260usize {
         let mut b = vec![0x5A; len];
         if let Some(f) = b.first_mut() {
-            *f = 1;
+            *f = 2;
         }
         assert_eq!(load_fixed(b), IdentityError::CorruptKey, "len {len}");
     }
     for v in 0..=255u8 {
-        let mut b = vec![0x5A; 65];
+        let mut b = vec![0x5A; 129];
         b[0] = v;
-        let want = if v == 1 {
+        let want = if v == 2 {
             IdentityError::CorruptKey
         } else {
             IdentityError::UnsupportedKeyVersion
@@ -502,6 +738,126 @@ fn public_key_rejects_noncanonical() {
         }
     }
     assert!(control, "нет положительного контроля");
+}
+
+#[test]
+fn kx_public_rejects_wrong_length() {
+    for len in [0usize, 31, 33] {
+        assert_eq!(
+            KxPublicKey::try_from_slice(&vec![9u8; len]).unwrap_err(),
+            IdentityError::InvalidKxPublicKey,
+            "len {len}"
+        );
+    }
+}
+
+#[test]
+fn kx_public_rejects_small_order() {
+    for (i, t) in curve25519_dalek::constants::EIGHT_TORSION
+        .iter()
+        .enumerate()
+    {
+        let b = t.to_montgomery().to_bytes();
+        assert_eq!(
+            KxPublicKey::try_from_slice(&b).unwrap_err(),
+            IdentityError::InvalidKxPublicKey,
+            "torsion {i}"
+        );
+    }
+}
+
+#[test]
+fn kx_public_rejects_mixed_order() {
+    use curve25519_dalek::constants::{ED25519_BASEPOINT_POINT, EIGHT_TORSION};
+    // положительный контроль: чистая точка основной подгруппы принимается
+    let clean = ED25519_BASEPOINT_POINT;
+    assert!(clean.is_torsion_free());
+    assert!(KxPublicKey::try_from_slice(&clean.to_montgomery().to_bytes()).is_ok());
+    // P + T (T порядка 2, 4 и 8): каноническая кодировка, не малый порядок, но не чистая
+    for (i, t) in EIGHT_TORSION.iter().enumerate().skip(1) {
+        let mixed = clean + t;
+        assert!(!mixed.is_small_order(), "точка {i} малого порядка");
+        assert!(!mixed.is_torsion_free(), "точка {i} чистая");
+        assert_eq!(
+            KxPublicKey::try_from_slice(&mixed.to_montgomery().to_bytes()).unwrap_err(),
+            IdentityError::InvalidKxPublicKey,
+            "P + T[{i}]"
+        );
+    }
+}
+
+fn le_u(u: u64) -> [u8; 32] {
+    let mut b = [0u8; 32];
+    b[..8].copy_from_slice(&u.to_le_bytes());
+    b
+}
+
+#[test]
+fn kx_public_rejects_twist() {
+    // u = p - 1 = -1
+    let mut minus_one = [0xFFu8; 32];
+    minus_one[0] = 0xEC;
+    minus_one[31] = 0x7F;
+    assert!(
+        curve25519_dalek::montgomery::MontgomeryPoint(minus_one)
+            .to_edwards(0)
+            .is_none()
+    );
+    assert_eq!(
+        KxPublicKey::try_from_slice(&minus_one).unwrap_err(),
+        IdentityError::InvalidKxPublicKey
+    );
+    // первое u >= 2 на кривой кручения
+    let mut found = None;
+    for u in 2..1000u64 {
+        let b = le_u(u);
+        if curve25519_dalek::montgomery::MontgomeryPoint(b)
+            .to_edwards(0)
+            .is_none()
+        {
+            found = Some(b);
+            break;
+        }
+    }
+    let b = found.expect("нет точки кручения среди первых u");
+    assert_eq!(
+        KxPublicKey::try_from_slice(&b).unwrap_err(),
+        IdentityError::InvalidKxPublicKey
+    );
+}
+
+#[test]
+fn kx_public_rejects_noncanonical() {
+    // положительный контроль: базовая точка и настоящий ключ принимаются
+    let (_, _, k) = fresh();
+    let mut base = [0u8; 32];
+    base[0] = 9;
+    assert!(
+        KxPublicKey::try_from_slice(&base).is_ok(),
+        "нет положительного контроля"
+    );
+    assert!(
+        KxPublicKey::try_from_slice(&k.kx_public().to_bytes()).is_ok(),
+        "нет положительного контроля"
+    );
+    // u = p + k, k = 0..=18: байты ED+k, FF*30, 7F
+    for k in 0..=18u8 {
+        let mut b = [0xFFu8; 32];
+        b[0] = 0xED + k;
+        b[31] = 0x7F;
+        assert_eq!(
+            KxPublicKey::try_from_slice(&b).unwrap_err(),
+            IdentityError::InvalidKxPublicKey,
+            "k {k}"
+        );
+    }
+    // базовая точка с выставленным старшим битом
+    let mut high = base;
+    high[31] |= 0x80;
+    assert_eq!(
+        KxPublicKey::try_from_slice(&high).unwrap_err(),
+        IdentityError::InvalidKxPublicKey
+    );
 }
 
 #[test]
@@ -609,9 +965,12 @@ fn os_store_roundtrip_manual() {
     let first = OsKeyStore::open_with_service(&service).unwrap();
     let key = create(&first, &p).unwrap();
     let expected = key.public_key();
+    let kx = key.kx_public();
 
     let second = OsKeyStore::open_with_service(&service).unwrap();
-    assert_eq!(load(&second, &p, &expected).unwrap().public_key(), expected);
+    let loaded = load(&second, &p, &expected).unwrap();
+    assert_eq!(loaded.public_key(), expected);
+    assert_eq!(loaded.kx_public(), kx);
 
     let new = rekey(&second, &p).unwrap().public_key();
     assert_ne!(new, expected);
@@ -626,4 +985,108 @@ fn os_store_roundtrip_manual() {
         load(&first, &p, &new).unwrap_err(),
         IdentityError::KeyMissing
     );
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+#[test]
+#[ignore = "трогает реальное хранилище ОС; запускает владелец вручную"]
+fn os_list_key_roundtrip_manual() {
+    use chervo_identity::OsKeyStore;
+
+    struct Guard(String);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            if let Ok(s) = OsKeyStore::open_with_service(&self.0) {
+                let _ = s.delete_list_key();
+            }
+        }
+    }
+
+    let mut r = [0u8; 8];
+    getrandom::fill(&mut r).unwrap();
+    let hex: String = r.iter().map(|b| format!("{b:02x}")).collect();
+    let service = format!("chervotochina-test-{hex}");
+    assert_ne!(service, DEFAULT_SERVICE);
+    let _guard = Guard(service.clone());
+
+    let first = OsKeyStore::open_with_service(&service).unwrap();
+    assert!(first.read_list_key().unwrap().is_none());
+    first.write_list_key(&[0x5A; LIST_KEY_LEN]).unwrap();
+    let second = OsKeyStore::open_with_service(&service).unwrap();
+    assert_eq!(
+        second.read_list_key().unwrap().unwrap().as_slice(),
+        &[0x5A; LIST_KEY_LEN]
+    );
+    second.write_list_key(&[0x33; LIST_KEY_LEN]).unwrap();
+    assert_eq!(
+        first.read_list_key().unwrap().unwrap().as_slice(),
+        &[0x33; LIST_KEY_LEN]
+    );
+    second.delete_list_key().unwrap();
+    assert!(first.read_list_key().unwrap().is_none());
+    second.delete_list_key().unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "трогает реальное хранилище ОС; запускает владелец вручную"]
+fn os_epoch_roundtrip_manual() {
+    use chervo_identity::{EpochStore, OsKeyStore};
+
+    let mut r = [0u8; 8];
+    getrandom::fill(&mut r).unwrap();
+    let hex: String = r.iter().map(|b| format!("{b:02x}")).collect();
+    let service = format!("chervotochina-test-{hex}");
+    assert_ne!(service, DEFAULT_SERVICE);
+
+    let first = OsKeyStore::open_with_service(&service).unwrap();
+    assert!(first.read_epoch().unwrap().is_none());
+    first.write_epoch(0x0102_0304_0506_0708).unwrap();
+    let second = OsKeyStore::open_with_service(&service).unwrap();
+    assert_eq!(second.read_epoch().unwrap(), Some(0x0102_0304_0506_0708));
+    second.write_epoch(5).unwrap();
+    assert_eq!(first.read_epoch().unwrap(), Some(5));
+}
+
+/// M1, этап 17a: запись тремя методами старого клиента Secret Service. Без очистки:
+/// читает `ss_migration_read_new` на итоговом коммите.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "трогает реальное хранилище ОС; запускает владелец вручную"]
+fn ss_migration_write_old() {
+    use chervo_identity::{EpochStore, OsKeyStore};
+
+    let store = OsKeyStore::open_with_service("chervotochina-migration-17a").unwrap();
+    let mut blob = vec![2u8];
+    blob.extend_from_slice(&[0x11; 128]);
+    store.write(&PairId::from_bytes([0x17; 16]), &blob).unwrap();
+    store.write_list_key(&[0x5A; LIST_KEY_LEN]).unwrap();
+    store.write_epoch(0x1717).unwrap();
+}
+
+/// M1, этап 17a: чтение новым клиентом записей, созданных `ss_migration_write_old` старым
+/// клиентом (запущенным на коммите B0). Побайтное совпадение, затем удаление и повторное чтение.
+/// Запись эпохи удалить нельзя (в `EpochStore` нет удаления): она остаётся, это 8 байт без секрета.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "трогает реальное хранилище ОС; запускает владелец вручную"]
+fn ss_migration_read_new() {
+    use chervo_identity::{EpochStore, OsKeyStore};
+
+    let store = OsKeyStore::open_with_service("chervotochina-migration-17a").unwrap();
+    let pair = PairId::from_bytes([0x17; 16]);
+    let mut blob = vec![2u8];
+    blob.extend_from_slice(&[0x11; 128]);
+
+    assert_eq!(store.read(&pair).unwrap().unwrap().as_slice(), &blob[..]);
+    assert_eq!(
+        store.read_list_key().unwrap().unwrap().as_slice(),
+        &[0x5A; LIST_KEY_LEN]
+    );
+    assert_eq!(store.read_epoch().unwrap(), Some(0x1717));
+
+    store.delete(&pair).unwrap();
+    store.delete_list_key().unwrap();
+    assert!(store.read(&pair).unwrap().is_none());
+    assert!(store.read_list_key().unwrap().is_none());
 }

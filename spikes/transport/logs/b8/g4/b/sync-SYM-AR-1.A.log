@@ -1,0 +1,7 @@
+EVENT punch_start t=0 epoch_ms=1792081529828 mode=sync
+EVENT punch_go t=7065 epoch_ms=1792081536893 peer=198.51.100.30:4433 delay_ms=500
+EVENT punch_attempt_start t=7566 epoch_ms=1792081537394
+EVENT bound t=7566 id=- local=0.0.0.0:4433
+EVENT punch_attempt t=7566 to=198.51.100.30:4433 epoch_ms=1792081537395
+EVENT auth_ok t=8571 side=c to=198.51.100.30:4433 hs_ms=1003 auth_ms=1
+EVENT punch_ok t=10093 dir=out ms=1005 epoch_ms=1792081539921

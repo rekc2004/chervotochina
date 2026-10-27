@@ -1,0 +1,17 @@
+EVENT bound t=4 id=c945bf9cb1b303bb510a99bed1444bfda3a7351eff901bddfd536fa76026354e
+EVENT incoming t=64 peer=10.77.0.2:43641 validated=0 action=retry
+EVENT incoming t=92 peer=10.77.0.2:43641 validated=1 action=accept
+EVENT hs_done t=94 peer=10.77.0.2:43641 conn=1
+EVENT ekm t=94 side=s conn=1 ekm=fb4b6b53cc982d3f4c9969720225fccd211c3a3d8c2a2e2fa4e52715ede13ea4
+EVENT peer_identity t=94 some conn=1
+EVENT auth_ok t=95 side=s conn=1
+EVENT app_served t=131 conn=1 bytes=1048576
+EVENT conn_end t=132 conn=1
+EVENT incoming t=655 peer=10.77.1.2:50789 validated=0 action=retry
+EVENT incoming t=682 peer=10.77.1.2:50789 validated=1 action=accept
+EVENT hs_done t=684 peer=10.77.1.2:50789 conn=2
+EVENT ekm t=684 side=s conn=2 ekm=424b19377c95166f893f2a7d7c14a85ed11e742a69c253d8e81fd955f4278b70
+EVENT peer_identity t=684 some conn=2
+EVENT auth_ok t=685 side=s conn=2
+EVENT app_served t=692 conn=2 bytes=1048576
+EVENT conn_end t=695 conn=2

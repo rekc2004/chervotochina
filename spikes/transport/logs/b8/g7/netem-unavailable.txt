@@ -1,0 +1,6 @@
+Error: Specified qdisc kind is unknown.
+qdisc noqueue 0: root refcnt 2 
+qdisc noqueue 0: root refcnt 2 
+== /proc/config.gz
+# CONFIG_MODULES is not set
+# CONFIG_NET_SCH_NETEM is not set

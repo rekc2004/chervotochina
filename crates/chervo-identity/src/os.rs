@@ -4,9 +4,13 @@ use std::sync::Arc;
 use keyring_core::{CredentialStore, Entry, Error as KeyringError};
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::{DEFAULT_SERVICE, IdentityError, PairId, SecretStore};
+use crate::{
+    DEFAULT_SERVICE, EPOCH_ACCOUNT, EpochStore, IdentityError, LIST_KEY_ACCOUNT, ListKeyStore,
+    PairId, SecretStore,
+};
 
-/// Хранилище ОС: Credential Manager, login keychain, Secret Service.
+/// Хранилище ОС: Credential Manager, login keychain. Linux: свой клиент Secret Service
+/// (`os_linux.rs`).
 /// Создаётся явным конструктором платформенного крейта, глобальное хранилище не используется.
 pub struct OsKeyStore {
     store: Arc<CredentialStore>,
@@ -29,13 +33,6 @@ fn platform_store() -> keyring_core::Result<Arc<CredentialStore>> {
 #[cfg(target_os = "windows")]
 fn platform_store() -> keyring_core::Result<Arc<CredentialStore>> {
     let s = windows_native_keyring_store::Store::new()?;
-    let s: Arc<CredentialStore> = s;
-    Ok(s)
-}
-
-#[cfg(target_os = "linux")]
-fn platform_store() -> keyring_core::Result<Arc<CredentialStore>> {
-    let s = zbus_secret_service_keyring_store::Store::new()?;
     let s: Arc<CredentialStore> = s;
     Ok(s)
 }
@@ -77,7 +74,10 @@ impl OsKeyStore {
     }
 
     fn entry(&self, pair: &PairId) -> Result<Entry, IdentityError> {
-        let account = pair.account_name();
+        self.entry_named(&pair.account_name())
+    }
+
+    fn entry_named(&self, account: &str) -> Result<Entry, IdentityError> {
         #[cfg(target_os = "windows")]
         let mods_map = std::collections::HashMap::from([("persistence", "Local")]);
         #[cfg(target_os = "windows")]
@@ -85,7 +85,7 @@ impl OsKeyStore {
         #[cfg(not(target_os = "windows"))]
         let mods = None;
         self.store
-            .build(&self.service, &account, mods)
+            .build(&self.service, account, mods)
             .map_err(map_error)
     }
 }
@@ -108,6 +108,52 @@ impl SecretStore for OsKeyStore {
             Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
             Err(e) => Err(map_error(e)),
         }
+    }
+}
+
+impl ListKeyStore for OsKeyStore {
+    fn read_list_key(&self) -> Result<Option<Zeroizing<Vec<u8>>>, IdentityError> {
+        match self.entry_named(LIST_KEY_ACCOUNT)?.get_secret() {
+            Ok(secret) => Ok(Some(Zeroizing::new(secret))),
+            Err(KeyringError::NoEntry) => Ok(None),
+            Err(e) => Err(map_error(e)),
+        }
+    }
+
+    fn write_list_key(&self, key: &[u8]) -> Result<(), IdentityError> {
+        self.entry_named(LIST_KEY_ACCOUNT)?
+            .set_secret(key)
+            .map_err(map_error)
+    }
+
+    fn delete_list_key(&self) -> Result<(), IdentityError> {
+        match self.entry_named(LIST_KEY_ACCOUNT)?.delete_credential() {
+            Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
+            Err(e) => Err(map_error(e)),
+        }
+    }
+}
+
+impl EpochStore for OsKeyStore {
+    fn read_epoch(&self) -> Result<Option<u64>, IdentityError> {
+        match self.entry_named(EPOCH_ACCOUNT)?.get_secret() {
+            Ok(secret) => {
+                let secret = Zeroizing::new(secret);
+                let bytes: [u8; 8] = secret
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| IdentityError::StorageInconsistent)?;
+                Ok(Some(u64::from_be_bytes(bytes)))
+            }
+            Err(KeyringError::NoEntry) => Ok(None),
+            Err(e) => Err(map_error(e)),
+        }
+    }
+
+    fn write_epoch(&self, epoch: u64) -> Result<(), IdentityError> {
+        self.entry_named(EPOCH_ACCOUNT)?
+            .set_secret(&epoch.to_be_bytes())
+            .map_err(map_error)
     }
 }
 

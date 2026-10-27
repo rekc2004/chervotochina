@@ -1,71 +1,40 @@
-//! Список друзей: типы и заглушка хранилища.
+//! Список друзей: типы записей, кодек открытого текста и зашифрованный файл списка
+//! (этап 11, части К3 и О1). Спецификация: `docs/specs/stage-11-invite.md`.
+//!
+//! Файл списка: `[CHFL][версия][nonce 12][ChaCha20-Poly1305: шифртекст || тег 16]`, ключ лежит
+//! в хранилище ОС отдельной записью (`chervo_identity::LIST_KEY_ACCOUNT`). Файл считается
+//! недоверенным: после порчи или подмены любой разбор строгий, паник нет.
+#![deny(clippy::unwrap_used)]
+#![deny(clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
+#![deny(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    clippy::dbg_macro,
+    clippy::todo
+)]
 
-use std::fmt;
+mod book;
+mod error;
+mod plain;
+mod trust;
+mod types;
+pub mod vault;
 
-use chervo_addr::KnownAddr;
-use chervo_identity::DeviceId;
+#[cfg(test)]
+mod tests;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AutoAcceptLimits {
-    pub max_total_bytes: u64,
-    pub max_files: u32,
-}
+pub use book::{FriendBook, KeyStatus, MIN_INBAND_UPDATE_INTERVAL_SECS, NewFriend};
+pub use error::FriendsError;
+pub use trust::TrustConfirmation;
+pub use types::{
+    AutoAcceptLimits, BookData, Friend, FriendState, PendingEntry, PendingRole, Permission, Retired,
+};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Permission {
-    #[default]
-    Ask,
-    AutoAccept(AutoAcceptLimits),
-}
-
-/// Без Debug: имена и адреса не печатаются через derive.
-#[derive(Clone)]
-pub struct Friend {
-    pub name: String,
-    pub id: DeviceId,
-    pub known_addrs: Vec<KnownAddr>,
-    pub permission: Permission,
-    pub last_addr_seq: u64,
-    pub blocked: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FriendsError {
-    NotImplemented,
-}
-
-impl fmt::Display for FriendsError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("not implemented")
-    }
-}
-
-impl std::error::Error for FriendsError {}
-
-pub trait FriendStore {
-    fn list(&self) -> Result<Vec<Friend>, FriendsError>;
-    fn get(&self, id: &DeviceId) -> Result<Option<Friend>, FriendsError>;
-    fn upsert(&mut self, friend: Friend) -> Result<(), FriendsError>;
-    fn remove(&mut self, id: &DeviceId) -> Result<(), FriendsError>;
-}
-
-/// Заглушка хранилища: всегда `NotImplemented`.
-pub struct UnavailableFriendStore;
-
-impl FriendStore for UnavailableFriendStore {
-    fn list(&self) -> Result<Vec<Friend>, FriendsError> {
-        Err(FriendsError::NotImplemented)
-    }
-
-    fn get(&self, _id: &DeviceId) -> Result<Option<Friend>, FriendsError> {
-        Err(FriendsError::NotImplemented)
-    }
-
-    fn upsert(&mut self, _friend: Friend) -> Result<(), FriendsError> {
-        Err(FriendsError::NotImplemented)
-    }
-
-    fn remove(&mut self, _id: &DeviceId) -> Result<(), FriendsError> {
-        Err(FriendsError::NotImplemented)
-    }
-}
+pub const MAX_FRIENDS: usize = 1024;
+pub const MAX_PENDING: usize = 64;
+pub const MAX_NAME_BYTES: usize = 64;
+pub const MAX_ADDRS_PER_FRIEND: usize = 16;
+pub const MAX_FILE_BYTES: usize = 4 * 1024 * 1024;
+pub const FILE_MAGIC: &[u8; 4] = b"CHFL";
+pub const FILE_VERSION: u8 = 0x01;
+pub const KEY_LOST_TEXT: &str = "Ключ для этого друга пропал или изменён. Добавьте друга заново.";

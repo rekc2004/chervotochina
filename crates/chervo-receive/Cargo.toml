@@ -6,6 +6,34 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+chervo-transfer.workspace = true
+chervo-friends.workspace = true
+chervo-identity.workspace = true
+ring.workspace = true
+unicode-normalization.workspace = true
+# Свободное место тома: GetDiskFreeSpaceExW (Windows) / statvfs (Unix), см. space.rs (Рев. 4).
+fs4.workspace = true
+
+# Unix: карантин macOS (расширенный атрибут `com.apple.quarantine`), безопасный API, без `unsafe`.
+# Крейт уже в `Cargo.lock` (Рев. 3).
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "=1.1.5", default-features = false, features = ["std", "fs"] }
+
+# Только для сетевых тестов R3 и примера `node15` (в обычном дереве зависимостей их нет).
+[dev-dependencies]
+chervo-addr.workspace = true
+chervo-connect.workspace = true
+chervo-transport.workspace = true
+chervo-transport-quinn.workspace = true
+tokio.workspace = true
+zeroize.workspace = true
+# Свои тесты и примеры используют точки входа за свойством `fuzzing` (S1 L6): в продуктовой сборке их нет.
+chervo-receive = { path = ".", features = ["fuzzing"] }
+chervo-transfer = { workspace = true, features = ["fuzzing"] }
+
+[features]
+# Тестовые и фаззинг-точки входа, не для продукта (S1 L6); fuzz/Cargo.toml включает его.
+fuzzing = []
 
 [lints]
 workspace = true

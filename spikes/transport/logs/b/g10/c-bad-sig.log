@@ -1,0 +1,8 @@
+EVENT bound t=0 id=-
+EVENT attempt_start t=0 n=1
+EVENT hs_done t=2 peer=10.77.2.2:4433 conn=1
+EVENT ekm t=2 side=c conn=1 ekm=5b64094c6d99ea98bf224cab1f109a30317776f70faf5509fe231a073b0e347c
+EVENT server_spki t=2 conn=1 spki=302a300506032b6570032100d5111c8894985a6950cbceb5f180a117d325df08d1069eef8e35417a811b6ab0
+EVENT peer_identity t=2 some conn=1
+EVENT auth_fail t=2 side=c conn=1 reason=closed app_bytes_sent=0
+EVENT client_result t=2 closed err="connection lost" app_bytes_received=0 app_bytes_sent=0

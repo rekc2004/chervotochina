@@ -1,0 +1,1 @@
+EVENT client_result t=2 hs_error err="the cryptographic handshake failed: error 51: invalid peer certificate: BadSignature" app_bytes_received=0 app_bytes_sent=0

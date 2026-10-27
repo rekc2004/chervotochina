@@ -13,6 +13,7 @@ fn workspace_layout() {
         "chervo-token",
         "chervo-friends",
         "chervo-connect",
+        "chervo-upnp",
         "chervo-transfer",
         "chervo-receive",
         "chervo-core",
