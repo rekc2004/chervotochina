@@ -10,8 +10,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use chervo_receive::{ReceiveConfig, ReceivePlacement, TestPoint, sanitize_path};
 use chervo_transfer::{PlaceError, Placement};
+#[cfg(windows)]
+use common::Tmp;
 use common::rows::{Exp, rows};
-use common::{Env, Tmp, key, link_dir_or_skip, offered, place_offer, placed_path, stage, tree};
+use common::{Env, key, link_dir_or_skip, offered, place_offer, placed_path, stage, tree};
 
 fn data(seed: u8, n: usize) -> Vec<u8> {
     (0..n)
