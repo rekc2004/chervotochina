@@ -406,7 +406,7 @@ Not explained: the builder's "both sides dial, offer never arrived within 30 s" 
 4. `transfer_net.rs`: no change needed; comparing ids becomes valid with the fix.
 
 **Tests.**
-- Step 0, before the fix; report the number: `#[ignore]` probe `stable_id_reuse_probe` in `chervo-transport-quinn/src/tests/race.rs`. 64 cycles of connect, close both ends, drop all clones, `wait_idle`; count repeated `stable_id` values; 3 runs on Windows. If the count is 0 in all runs, the hypothesis is weaker: still apply the fix (the contract requires it), report this, and keep the flake open.
+- Step 0, before the fix; report the number: `#[ignore]` probe `stable_id_reuse_probe` (deleted 2026-10-27) in `chervo-transport-quinn/src/tests/race.rs`. 64 cycles of connect, close both ends, drop all clones, `wait_idle`; count repeated `stable_id` values; 3 runs on Windows. If the count is 0 in all runs, the hypothesis is weaker: still apply the fix (the contract requires it), report this, and keep the flake open.
 - `conn_id_never_reused` (quinn, loopback, same cycles): ids strictly increase and are all distinct.
 - `lost_duplicate_returns_winner_id`: on simultaneous open, `Lost.conn_id() == Winner.conn_id()`; extend `race.rs:392-401`.
 - `resume_over_new_conn_with_reused_id` (`chervo-transfer/src/tests/resume.rs`, fake Links, paused time): connection A (id 7) closed at ~50 %, connection B (also id 7) becomes live; `Resumed` within `poll + msg_timeout`; result identical. It must fail deterministically on 3efa281 (`wait_conn` skips id 7); the builder shows it failing before fix step 3 and passing after.
