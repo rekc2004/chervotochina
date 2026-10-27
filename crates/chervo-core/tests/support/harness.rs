@@ -407,8 +407,31 @@ impl Watch {
     }
 }
 
-/// SHA-256 (FIPS 180-4) для сверки файлов в тестах; проверен на известных векторах в
-/// `node_net.rs`.
+/// Сверка собственного `sha256` с известными векторами (FIPS 180-4 / NIST). Вызывать в начале
+/// теста, который сравнивает файлы этим помощником: иначе сверка была бы с непроверенным
+/// эталоном.
+pub fn check_sha256_oracle() {
+    assert_eq!(
+        hex(&sha256(b"abc")),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+    assert_eq!(
+        hex(&sha256(b"")),
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+    assert_eq!(
+        hex(&sha256(
+            b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+        )),
+        "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+    );
+    assert_eq!(
+        hex(&sha256(&vec![b'a'; 1_000_000])),
+        "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
+    );
+}
+
+/// SHA-256 (FIPS 180-4) для сверки файлов в тестах; проверяется `check_sha256_oracle`.
 pub fn sha256(data: &[u8]) -> [u8; 32] {
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,

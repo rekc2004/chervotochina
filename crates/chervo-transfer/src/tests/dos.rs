@@ -206,6 +206,7 @@ async fn restart_restores_names_from_immutable_file() {
 // ------------------------------------------------------------- 2. жёсткие ссылки
 
 #[test]
+#[allow(clippy::print_stderr)]
 fn hard_link_placement_ok_even_if_unlink_fails() {
     let d = TestDir::new();
     let temp = d.path().join("t.part");

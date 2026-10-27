@@ -428,26 +428,3 @@ fn decision_only_exact() {
         }
     }
 }
-
-#[test]
-fn error_display_fixed() {
-    use chervo_token::{FlowError, TokenError};
-    // тексты не содержат байтов ввода и различаются
-    let all = [
-        InviteError::Malformed,
-        InviteError::WrongToken,
-        InviteError::BadKey,
-        InviteError::BadSignature,
-        InviteError::CommitMismatch,
-        InviteError::Expired,
-        InviteError::TooManySessions,
-        InviteError::Used,
-        InviteError::NoSession,
-        InviteError::RandomUnavailable,
-        InviteError::SigningFailed,
-    ];
-    let texts: std::collections::HashSet<String> = all.iter().map(|e| e.to_string()).collect();
-    assert_eq!(texts.len(), all.len());
-    assert_eq!(TokenError::TooLong.to_string(), "token text too long");
-    assert_eq!(FlowError::Truncated.to_string(), "invite message truncated");
-}

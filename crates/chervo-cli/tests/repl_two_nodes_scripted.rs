@@ -8,7 +8,8 @@
 //! папки, приём, сравнение содержимого, выход. Ввод скриптуется из теста построчно.
 //!
 //! Хранилище ключей ОС в тесте не используется, а продукт не имеет ни обхода, ни флага: каждый
-//! «процесс» это этот же исполняемый файл теста, запущенный заново с одним тестом `host_child`.
+//! «процесс» это этот же исполняемый файл теста, запущенный заново с одним тестом `host_child`
+//! (помечен `#[ignore]` и запускается родителем с `--ignored --exact`).
 //! Он открывает узел через `open_with_store_for_tests` (точка входа ядра за свойством
 //! `test-store`, которое включено только в dev-зависимостях) и отдаёт его настоящему циклу
 //! `chervo_cli::repl::run` со стандартным вводом. Продуктовый бинарный файл `chervo` этой
@@ -90,9 +91,12 @@ impl EpochStore for MemStore {
 
 // ---------- дочерний процесс ----------
 
-/// Без переменных окружения это пустой тест. С ними: узел с подставным хранилищем и настоящий
+/// Вспомогательный повторный запуск, не проверка: `#[ignore]`, чтобы `cargo test` не считал его
+/// пройденным тестом; родитель запускает его явно (`--ignored --exact host_child`). Без
+/// переменных окружения ничего не делает. С ними: узел с подставным хранилищем и настоящий
 /// цикл команд на стандартном вводе; по выходу процесс завершается.
 #[test]
+#[ignore = "re-exec helper, run by repl_two_nodes_scripted"]
 fn host_child() {
     let (Ok(data), Ok(port)) = (std::env::var(ENV_DATA), std::env::var(ENV_PORT)) else {
         return;
@@ -156,7 +160,13 @@ fn pump(r: impl std::io::Read + Send + 'static, tx: std::sync::mpsc::Sender<Stri
 impl Proc {
     fn start(tag: &'static str, data: &Path, port: u16) -> Self {
         let mut child = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "host_child", "--nocapture", "--test-threads=1"])
+            .args([
+                "--ignored",
+                "--exact",
+                "host_child",
+                "--nocapture",
+                "--test-threads=1",
+            ])
             .env(ENV_DATA, data)
             .env(ENV_PORT, port.to_string())
             .stdin(Stdio::piped())

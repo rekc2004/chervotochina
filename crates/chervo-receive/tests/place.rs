@@ -351,21 +351,6 @@ fn junction_detected_as_link() {
 }
 
 #[test]
-fn windows_symlink_test_skips_if_unprivileged() {
-    let tmp = Tmp::new("privs");
-    let target = tmp.path().join("t");
-    fs::create_dir(&target).expect("mkdir");
-    match common::link_dir(&target, &tmp.path().join("l")) {
-        Ok(kind) => println!("symlink privilege: directory links work here ({kind})"),
-        Err(why) => println!("symlink privilege: SKIPPED link tests, reason: {why}"),
-    }
-    match common::link_file(&target.join("nope"), &tmp.path().join("lf")) {
-        Ok(()) => println!("symlink privilege: file links work here"),
-        Err(why) => println!("symlink privilege: file link tests skip, reason: {why}"),
-    }
-}
-
-#[test]
 fn swap_dir_for_link_detected() {
     let env = Env::new("swap");
     let k = key(1);

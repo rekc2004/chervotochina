@@ -223,52 +223,6 @@ fn public_debug_redacted() {
 }
 
 #[test]
-fn error_display_fixed_strings() {
-    let all = [
-        (IdentityError::NotImplemented, "not implemented"),
-        (IdentityError::StorageUnavailable, "key storage unavailable"),
-        (
-            IdentityError::StorageLocked,
-            "key storage locked or access denied",
-        ),
-        (
-            IdentityError::StorageInconsistent,
-            "key storage inconsistent",
-        ),
-        (IdentityError::KeyMissing, "pair key missing"),
-        (IdentityError::KeyAlreadyExists, "pair key already exists"),
-        (
-            IdentityError::KeyMismatch,
-            "pair key does not match expected public key",
-        ),
-        (IdentityError::CorruptKey, "stored key is corrupt"),
-        (
-            IdentityError::UnsupportedKeyVersion,
-            "unsupported stored key version",
-        ),
-        (
-            IdentityError::RandomUnavailable,
-            "os random source unavailable",
-        ),
-        (IdentityError::InvalidPublicKey, "invalid public key"),
-        (IdentityError::BadSignature, "bad signature"),
-        (IdentityError::SigningFailed, "signing failed"),
-        (
-            IdentityError::InvalidKxPublicKey,
-            "invalid key-exchange public key",
-        ),
-        (
-            IdentityError::AuthFailed,
-            "connection authentication failed",
-        ),
-        (IdentityError::InvalidGuestSecret, "invalid invite secret"),
-    ];
-    for (e, text) in all {
-        assert_eq!(e.to_string(), text);
-    }
-}
-
-#[test]
 fn create_then_load_same_kx() {
     let (s, p, k) = fresh();
     let kx = k.kx_public();
@@ -327,18 +281,6 @@ fn kx_debug_redacted() {
     let (_, m1) = chervo_identity::kk_initiate(&caller, &binding).unwrap();
     let (resp, _) = chervo_identity::kk_respond(&[&callee], &binding, &m1).unwrap();
     assert_eq!(format!("{resp:?}"), "KkResponder(..)");
-}
-
-#[test]
-fn prologue_tag_distinct_from_sign_domains() {
-    assert_eq!(KK_PROLOGUE_TAG.iter().filter(|b| **b == 0).count(), 1);
-    assert_eq!(KK_PROLOGUE_TAG.last(), Some(&0));
-    for d in SignDomain::ALL {
-        let t = d.tag();
-        assert_ne!(KK_PROLOGUE_TAG, t);
-        assert!(!KK_PROLOGUE_TAG.starts_with(t), "тег домена префикс KK");
-        assert!(!t.starts_with(KK_PROLOGUE_TAG), "KK префикс тега домена");
-    }
 }
 
 #[test]

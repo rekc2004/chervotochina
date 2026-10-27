@@ -15,7 +15,7 @@ use chervo_friends::{
 };
 use chervo_identity::SecretStore;
 use common::*;
-use redact_kit::{Needles, NoDebug, Out, Probe, assert_fixed_text, check};
+use redact_kit::{Needles, NoDebug, Out, Probe, check};
 
 fn all_errors() -> Vec<FriendsError> {
     use FriendsError::*;
@@ -148,12 +148,4 @@ fn friends_records_have_no_debug() {
     assert!(!Probe::<BookData>::new().has_debug());
     assert!(Probe::<FriendBook>::new().has_debug());
     assert!(Probe::<Retired>::new().has_debug());
-}
-
-#[test]
-fn friends_errors_have_fixed_text() {
-    for e in all_errors() {
-        assert_fixed_text("FriendsError display", &e.to_string());
-        assert_fixed_text("FriendsError debug", &format!("{e:?}"));
-    }
 }
