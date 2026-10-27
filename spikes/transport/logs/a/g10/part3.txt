@@ -1,2 +1,0 @@
-EVENT auth_fail t=6 side=c conn=1 reason=peer_sig app_bytes_sent=0
-EVENT client_result t=6 closed err="peer_sig" app_bytes_received=0 app_bytes_sent=0

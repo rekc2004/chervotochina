@@ -1,7 +1,0 @@
-EVENT bound t=2 id=ff7d6bce967eb2f77a69f442c99540ab70f76d8a825c23bdb22973991263bb76
-EVENT bound t=3 id=05b4bcf4386cec7f69932f4dbf1087d9dc22613bc27ba79d807d731f4d522811
-EVENT incoming t=65 peer=10.77.1.2:37534 validated=0 action=accept
-EVENT hs_done t=67 peer=10.77.1.2:37534 conn=1
-EVENT ekm t=69 side=md conn=1 ekm=0d28fce93d1b142ff8bb39349e19036933150cbabb22f6907a1b43362722a9ad
-EVENT ekm t=69 side=mu conn=1 ekm=4e65566cdf46169133d791ce4f61f755856c3c70885f9be02ef427716e95cfe1
-EVENT mitm_end t=571 conn=1

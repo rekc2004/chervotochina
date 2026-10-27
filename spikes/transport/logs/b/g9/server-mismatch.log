@@ -1,4 +1,0 @@
-EVENT bound t=1 id=-
-EVENT incoming t=60 peer=10.77.1.2:56543 validated=0 action=accept
-EVENT server_spki_issued t=60 peer=10.77.1.2:56543 spki=302a300506032b65700321007bbcbbd59888bcb3c283528eb9e4ce9c9937b21cfba45840333798b81375af5d
-EVENT hs_fail t=62 peer=10.77.1.2:56543 conn=1 err="aborted by peer: the cryptographic handshake failed: error 51: invalid peer certificate: BadSignature"

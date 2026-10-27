@@ -1,1 +1,0 @@
-EVENT nat_probe t=2 mapping=EIM filtering=EIF ext=198.51.100.10:4433 ext_r1b=198.51.100.10:4433 ext_r2=198.51.100.10:4433 r1b_reply=1 r2_reply=1

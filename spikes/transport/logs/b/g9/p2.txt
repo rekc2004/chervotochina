@@ -1,6 +1,0 @@
-EVENT peer_identity t=60 none conn=1
-EVENT peer_identity t=155 none conn=2
-EVENT peer_identity t=250 none conn=3
-EVENT peer_identity t=1347 none conn=4
-EVENT peer_identity t=1650 none conn=5
-none(conn 1-3)=3 some=0

@@ -1,0 +1,61 @@
+# TEMPORARY (stage 18p). Delete together with spikes/gui-probe once DECISION 2.x is written.
+# No apt install on Linux on purpose: the gate checks that nothing has to be installed.
+# --render-check under xvfb is not run here (needs apt); only build and static checks.
+name: gui-probe
+on:
+  push:
+    paths:
+      - "spikes/gui-probe/**"
+      - ".github/workflows/gui-probe.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: spikes/gui-probe
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.99.1 --profile minimal
+      # V1: build, licences, bans, advisories
+      - run: cargo +1.99.1 build --release --locked
+      - run: cargo install --locked --version =0.20.2 cargo-deny
+      # the probe's own deny.toml: the project rules plus the owner-approved crate-scoped exceptions
+      - run: cargo deny --manifest-path Cargo.toml check
+      # Linux tree must not contain zbus / zvariant / accesskit_unix
+      - run: bash check-linux-tree.sh
+      # V2: no network or telemetry crates for the shipped targets (`--target all` also pulls
+      # wasm32-only deps such as tokio via wasm-bindgen-futures, which are never built)
+      - run: |
+          for t in x86_64-pc-windows-msvc aarch64-pc-windows-msvc x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin; do
+            cargo tree -e normal --target "$t" --prefix none >> tree.txt
+          done
+          if grep -E '^(reqwest|hyper|ureq|curl|h2|isahc|surf|sentry|opentelemetry|tokio) ' tree.txt; then echo "V2 FAIL"; exit 1; fi
+          echo "V2 PASS"
+      # V3: runtime libraries
+      - if: runner.os == 'Linux'
+        run: readelf -d target/release/gui-probe | grep NEEDED
+      - if: runner.os == 'macOS'
+        run: otool -L target/release/gui-probe
+      - if: runner.os == 'Windows'
+        run: objdump -p target/release/gui-probe.exe | grep "DLL Name" || dumpbin /dependents target/release/gui-probe.exe
+      # V9: size
+      - run: ls -l target/release/gui-probe*
+      # binaries for the owner's manual checks on clean VMs (V3-V7); macOS build is unsigned
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gui-probe-${{ runner.os }}-${{ github.sha }}
+          path: |
+            spikes/gui-probe/target/release/gui-probe
+            spikes/gui-probe/target/release/gui-probe.exe
+          if-no-files-found: error
+          retention-days: 30

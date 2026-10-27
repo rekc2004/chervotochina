@@ -25,6 +25,8 @@ chervo-transport-quinn = { path = "../crates/chervo-transport-quinn", features =
 chervo-update = { path = "../crates/chervo-update" }
 # Stage 19d: HTTP response parser of the update notice (feature `fuzzing`: only the parser, no network hook).
 chervo-update-check = { path = "../crates/chervo-update-check", features = ["fuzzing"] }
+# Stage 18a: the node settings parser (`chervo_core::fuzz_settings`, target `settings`).
+chervo-core = { path = "../crates/chervo-core", features = ["fuzzing"] }
 
 [workspace]
 members = ["."]
@@ -191,6 +193,14 @@ bench = false
 [[bin]]
 name = "update_http_response"
 path = "fuzz_targets/update_http_response.rs"
+test = false
+doc = false
+bench = false
+
+# Stage 18a: node settings file parser.
+[[bin]]
+name = "settings"
+path = "fuzz_targets/settings.rs"
 test = false
 doc = false
 bench = false

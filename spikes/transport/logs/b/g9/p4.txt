@@ -1,3 +1,0 @@
-EVENT bound t=0 id=-
-EVENT zrtt_first t=2 done
-EVENT zero_rtt t=303 refused why=no_0rtt_keys

@@ -136,8 +136,11 @@ async fn friend_admitted_under_strangers() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn friend_starved_documented() {
-    // Остаток T9: под потоком незнакомцев, исчерпавших бюджет, друг отвергается.
+#[ignore = "known defect: T9-friend-queue, see docs/TASK.md"]
+async fn friend_admitted_when_stranger_flood_drained_the_budget() {
+    // Желаемое поведение (остаток T9, `docs/THREAT_MODEL.md`): под потоком незнакомцев, исчерпавших
+    // бюджет ворот KK, друг всё равно допускается. Сейчас друг делит с ними одну очередь и
+    // отвергается, поэтому тест выключен; включить, когда дефект будет закрыт.
     let n = 10;
     let (callers, callees) = make_pairs(n);
     let friend_pid = callers[3].pair();
@@ -157,17 +160,10 @@ async fn friend_starved_documented() {
     // ведро пусто (10 незнакомцев по 10 кандидатов), пополнения нет
     let (r, _d) = timed_connect(&friend, &peer_addr(friend_pid, &callee)).await;
     println!(
-        "friend_starved_documented: friend result = {r:?}, kk_denied = {}",
+        "friend_admitted_when_stranger_flood_drained_the_budget: friend result = {r:?}, kk_denied = {}",
         callee.stats().kk_denied
     );
-    assert!(
-        matches!(
-            r,
-            Err(TransportError::AuthFailed) | Err(TransportError::TimedOut)
-        ),
-        "друг должен быть отвергнут: {r:?}"
-    );
-    assert!(callee.stats().kk_denied >= 1);
+    assert!(r.is_ok(), "друг должен быть допущен: {r:?}");
 }
 
 /// Замер времени соединения до готового, медиана из 20, на петле.

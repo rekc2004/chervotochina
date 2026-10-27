@@ -164,6 +164,7 @@ dependencies = [
  "chervo-update",
  "chervo-update-check",
  "ed25519-dalek",
+ "zeroize",
 ]
 
 [[package]]
@@ -186,13 +187,19 @@ version = "0.0.0"
 dependencies = [
  "chervo-addr",
  "chervo-connect",
+ "chervo-core",
  "chervo-friends",
  "chervo-identity",
  "chervo-receive",
+ "chervo-timesync",
  "chervo-token",
  "chervo-transfer",
  "chervo-transport",
+ "chervo-transport-quinn",
+ "chervo-upnp",
  "rustix",
+ "tokio",
+ "zeroize",
 ]
 
 [[package]]

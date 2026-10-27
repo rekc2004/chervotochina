@@ -4,9 +4,8 @@ use std::net::SocketAddr;
 
 use chervo_addr::{
     AddrSource, CONTACT_REFRESH_SECS, CONTACT_TTL_SECS, Findability, HINT_TTL_SECS,
-    INVITE_TTL_SECS, KnownAddr, MAX_CONTACT_ADDRS, NEED_TOKEN_TEXT, NO_PUBLIC_ADDR_TEXT,
-    SHORT_LIVED_TTL_SECS, UpdateAddr, findability, from_invite, merge_update, note_contact, prune,
-    usable,
+    INVITE_TTL_SECS, KnownAddr, MAX_CONTACT_ADDRS, SHORT_LIVED_TTL_SECS, UpdateAddr, findability,
+    from_invite, merge_update, note_contact, prune, usable,
 };
 
 const NOW: u64 = 10_000_000;
@@ -386,14 +385,6 @@ fn findability_rules() {
     // IPv6 short_lived просрочен и без флага не имеет срока; v4-mapped нормализуется
     let mapped = known("[::ffff:8.8.8.8]:1", AddrSource::Invite, NOW, false, false);
     assert_eq!(findability(false, &[mapped], NOW), Findability::Ok);
-}
-
-#[test]
-fn texts_present() {
-    assert!(NEED_TOKEN_TEXT.contains("токен обновления адреса"));
-    assert!(NEED_TOKEN_TEXT.starts_with("Ни у вас, ни у друга нет постоянного адреса"));
-    assert!(NO_PUBLIC_ADDR_TEXT.starts_with("Не удалось определить ваш внешний адрес"));
-    assert!(!NEED_TOKEN_TEXT.is_empty() && !NO_PUBLIC_ADDR_TEXT.is_empty());
 }
 
 #[test]

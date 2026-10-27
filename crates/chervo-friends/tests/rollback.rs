@@ -128,7 +128,7 @@ fn store_write_failure_applies_change_and_later_repairs() {
     ep.fail_write.store(true, Ordering::SeqCst);
     assert_eq!(
         book.block(&store, &a.pair).err(),
-        Some(FriendsError::KeyStorageUnavailable)
+        Some(FriendsError::SavedAnchorStale)
     );
     // файл уже сохранён: блокировка не потеряна, якорь отстаёт на 1
     assert_eq!(book.get(&a.pair).unwrap().state, FriendState::Blocked);

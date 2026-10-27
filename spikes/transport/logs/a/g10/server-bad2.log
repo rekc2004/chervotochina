@@ -1,7 +1,0 @@
-EVENT bound t=2 id=c945bf9cb1b303bb510a99bed1444bfda3a7351eff901bddfd536fa76026354e
-EVENT incoming t=63 peer=10.77.1.2:40354 validated=0 action=accept
-EVENT hs_done t=65 peer=10.77.1.2:40354 conn=1
-EVENT ekm t=65 side=s conn=1 ekm=e86a36373ed6f8c0129212e33c3887fa1ffe304457546d2a54d98a705d94a081
-EVENT peer_identity t=65 some conn=1
-EVENT auth_ok t=65 side=s conn=1
-EVENT conn_end t=66 conn=1

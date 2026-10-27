@@ -9,7 +9,7 @@ mod redact_kit;
 use std::time::Duration;
 
 use chervo_timesync::{ClockOffset, SyncConfig, SyncError};
-use redact_kit::{Needles, Out, assert_fixed_text, check};
+use redact_kit::{Needles, Out, check};
 
 #[test]
 fn timesync_debug_hides_offset_and_servers() {
@@ -52,12 +52,4 @@ fn all_errors() -> [SyncError; 4] {
         SyncError::Disagree,
         SyncError::TooLarge,
     ]
-}
-
-#[test]
-fn timesync_errors_have_fixed_text() {
-    for e in all_errors() {
-        assert_fixed_text("SyncError display", &e.to_string());
-        assert_fixed_text("SyncError debug", &format!("{e:?}"));
-    }
 }

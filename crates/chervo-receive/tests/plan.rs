@@ -264,8 +264,9 @@ fn plan_long_path_flag() {
 
 #[cfg(not(windows))]
 #[test]
-fn plan_long_path_flag() {
-    println!("plan_long_path_flag: skipped, long_path is computed on Windows only");
+fn plan_long_path_flag_is_off_outside_windows() {
+    // флаг длинного пути считается только на Windows (там его случай проверен выше); здесь он
+    // обязан остаться выключенным даже для очень длинного корня
     let files = offer(&["a/b/c.txt"]);
     let root = std::path::PathBuf::from(format!("/{}", "d".repeat(400)));
     let p = plan_offer_in(&files, &ReceiveLimits::default(), &root).expect("plan");

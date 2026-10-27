@@ -6,14 +6,15 @@
 # Функции стенда (do_teardown, veth, addr4, addr6, route6, do_setup, nft_router, nft_host, bg_start, bg_stop,
 # cap_start, cap_stop, gate_begin, gate_end, cnt, evl, evn, kv, net_fail, peer_zero, verdict) скопированы из
 # spikes/transport/run.sh@1528c43 без изменений, кроме пути к analyze_g1.sh ($ANALYZE вместо $ROOT/analyze_g1.sh).
-# spikes/** не правится: analyze_g1.sh и g12-observe вызываются как есть.
+# spikes/transport удалён из дерева (тег spike-transport-final): analyze_g1.sh и g12-observe берутся оттуда,
+# `git worktree add ПУТЬ spike-transport-final`, затем `SPIKE=ПУТЬ/spikes/transport` и `cargo build --release --locked` там.
 # Бинарники запускаются только внутри ns (env -i), cargo build только вне ns. Ключи стенда лежат вне репозитория
 # (CHV_STATE, по умолчанию /tmp/chervo-stage9-state, режим 0700, файлы 0600).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$ROOT/../.." && pwd)"
-SPIKE="$REPO/spikes/transport"
+SPIKE="${SPIKE:-$REPO/spikes/transport}"
 ANALYZE="$SPIKE/analyze_g1.sh"
 OBS="$SPIKE/target/spike-bin/g12-observe"
 STATE="${CHV_STATE:-/tmp/chervo-stage9-state}"
@@ -282,7 +283,7 @@ ensure_ready_knock() {
 
 ensure_ready() {
   [[ -x "$NETCHECK" ]] || do_build
-  [[ -x "$OBS" ]] || { log "нет $OBS: g12-observe собирается в spikes/transport (cargo build --release --locked)"; exit 3; }
+  [[ -x "$OBS" ]] || { log "нет $OBS: g12-observe собирается в $SPIKE (тег spike-transport-final: cargo build --release --locked)"; exit 3; }
   ip netns list | grep -q '^chv-r\b' || do_setup
   if [[ ! -f "$STATE/needles.txt" ]]; then
     mkdir -p "$STATE"; chmod 700 "$STATE"

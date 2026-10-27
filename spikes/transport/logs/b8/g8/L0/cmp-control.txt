@@ -1,1 +1,0 @@
-cmp_control_detects_changed_byte=1

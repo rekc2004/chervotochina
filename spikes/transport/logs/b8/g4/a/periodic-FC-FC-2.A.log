@@ -1,8 +1,0 @@
-EVENT punch_start t=0 epoch_ms=1792081301382 mode=periodic
-EVENT bound t=0 id=- local=0.0.0.0:4433
-EVENT punch_attempt t=0 to=198.51.100.30:4433 epoch_ms=1792081301383
-EVENT punch_attempt t=5006 to=198.51.100.30:4433 epoch_ms=1792081306389
-EVENT server_spki_issued t=7062 peer=198.51.100.30:4433 spki=302a300506032b657003210058e223ac0a9d68f8e1bceb0da4e577a7af1c3b2ac51b912e00b5d11b5dd0d7d3
-EVENT auth_ok t=7064 side=s peer=198.51.100.30:4433 dur_ms=1
-EVENT auth_ok t=8008 side=c to=198.51.100.30:4433 hs_ms=3001 auth_ms=0
-EVENT punch_ok t=8587 dir=both ms=7063 epoch_ms=1792081309969

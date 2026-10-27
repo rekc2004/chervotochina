@@ -1,9 +1,0 @@
-EVENT bound t=0 id=-
-EVENT attempt_start t=0 n=1
-EVENT hs_done t=2 peer=10.77.2.2:4433 conn=1
-EVENT ekm t=2 side=c conn=1 ekm=355b3fe7c401c3551aff6c4ad771c408e764da650b898aea7bc83dbeae570fce
-EVENT server_spki t=2 conn=1 spki=302a300506032b657003210011c536914f3ecbc9b9b29ed5266a6b7b14f0454aa581050d8bcee8edf9af2bce
-EVENT peer_identity t=2 some conn=1
-EVENT auth_ok t=2 side=c conn=1 dur_ms=2
-EVENT app_ok t=3 bytes=4096 echo_eq=1
-EVENT client_result t=3 ok err="" app_bytes_received=4096 app_bytes_sent=4096

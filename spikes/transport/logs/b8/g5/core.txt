@@ -1,1 +1,0 @@
-CORE=11.0.0 (замена: miniupnpd 2.3.4 отказал при 198.51.100.x: 'Reserved / private IP address', лог attempt1-core-198.51.100-refused.log)
