@@ -222,7 +222,7 @@ Report (≤ 25 lines): as above.
 
 ## 6. Threat model deltas (to THREAT_MODEL ред. 8, written by the architect after the 18a/18b reviews)
 - **New T18 "Local application state and UI"** (same-user scope like T10):
-  - (a) The settings file is plaintext. A same-user process can change the receive root, the approved routers or the port. Mitigation: strict parser, nothing secret in it. Residual: accepted, as T4 journals.
+  - (a) The settings file is plaintext. A same-user process can change the receive root, the approved routers or the port, and also the stored clock offset (up to ±7 days, applied at open without the over-5-minute confirmation) and the `shared_root_confirmed` flag (skips the `OutsideProfile` question); approved routers also start UPnP at open without a button press (security review 18a, L4). Mitigation: strict parser, nothing secret in it. Residual: accepted, as T4 journals.
   - (b) Instance lock: a same-user process can hold it and keep the app from starting (DoS, T10 scope). Another local user cannot (per-user dir).
   - (c) Clipboard: invite and address tokens copied to the clipboard are readable by same-user apps and may go to OS clipboard history or cloud sync. Mitigation: history exclusion where V5 shows it works, plus the IP warning. Residual otherwise.
   - (d) Accessibility tree: SAS digits and planned names are exposed to AT clients of the same user (T10).
