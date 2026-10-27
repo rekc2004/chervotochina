@@ -276,6 +276,11 @@ fn two_nodes_befriend_transfer_block_and_revoke() {
     assert_eq!(view.result, Some(TransferResult::Completed));
     assert!(view.dest_root.is_some());
     assert_eq!(view.total, offer.total);
+    // D1: после завершения счётчик получателя равен итогу, а не последнему сглаженному событию
+    assert_eq!(
+        view.done, view.total,
+        "счётчик получателя не дошёл до итога"
+    );
 
     // --- отказ от предложения
     write_file(&src.join("no.txt"), b"nobody wants this");

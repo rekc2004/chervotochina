@@ -380,6 +380,15 @@ fn finish_with<L: Links>(
         // писатель дописывает очередь (CANCEL, DONE) и закрывает поток
         a.stop.stop();
     }
+    if how == Finish::Completed {
+        // сглаживание по `progress_interval` могло оставить последнее `Progress` на середине;
+        // потребитель, у которого после `Completed` нет снимка (узел), берёт итог отсюда
+        s.emit(TransferEvent::Progress {
+            key: s.key,
+            done: s.total,
+            total: s.total,
+        });
+    }
     s.emit(match how {
         Finish::Completed => TransferEvent::Completed { key: s.key },
         Finish::Cancelled(by) => TransferEvent::Cancelled { key: s.key, by },
