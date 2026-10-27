@@ -1,5 +1,6 @@
 //! CLI Червоточины: `--version`, проверка выпусков (`verify-release`, `release-keys`).
 
+mod doctor;
 mod release;
 
 fn main() -> std::process::ExitCode {
@@ -21,6 +22,11 @@ fn main() -> std::process::ExitCode {
         Some("release-keys") => std::process::ExitCode::from(release::release_keys(
             &args[1..],
             chervo_update::KeySet::embedded(),
+            &mut std::io::stdout().lock(),
+            &mut std::io::stderr().lock(),
+        )),
+        Some("doctor") => std::process::ExitCode::from(doctor::doctor(
+            &args[1..],
             &mut std::io::stdout().lock(),
             &mut std::io::stderr().lock(),
         )),

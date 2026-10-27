@@ -31,6 +31,17 @@ if [ "$owned" != yes ]; then
   exit 1
 fi
 
+# Stage 19v: `chervo doctor` against the unlocked service says "available"; without a bus, "unavailable".
+cargo build -p chervo-cli --locked
+out="$(./target/debug/chervo doctor)"
+echo "doctor (unlocked): $out"
+[ "$out" = "хранилище ключей доступно" ]
+rc=0
+out="$(env -u DBUS_SESSION_BUS_ADDRESS ./target/debug/chervo doctor)" || rc=$?
+echo "doctor (no bus): rc=$rc $out"
+[ "$rc" -eq 1 ]
+case "$out" in "хранилище ключей недоступно"*) ;; *) exit 1 ;; esac
+
 # L1 and L2 first. L3 locks the default collection, so it gets its own run, last.
 cargo test -p chervo-identity --locked --lib -- --ignored --test-threads=1 \
   ss_live_roundtrip ss_live_attributes_exact

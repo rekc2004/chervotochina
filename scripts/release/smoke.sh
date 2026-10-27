@@ -8,7 +8,7 @@
 #   SKIP_KEYS  "true" if the owner keys are knowingly not embedded (trial run, no tag); else keys must be there
 #   REF_TYPE   github.ref_type ("tag" makes missing fixtures a failure); REF_NAME  github.ref_name
 # `chervo check-update` is deliberately not run (the release is a draft; no network from CI).
-# `chervo doctor` is added after stage 19v is merged (not before).
+# `chervo doctor` is read-only (never unlocks); its result depends on the runner, so only rc 0|1 and a known line are required.
 set -euo pipefail
 
 if [[ $# -ne 3 ]]; then
@@ -101,6 +101,13 @@ elif [[ "$ref_type" == "tag" ]]; then
 else
   summary "- NOT CHECKED: verify-release with a foreign signature (no fixture crates/chervo-update/tests/fixtures/chervo-release.txt.minisig)"
 fi
+
+# 5. doctor: read-only; a runner may have the key store available, locked or absent.
+run "$bin" doctor
+summary "- \`doctor\` rc=$RC: \`$OUT\`"
+if [[ ( $RC -eq 0 && "$OUT" == "хранилище ключей доступно" ) || ( $RC -eq 1 && ( "$OUT" == "хранилище заблокировано"* || "$OUT" == "хранилище ключей недоступно"* ) ) ]]; then
+  good "doctor: rc $RC and a known result line"
+else bad "doctor: expected rc 0 (available) or rc 1 (locked/unavailable) with a known line"; fi
 
 summary ""
 exit "$fail"
