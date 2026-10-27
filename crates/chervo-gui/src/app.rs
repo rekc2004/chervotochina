@@ -1,6 +1,7 @@
 //! Оболочка eframe: рисует экраны по состоянию модели, превращает намерения в команды
 //! фоновому потоку и забирает его ответы. Узла здесь нет: он живёт только в фоновом потоке.
 
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use eframe::egui;
@@ -19,7 +20,7 @@ pub static RENDER_CHECK_DONE: AtomicBool = AtomicBool::new(false);
 
 pub struct App {
     model: Model,
-    worker: Option<Worker>,
+    worker: Option<Rc<Worker>>,
     render_check: bool,
     /// Состояния для `--render-check`.
     fixtures: Vec<Model>,
@@ -27,7 +28,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(model: Model, worker: Option<Worker>, render_check: bool) -> Self {
+    pub fn new(model: Model, worker: Option<Rc<Worker>>, render_check: bool) -> Self {
         Self {
             model,
             worker,

@@ -23,23 +23,42 @@ const POLL: Duration = Duration::from_millis(100);
 pub struct Worker {
     commands: Sender<Command>,
     outcomes: Receiver<Outcome>,
+    /// Поток шлёт сюда один знак, когда выходит (для ограниченного ожидания в `finish`).
+    exited: Receiver<()>,
     _thread: JoinHandle<()>,
 }
+
+/// Сколько `main` ждёт фоновый поток после закрытия окна: срок мягкой остановки передач, потолок
+/// остановки узла (`deadline` + 11 с, SPEC 2.3 п.7) и запас.
+pub const JOIN_BOUND: Duration = Duration::from_secs(10 + 11 + 1);
 
 impl Worker {
     /// `wake` вызывается после каждого сообщения окну (запрос перерисовки).
     pub fn spawn(hardening: HardenReport, wake: impl Fn() + Send + Sync + 'static) -> Option<Self> {
         let (cmd_tx, commands) = channel::<Command>();
         let (out_tx, outcomes) = channel::<Outcome>();
+        let (exit_tx, exited) = channel::<()>();
         let thread = std::thread::Builder::new()
             .name("chervo-gui-worker".to_owned())
-            .spawn(move || run(hardening, commands, out_tx, std::sync::Arc::new(wake)))
+            .spawn(move || {
+                run(hardening, commands, out_tx, std::sync::Arc::new(wake));
+                let _ = exit_tx.send(());
+            })
             .ok()?;
         Some(Self {
             commands: cmd_tx,
             outcomes,
+            exited,
             _thread: thread,
         })
+    }
+
+    /// Последний шаг `main` на любом пути выхода: просит остановить узел (если уже остановлен,
+    /// просьба ничего не меняет) и ждёт выхода потока не дольше `JOIN_BOUND`. Так `release()`
+    /// проброса порта и снятие замка выполняются, даже если окно закрыли мимо нашего диалога.
+    pub fn finish(&self) -> bool {
+        self.send(Command::Shutdown);
+        self.exited.recv_timeout(JOIN_BOUND).is_ok()
     }
 
     pub fn send(&self, cmd: Command) {

@@ -10,6 +10,15 @@ use std::fs;
 
 const PATH_DEPS: [&str; 1] = ["chervo-core"];
 const EXTERNAL: [&str; 3] = ["eframe", "qrcode", "rfd"];
+/// Точный набор возможностей eframe в корне (DECISION 2.9): без `persistence` и прочего.
+const EFRAME_FEATURES: [&str; 6] = [
+    "clipboard",
+    "default_fonts",
+    "glow",
+    "wayland",
+    "wgpu",
+    "x11",
+];
 const NOT_LINUX: &str = "target.'cfg(not(target_os = \"linux\"))'.dependencies";
 
 /// Таблица манифеста: заголовок без скобок и пары `ключ = значение` (значение как в тексте).
@@ -28,6 +37,22 @@ fn tables(manifest: &str) -> Vec<(String, Vec<(String, String)>)> {
         }
     }
     out
+}
+
+/// Возможности из строки вида `{ ..., features = ["a", "b"] }`, по алфавиту.
+fn features_of(row: &str) -> Vec<String> {
+    let Some(at) = row.find("features = [") else {
+        return Vec::new();
+    };
+    let rest = &row[at + "features = [".len()..];
+    let list = rest.split(']').next().unwrap_or("");
+    let mut v: Vec<String> = list
+        .split(',')
+        .map(|x| x.trim().trim_matches('"').to_owned())
+        .filter(|x| !x.is_empty())
+        .collect();
+    v.sort();
+    v
 }
 
 /// Нарушения для манифеста крейта и корневого манифеста рабочего пространства.
@@ -53,6 +78,18 @@ fn violations(manifest: &str, root: &str, has_build_rs: bool) -> Vec<String> {
                     .unwrap_or("")
                     .trim_matches('"')
                     .to_owned();
+                // свои возможности в крейте: eframe только `accesskit` (не Linux), rfd только
+                // `xdg-portal` (Linux); всё остальное задано в корне
+                let own = features_of(v);
+                if key == "eframe" && !own.is_empty() && own != ["accesskit"] {
+                    bad.push(format!("eframe: лишние возможности {own:?} в [{table}]"));
+                }
+                if key == "rfd" && !own.is_empty() && own != ["xdg-portal"] {
+                    bad.push(format!("rfd: лишние возможности {own:?} в [{table}]"));
+                }
+                if key != "eframe" && key != "rfd" && !own.is_empty() {
+                    bad.push(format!("{key}: возможности {own:?} не предусмотрены"));
+                }
                 if v.contains("package") {
                     bad.push(format!("переименование пакета: {key}"));
                 }
@@ -91,6 +128,15 @@ fn violations(manifest: &str, root: &str, has_build_rs: bool) -> Vec<String> {
                 if !v.contains("default-features = false") {
                     bad.push(format!("{n}: нет default-features = false"));
                 }
+                if n == "eframe" && features_of(v) != EFRAME_FEATURES {
+                    bad.push(format!(
+                        "eframe: набор возможностей {:?}, нужен {EFRAME_FEATURES:?}",
+                        features_of(v)
+                    ));
+                }
+                if n != "eframe" && !features_of(v).is_empty() {
+                    bad.push(format!("{n}: возможности в корне не предусмотрены"));
+                }
             }
         }
     }
@@ -116,7 +162,7 @@ fn gui_manifest_has_only_core_and_framework_crates() {
 #[test]
 fn control_guard_can_fail() {
     let root = "[workspace.dependencies]\nchervo-core = { path = \"crates/chervo-core\", version = \"0.0.0\" }\n\
-                eframe = { version = \"=0.37.0\", default-features = false }\n\
+                eframe = { version = \"=0.37.0\", default-features = false, features = [\"clipboard\", \"default_fonts\", \"wgpu\", \"glow\", \"wayland\", \"x11\"] }\n\
                 rfd = { version = \"=0.17.2\", default-features = false }\n\
                 qrcode = { version = \"=0.14.1\", default-features = false }\n";
     let good = "[dependencies]\nchervo-core.workspace = true\neframe.workspace = true\nrfd.workspace = true\nqrcode.workspace = true\n\
@@ -159,6 +205,29 @@ fn control_guard_can_fail() {
         violations(&linux_ak, root, false)
             .iter()
             .any(|v| v.contains("accesskit"))
+    );
+    // eframe с хранением состояния
+    let persist = root.replace("\"x11\"", "\"x11\", \"persistence\"");
+    assert!(
+        violations(good, &persist, false)
+            .iter()
+            .any(|v| v.contains("набор возможностей"))
+    );
+    // лишняя возможность eframe в манифесте крейта
+    let extra = good.replace("[\"accesskit\"]", "[\"accesskit\", \"persistence\"]");
+    assert!(
+        violations(&extra, root, false)
+            .iter()
+            .any(|v| v.contains("лишние"))
+    );
+    // у rfd чужая возможность
+    let rfd_extra = format!(
+        "{good}[target.'cfg(target_os = \"linux\")'.dependencies]\nrfd = {{ workspace = true, features = [\"tokio\"] }}\n"
+    );
+    assert!(
+        violations(&rfd_extra, root, false)
+            .iter()
+            .any(|v| v.contains("rfd"))
     );
     // пропавшая зависимость
     let missing = "[dependencies]\nchervo-core.workspace = true\n";

@@ -6,7 +6,7 @@ use chervo_core::texts as core_texts;
 use chervo_core::{FriendStatus, PathKind};
 use eframe::egui;
 
-use crate::main_model::{Dialog, MainIntent};
+use crate::main_model::{Dialog, MAX_PASTE, MainIntent};
 use crate::model::{Intent, Model, Page};
 use crate::rows::FriendRow;
 use crate::screens::common::{copy_box, warn};
@@ -244,9 +244,9 @@ fn dialog(ui: &mut egui::Ui, model: &Model, d: &Dialog, out: &mut Vec<Intent>) {
             ui.heading(texts::PASTE_TOKEN_TITLE);
             ui.label(texts::LABEL_PASTE_HERE);
             let mut t = p.text.clone();
-            let edit = egui::TextEdit::multiline(&mut t)
+            let edit = egui::TextEdit::singleline(&mut t)
                 .desired_width(f32::INFINITY)
-                .desired_rows(4);
+                .char_limit(MAX_PASTE + 1);
             if ui.add_enabled(!p.busy, edit).changed() {
                 out.push(main(MainIntent::PasteTokenEdited(t)));
             }

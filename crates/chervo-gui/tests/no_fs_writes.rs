@@ -5,10 +5,12 @@
 
 mod common;
 
-const FORBIDDEN: [&str; 14] = [
+const FORBIDDEN: [&str; 16] = [
     "fs::write",
     "File::create",
     "File::create_new",
+    "File::options",
+    ".options()",
     "OpenOptions",
     "create_dir",
     "remove_file",
@@ -35,6 +37,10 @@ fn control_guard_can_fail() {
         "std::fs::write(p, b)",
         "let f = File::create(p);",
         "std::fs::OpenOptions::new()",
+        "let f = File::options().append(true).open(p);",
+        "let f = std::fs::File::options();",
+        "let o = path.metadata_options().options();",
+        "let u = \"https://x\"; let f = File::create(p);",
         "fs::create_dir_all(p)",
         "std::fs::remove_file(p)",
         "rfd::FileDialog::new().save_file()",

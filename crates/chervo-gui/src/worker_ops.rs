@@ -16,6 +16,9 @@ use crate::rows::{
     DiagRow, FileRow, FriendRow, Id, OfferRow, RetiredRow, RouterRow, SettingsRow, TransferRow,
 };
 
+/// Как долго держится построенное предложение (имена не меняются, место на диске обновляется).
+const OFFER_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Таблица «ссылка ядра <-> локальный номер».
 pub struct Table<T: Copy + Eq + Hash> {
     next: u32,
@@ -50,6 +53,30 @@ impl<T: Copy + Eq + Hash> Table<T> {
     }
 }
 
+impl Refs {
+    pub fn router_id(&mut self, c: &RouterCandidate) -> Id {
+        let i = match self.routers.iter().position(|r| r == c) {
+            Some(i) => i,
+            None => {
+                self.routers.push(c.clone());
+                self.routers.len() - 1
+            }
+        };
+        Id(u32::try_from(i).unwrap_or(u32::MAX))
+    }
+
+    /// Роутер по номеру, только если он и сейчас есть среди разрешённых. Иначе `None`:
+    /// действие по устаревшему номеру не выполняется.
+    pub fn approved_router(&self, node: &Node, id: Id) -> Option<RouterCandidate> {
+        let c = self.routers.get(id.0 as usize)?;
+        node.settings()
+            .routers
+            .iter()
+            .any(|r| &r.router == c)
+            .then(|| c.clone())
+    }
+}
+
 #[derive(Default)]
 pub struct Refs {
     pub friends: Table<FriendRef>,
@@ -57,6 +84,11 @@ pub struct Refs {
     pub invites: Table<InviteRef>,
     /// Роутер, найденный кнопкой «Найти роутер» и ожидающий ответа «да/нет».
     pub found_router: Option<RouterCandidate>,
+    /// Роутеры, которые окно видело: номер это место в этом списке, он только растёт, а сам
+    /// роутер при выполнении действия ищется по равенству в текущих настройках узла.
+    pub routers: Vec<RouterCandidate>,
+    /// Построенные предложения: номер передачи -> (когда построено, строка).
+    pub offers: HashMap<u32, (std::time::Instant, OfferRow)>,
     /// Поправка часов больше 5 минут, ждущая подтверждения.
     pub clock_proposal: Option<ClockProposal>,
 }
@@ -96,28 +128,41 @@ pub fn snapshot(node: &Node, refs: &mut Refs) -> Snapshot {
     for t in tviews {
         let id = refs.transfers.id(t.transfer);
         let friend = names.get(&t.friend).cloned().unwrap_or_default();
-        if t.side == Side::Receiver
-            && t.state == TransferState::AwaitingUser
-            && let Ok(o) = node.offer(t.transfer)
-        {
-            offers.push(OfferRow {
-                id,
-                friend: friend.clone(),
-                files: o
-                    .files
-                    .iter()
-                    .map(|f| FileRow {
-                        name: f.name.clone(),
-                        size: f.size,
-                        kind: f.kind,
-                        needs_question: f.needs_question,
-                    })
-                    .collect(),
-                total: o.total,
-                space: o.space,
-                needs_question: o.needs_question,
-                warnings: o.warnings.clone(),
-            });
+        if t.side == Side::Receiver && t.state == TransferState::AwaitingUser {
+            // план приёма (имена, типы) считается узлом дорого: берём из кэша, пока он свежий
+            // (место на диске при этом тоже обновляется не реже, чем раз в `OFFER_TTL`)
+            let cached = refs
+                .offers
+                .get(&id.0)
+                .filter(|(at, _)| at.elapsed() < OFFER_TTL)
+                .map(|(_, row)| row.clone());
+            let row = match cached {
+                Some(row) => Some(row),
+                None => node.offer(t.transfer).ok().map(|o| OfferRow {
+                    id,
+                    friend: String::new(),
+                    files: o
+                        .files
+                        .iter()
+                        .map(|f| FileRow {
+                            name: f.name.clone(),
+                            size: f.size,
+                            kind: f.kind,
+                            needs_question: f.needs_question,
+                        })
+                        .collect(),
+                    total: o.total,
+                    space: o.space,
+                    needs_question: o.needs_question,
+                    warnings: o.warnings.clone(),
+                }),
+            };
+            if let Some(mut row) = row {
+                row.friend = friend.clone();
+                refs.offers
+                    .insert(id.0, (std::time::Instant::now(), row.clone()));
+                offers.push(row);
+            }
         }
         transfers.push(TransferRow {
             id,
@@ -132,6 +177,8 @@ pub fn snapshot(node: &Node, refs: &mut Refs) -> Snapshot {
             dest_root: t.dest_root,
         });
     }
+    refs.offers
+        .retain(|k, _| offers.iter().any(|o: &OfferRow| o.id.0 == *k));
     let active_transfers = transfers.iter().filter(|t| t.is_active()).count();
     let diagnoses = diagnoses(node, refs, &friends);
     let retired = node
@@ -153,10 +200,10 @@ pub fn snapshot(node: &Node, refs: &mut Refs) -> Snapshot {
         routers: sv
             .routers
             .iter()
-            .enumerate()
-            .map(|(i, r)| RouterRow {
-                id: Id(u32::try_from(i).unwrap_or(u32::MAX)),
+            .map(|r| RouterRow {
+                id: refs.router_id(&r.router),
                 permanent_ok: r.permanent_ok,
+                needs_permanent: r.needs_permanent,
             })
             .collect(),
         clock_offset_ms: sv.clock_offset_ms,
@@ -408,11 +455,7 @@ pub fn exec(node: &Node, refs: &mut Refs, cmd: Command) -> Option<Outcome> {
         Command::UpnpAllow { router, permanent } => {
             let candidate = match router {
                 None => refs.found_router.clone(),
-                Some(i) => node
-                    .settings()
-                    .routers
-                    .get(i.0 as usize)
-                    .map(|r| r.router.clone()),
+                Some(i) => refs.approved_router(node, i),
             };
             let r = match candidate {
                 Some(c) => node.upnp_allow(&c, permanent),
@@ -424,11 +467,7 @@ pub fn exec(node: &Node, refs: &mut Refs, cmd: Command) -> Option<Outcome> {
             done(r)
         }
         Command::UpnpForget(i) => {
-            let candidate = node
-                .settings()
-                .routers
-                .get(i.0 as usize)
-                .map(|r| r.router.clone());
+            let candidate = refs.approved_router(node, i);
             done(match candidate {
                 Some(c) => node.upnp_forget(&c),
                 None => Err(unknown()),

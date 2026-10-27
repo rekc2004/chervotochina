@@ -4,6 +4,10 @@
 
 use std::path::PathBuf;
 
+use crate::redact::redacted_debug_struct;
+
+redacted_debug_struct!(PickedPath);
+
 use chervo_core::{
     FileKind, FriendStatus, KeyStoreKind, PathKind, PauseReason, Side, SpaceView, TransferResult,
     TransferState,
@@ -66,11 +70,13 @@ impl TransferRow {
     }
 }
 
-/// Разрешённый роутер в списке настроек. `id` это позиция в списке на момент снимка.
+/// Разрешённый роутер в списке настроек. `id` стабилен (не позиция в списке).
 #[derive(Clone)]
 pub struct RouterRow {
     pub id: Id,
     pub permanent_ok: bool,
+    /// Этот роутер потребовал бессрочную аренду и ждёт ответа пользователя.
+    pub needs_permanent: bool,
 }
 
 /// Снимок настроек для экрана 8.
@@ -108,7 +114,7 @@ pub struct DiagRow {
 }
 
 /// Выбранный для отправки путь с тем, что известно без обхода папки.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PickedPath {
     pub path: PathBuf,
     pub is_dir: bool,

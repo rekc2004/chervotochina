@@ -44,11 +44,13 @@ fn offer(ui: &mut egui::Ui, model: &Model, o: &OfferRow, out: &mut Vec<Intent>) 
     ui.group(|ui| {
         ui.strong(format!("{}: {}", texts::OFFER_FROM, o.friend));
         ui.label(texts::offer_summary(o.files.len(), o.total));
+        // строки рисуются только видимые: в предложении может быть до 10 000 файлов
+        let row_height = ui.text_style_height(&egui::TextStyle::Body);
         egui::ScrollArea::vertical()
             .id_salt(("offer-files", o.id.0))
             .max_height(180.0)
-            .show(ui, |ui| {
-                for f in &o.files {
+            .show_rows(ui, row_height, o.files.len(), |ui, range| {
+                for f in &o.files[range] {
                     let mark = if f.needs_question {
                         texts::MARK_RISKY
                     } else {

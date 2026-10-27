@@ -293,6 +293,9 @@ impl fmt::Debug for RouterCandidate {
 pub struct RouterView {
     pub router: RouterCandidate,
     pub permanent_ok: bool,
+    /// Роутер потребовал бессрочную аренду, а согласия ещё нет: вопрос `NEED_PERMANENT_TEXT`
+    /// относится именно к нему (только чтение, поведение узла не меняется).
+    pub needs_permanent: bool,
 }
 
 impl fmt::Debug for RouterView {

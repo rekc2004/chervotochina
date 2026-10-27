@@ -1,6 +1,6 @@
 //! Охрана «поток окна не вызывает узел» (этап 18б, SPEC 4.1): методы узла синхронные и могут
-//! блокироваться (до ~12 с), поэтому в `screens/` и `app.rs` нет ни `node.`, ни `Node::`, ни
-//! самого типа `Node`. Узел живёт только в `worker.rs`.
+//! блокироваться (до ~12 с), поэтому ни в одном файле `src/`, кроме `worker.rs` и `worker_ops.rs`
+//! (экраны, `app.rs`, модели, `main.rs`), нет ни `node.`, ни `Node::`, ни самого типа `Node`.
 
 mod common;
 
@@ -32,16 +32,19 @@ fn violations(text: &str) -> Vec<String> {
 fn ui_files() -> Vec<(String, String)> {
     common::src_files()
         .into_iter()
-        .filter(|(n, _)| n.starts_with("src/screens/") || n == "src/app.rs")
+        .filter(|(n, _)| n != "src/worker.rs" && n != "src/worker_ops.rs")
         .collect()
 }
 
 #[test]
 fn ui_files_do_not_call_the_node() {
     let files = ui_files();
-    // охрана видит экраны и app.rs (иначе она пуста)
+    // охрана видит экраны, app.rs, модели и main.rs (иначе она пуста), но не файлы потока
     assert!(files.iter().any(|(n, _)| n == "src/app.rs"));
     assert!(files.iter().any(|(n, _)| n == "src/screens/start.rs"));
+    assert!(files.iter().any(|(n, _)| n == "src/model.rs"));
+    assert!(files.iter().any(|(n, _)| n == "src/main.rs"));
+    assert!(!files.iter().any(|(n, _)| n.starts_with("src/worker")));
     let mut bad = Vec::new();
     for (name, text) in &files {
         for v in violations(text) {

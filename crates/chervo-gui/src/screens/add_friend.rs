@@ -3,7 +3,7 @@
 
 use eframe::egui::{self, FontId, RichText, Role, Sense, WidgetInfo};
 
-use crate::main_model::{AddFriend, AddStage, MainIntent, SasState, Tab};
+use crate::main_model::{AddFriend, AddStage, MAX_PASTE, MainIntent, SasState, Tab};
 use crate::model::{Intent, Model};
 use crate::qr::QrMatrix;
 use crate::screens::common::{copy_box, warn};
@@ -84,9 +84,11 @@ fn form(ui: &mut egui::Ui, a: &AddFriend, busy: bool, out: &mut Vec<Intent>) {
         Tab::Accept => {
             ui.label(texts::LABEL_PASTE_HERE);
             let mut paste = a.paste.clone();
-            let edit = egui::TextEdit::multiline(&mut paste)
+            // egui 0.37: `char_limit` действует только у однострочного поля. Предел на один
+            // символ больше 4096, чтобы слишком длинный текст был виден как «слишком длинный».
+            let edit = egui::TextEdit::singleline(&mut paste)
                 .desired_width(f32::INFINITY)
-                .desired_rows(5);
+                .char_limit(MAX_PASTE + 1);
             if ui.add_enabled(!busy, edit).changed() {
                 out.push(main(MainIntent::AddPasteEdited(paste)));
             }

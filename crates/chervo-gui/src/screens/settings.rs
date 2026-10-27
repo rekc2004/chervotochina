@@ -2,8 +2,8 @@
 //! проброс, роутеры (UPnP), часы, ключи, о программе. Сеть только по кнопкам «Найти роутер» и
 //! «Сверить часы».
 
+use chervo_core::KeyStoreKind;
 use chervo_core::texts as core_texts;
-use chervo_core::{KeyStoreKind, MapStatus};
 use eframe::egui;
 
 use crate::main_model::MainIntent;
@@ -188,13 +188,17 @@ fn upnp(ui: &mut egui::Ui, model: &Model, set: &SettingsRow, out: &mut Vec<Inten
         }
         UpnpUi::Idle => {}
     }
-    // бессрочная аренда: вопрос только когда роутер этого потребовал
-    if model.snapshot.mapping == Some(MapStatus::NeedPermanentConsent) {
+    // бессрочная аренда: один вопрос про тот роутер, который этого потребовал
+    if let Some((n, r)) = set
+        .routers
+        .iter()
+        .enumerate()
+        .find(|(_, r)| r.needs_permanent)
+    {
+        ui.strong(format!("{} {}", texts::SET_ROUTER_ITEM, n + 1));
         ui.label(core_texts::NEED_PERMANENT_TEXT);
-        for r in &set.routers {
-            if !r.permanent_ok && ui.button(texts::BTN_YES).clicked() {
-                out.push(s(S::UpnpPermanentYes(r.id)));
-            }
+        if ui.button(texts::BTN_YES).clicked() {
+            out.push(s(S::UpnpPermanentYes(r.id)));
         }
     }
     ui.strong(texts::SET_ROUTERS);

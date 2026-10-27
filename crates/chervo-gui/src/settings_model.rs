@@ -6,11 +6,14 @@
 
 use std::path::PathBuf;
 
-use chervo_core::{MapStatus, RootError};
+use chervo_core::RootError;
 
 use crate::main_model::cap_paste;
 use crate::model::{ClockResult, Command, FriendEventKind, Model, Outcome};
+use crate::redact::redacted_debug_enum;
 use crate::texts;
+
+redacted_debug_enum!(SettingsIntent);
 
 /// Правка папки приёма.
 #[derive(Default)]
@@ -60,7 +63,7 @@ pub struct SettingsUi {
     pub clock: ClockUi,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum SettingsIntent {
     RootEdited(String),
     RootOutsideChecked(bool),
@@ -217,14 +220,13 @@ impl Model {
                 Vec::new()
             }
             S::UpnpPermanentYes(id) => {
-                // вопрос о бессрочной аренде задаётся только когда роутер этого потребовал
-                let asked = self.snapshot.mapping == Some(MapStatus::NeedPermanentConsent);
-                let known = self
+                // вопрос о бессрочной аренде задаётся про тот роутер, который этого потребовал
+                let asked = self
                     .snapshot
                     .settings
                     .as_ref()
-                    .is_some_and(|s| s.routers.iter().any(|r| r.id == id));
-                if asked && known {
+                    .is_some_and(|s| s.routers.iter().any(|r| r.id == id && r.needs_permanent));
+                if asked {
                     vec![Command::UpnpAllow {
                         router: Some(id),
                         permanent: true,
@@ -344,7 +346,7 @@ mod tests {
     use crate::main_model::MainIntent;
     use crate::model::{Intent, Snapshot};
     use crate::rows::{Id, RouterRow, SettingsRow};
-    use chervo_core::{KeyStoreKind, NodeError, NodeEvent, NodeWarning};
+    use chervo_core::{KeyStoreKind, MapStatus, NodeError, NodeEvent, NodeWarning};
 
     fn model() -> Model {
         let (mut m, _) = Model::start();
@@ -367,6 +369,7 @@ mod tests {
                 .map(|i| RouterRow {
                     id: Id(i as u32),
                     permanent_ok: false,
+                    needs_permanent: false,
                 })
                 .collect(),
             clock_offset_ms: 0,
@@ -450,13 +453,19 @@ mod tests {
     fn permanent_lease_only_when_router_asked_for_it() {
         let mut m = model();
         let mut s = Snapshot {
-            settings: Some(settings_row(1)),
+            settings: Some(settings_row(2)),
             ..Snapshot::default()
         };
+        // общий статус "нужно согласие" без указания роутера согласия не открывает
+        s.mapping = Some(MapStatus::NeedPermanentConsent);
         m.on_outcome(Outcome::Snapshot(Box::new(s.clone())));
         assert!(ask(&mut m, SettingsIntent::UpnpPermanentYes(Id(0))).is_empty());
-        s.mapping = Some(MapStatus::NeedPermanentConsent);
+        // согласие только для того роутера, который его потребовал (второй: нет)
+        if let Some(set) = s.settings.as_mut() {
+            set.routers[0].needs_permanent = true;
+        }
         m.on_outcome(Outcome::Snapshot(Box::new(s)));
+        assert!(ask(&mut m, SettingsIntent::UpnpPermanentYes(Id(1))).is_empty());
         assert!(ask(&mut m, SettingsIntent::UpnpPermanentYes(Id(7))).is_empty());
         assert_eq!(
             ask(&mut m, SettingsIntent::UpnpPermanentYes(Id(0))),

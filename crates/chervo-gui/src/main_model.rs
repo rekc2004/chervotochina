@@ -11,9 +11,12 @@ use chervo_core::{FriendStatus, InviteOutcome};
 
 use crate::model::{Command, Model, Outcome, Page};
 use crate::qr::{self, QrMatrix};
+use crate::redact::redacted_debug_enum;
 use crate::rows::{Id, PickedPath};
 use crate::settings_model::SettingsIntent;
 use crate::texts;
+
+redacted_debug_enum!(MainIntent);
 
 /// Предел вставленного текста (приглашение, токен), байт: как в узле, чтобы отказывать раньше.
 pub const MAX_PASTE: usize = 4096;
@@ -39,7 +42,7 @@ pub enum Tab {
 }
 
 /// Намерения главного окна.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum MainIntent {
     // друзья
     RenameOpen(Id),
@@ -1154,6 +1157,58 @@ mod tests {
             vec![Command::Retry(Id(1))]
         );
         assert!(ask(&mut m, MainIntent::TransferRetry(Id(2))).is_empty());
+    }
+
+    #[test]
+    fn debug_output_does_not_contain_tokens_names_or_paths() {
+        let secret = "СЕКРЕТНЫЙ-ТОКЕН-12345";
+        let cmds = [
+            Command::AcceptInvite(secret.to_owned()),
+            Command::ApplyAddrToken(secret.to_owned()),
+            Command::Rename {
+                friend: Id(1),
+                name: secret.to_owned(),
+            },
+            Command::ConfirmSas {
+                invite: Id(1),
+                yes: true,
+                name: secret.to_owned(),
+            },
+            Command::Send {
+                friend: Id(1),
+                paths: vec![PathBuf::from(secret)],
+            },
+            Command::SetReceiveRoot {
+                root: PathBuf::from(secret),
+                confirm_shared: false,
+            },
+        ];
+        for c in &cmds {
+            assert!(!format!("{c:?}").contains(secret), "{c:?}");
+            assert!(!format!("{c:#?}").contains(secret));
+        }
+        let intents = [
+            Intent::Main(MainIntent::AddPasteEdited(secret.to_owned())),
+            Intent::Main(MainIntent::PasteTokenEdited(secret.to_owned())),
+            Intent::Main(MainIntent::SasNameEdited(secret.to_owned())),
+            Intent::Main(MainIntent::PathsAdded(vec![PickedPath {
+                path: PathBuf::from(secret),
+                is_dir: false,
+                size: 1,
+            }])),
+            Intent::FolderEdited(secret.to_owned()),
+            Intent::Main(MainIntent::Settings(SettingsIntent::RootEdited(
+                secret.to_owned(),
+            ))),
+        ];
+        for i in &intents {
+            assert!(!format!("{i:?}").contains(secret), "{i:?}");
+        }
+        // форма первого запуска тоже не печатает путь
+        let (mut m, _) = Model::start();
+        m.on_outcome(Outcome::OpenFailed(chervo_core::NodeError::FirstRun));
+        m.update(Intent::FolderEdited(secret.to_owned()));
+        assert!(!format!("{:?}", m.start).contains(secret));
     }
 
     #[test]

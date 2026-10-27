@@ -13,9 +13,13 @@ use std::path::PathBuf;
 use chervo_core::{InviteOutcome, MapStatus, NatView, NodeError, NodeEvent, RootError};
 
 use crate::main_model::{AddFriend, Dialog, MainIntent, OfferUi, SendUi};
+use crate::redact::{redacted_debug_enum, redacted_debug_struct};
 use crate::rows::{DiagRow, FriendRow, Id, OfferRow, RetiredRow, SettingsRow, TransferRow};
 use crate::settings_model::SettingsUi;
 use crate::texts;
+
+redacted_debug_enum!(Command, Intent);
+redacted_debug_struct!(FirstRun, Problem);
 
 /// Как открыть узел. `AcceptOlder` и `StartOver` бывают только после явного выбора пользователя.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,7 +30,7 @@ pub enum OpenMode {
 }
 
 /// Команды фоновому потоку (единственному владельцу узла). Выполняются по порядку.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Command {
     /// `port`: порт на этот запуск (после `PortInUse`); при успехе узел запоминает его в настройках.
     Open {
@@ -206,7 +210,7 @@ pub enum Page {
 }
 
 /// Что сделал пользователь (кнопки и поля).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Intent {
     FolderEdited(String),
     FolderPicked(PathBuf),
@@ -228,7 +232,7 @@ pub enum Intent {
 }
 
 /// Форма первого запуска (и смены папки приёма, если прежняя пропала).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct FirstRun {
     pub folder: String,
     /// Папка вне профиля: показано предупреждение и нужна отметка.
@@ -250,7 +254,7 @@ pub enum ProblemKind {
     Other(&'static str),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Problem {
     pub kind: ProblemKind,
     pub busy: bool,

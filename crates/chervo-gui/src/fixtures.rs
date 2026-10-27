@@ -158,10 +158,12 @@ fn open_model(page: Page) -> Model {
             RouterRow {
                 id: Id(0),
                 permanent_ok: false,
+                needs_permanent: false,
             },
             RouterRow {
                 id: Id(1),
                 permanent_ok: true,
+                needs_permanent: false,
             },
         ],
         clock_offset_ms: 1500,
@@ -395,6 +397,9 @@ pub fn all() -> Vec<Model> {
     m.settings_ui.min_free.error = Some(crate::texts::MIN_FREE_BAD);
     m.settings_ui.upnp = UpnpUi::Found;
     m.snapshot.mapping = Some(MapStatus::NeedPermanentConsent);
+    if let Some(set) = m.snapshot.settings.as_mut() {
+        set.routers[0].needs_permanent = true;
+    }
     m.settings_ui.clock = ClockUi::Proposal(700_000);
     v.push(m);
     let mut m = open_model(Page::Settings);

@@ -345,6 +345,9 @@ impl Node {
         } else {
             s.ntp_servers.clone()
         };
+        let waiting_router = lock(&self.core.mapper)
+            .as_ref()
+            .and_then(|m| m.router_needing_permanent());
         SettingsView {
             port: s.port,
             receive_root: path_for_display(&s.receive_root),
@@ -359,6 +362,7 @@ impl Node {
                 .map(|r| RouterView {
                     router: RouterCandidate(r.id.clone()),
                     permanent_ok: r.permanent_ok,
+                    needs_permanent: !r.permanent_ok && waiting_router.as_ref() == Some(&r.id),
                 })
                 .collect(),
             clock_offset_ms: s.clock_offset_ms,
