@@ -46,7 +46,8 @@ fn sources() -> Vec<(String, String)> {
                 .unwrap()
                 .to_string_lossy()
                 .replace('\\', "/");
-            (rel, fs::read_to_string(&p).unwrap())
+            // на Windows CI файлы приходят с CRLF, а проверки ниже ищут "\n    }\n"
+            (rel, fs::read_to_string(&p).unwrap().replace("\r\n", "\n"))
         })
         .collect()
 }
