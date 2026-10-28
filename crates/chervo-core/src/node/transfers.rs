@@ -316,6 +316,10 @@ impl Node {
         if port < settings::MIN_USER_PORT {
             return Err(NodeError::InvalidValue);
         }
+        // порт маяка занят поиском в локальной сети
+        if port == chervo_lan::LAN_PORT {
+            return Err(NodeError::PortInUse);
+        }
         self.update_settings(|s| {
             s.port = port;
             Ok(())
@@ -375,6 +379,7 @@ impl Node {
                 Some(true) => UpdateConsent::Enabled,
                 Some(false) => UpdateConsent::Disabled,
             },
+            lan_mode: s.lan_mode,
             restart_needed,
         }
     }

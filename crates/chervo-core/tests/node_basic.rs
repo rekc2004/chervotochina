@@ -449,3 +449,67 @@ fn auto_accept_needs_the_confirmation_value_and_persists() {
     assert!(!node.friends()[0].auto_accept);
     node.shutdown(Duration::from_secs(5));
 }
+
+// ---------------------------------------------------------------- этап 13в: поиск в локальной сети
+
+#[test]
+fn lan_default_is_listen_and_mode_persists() {
+    use chervo_core::LanMode;
+    let rig = Rig::new("lan_mode");
+    let (node, _ev) = rig.start();
+    // решение В1: по умолчанию «только слушать», служба создана
+    assert_eq!(node.settings().lan_mode, LanMode::Listen);
+    assert!(node.lan_status().is_some());
+    // выключили: настройка записана, служба остановлена, адресов нет
+    node.set_lan_mode(LanMode::Off).unwrap();
+    assert_eq!(node.settings().lan_mode, LanMode::Off);
+    // состояние обновляет поток службы: в пределах нескольких сотен миллисекунд
+    let end = std::time::Instant::now() + Duration::from_secs(3);
+    while node.lan_status() != Some(chervo_core::LanStatus::Off) && std::time::Instant::now() < end
+    {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(node.lan_status(), Some(chervo_core::LanStatus::Off));
+    assert!(node.lan_addrs().is_empty());
+    node.shutdown(Duration::from_secs(5));
+    // и после перезапуска остаётся выключенным: службы нет вовсе (ни потока, ни сокетов)
+    let (node, _ev) = rig.open().unwrap();
+    assert_eq!(node.settings().lan_mode, LanMode::Off);
+    assert_eq!(node.lan_status(), None);
+    assert!(node.lan_addrs().is_empty());
+    // включили снова: служба создаётся и подключается к движку
+    node.set_lan_mode(LanMode::Listen).unwrap();
+    assert_eq!(node.settings().lan_mode, LanMode::Listen);
+    assert!(node.lan_status().is_some());
+    node.shutdown(Duration::from_secs(5));
+    let (node, _ev) = rig.open().unwrap();
+    assert_eq!(node.settings().lan_mode, LanMode::Listen);
+    node.shutdown(Duration::from_secs(5));
+}
+
+#[test]
+fn lan_off_no_socket() {
+    use chervo_core::LanMode;
+    let rig = Rig::new("lan_off");
+    let (node, _ev) = rig.start();
+    node.set_lan_mode(LanMode::Off).unwrap();
+    node.shutdown(Duration::from_secs(5));
+    let (node, _ev) = rig.open().unwrap();
+    // режим «выключено» с самого запуска: служба не создана, значит нет ни потока, ни сокета
+    assert_eq!(node.lan_status(), None);
+    assert!(node.lan_addrs().is_empty());
+    node.shutdown(Duration::from_secs(5));
+}
+
+#[test]
+fn set_port_rejects_lan_port() {
+    let rig = Rig::new("lan_port");
+    let (node, _ev) = rig.start();
+    let before = node.settings().port;
+    assert_eq!(
+        node.set_port(chervo_lan::LAN_PORT),
+        Err(NodeError::PortInUse)
+    );
+    assert_eq!(node.settings().port, before, "порт не изменился");
+    node.shutdown(Duration::from_secs(5));
+}

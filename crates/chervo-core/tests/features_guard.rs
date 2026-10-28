@@ -13,7 +13,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const TEST_FEATURES: [&str; 2] = ["test-store", "fuzzing"];
+const TEST_FEATURES: [&str; 3] = ["test-store", "fuzzing", "test-net"];
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -94,6 +94,12 @@ fn guard_sees_every_bypass_form() {
         "[dependencies]\nx = { path = \"..\", features = [\"chervo-core/test-store\"] }\n",
         // CRLF
         "[dependencies]\r\nx = { features = ['fuzzing'] }\r\n",
+        // 13в: `test-net` (юникаст на петле вместо группы) тоже только для dev-зависимостей
+        "[dependencies]\nchervo-lan = { workspace = true, features = [\"test-net\"] }\n",
+        "[dependencies.chervo-lan]\nfeatures = ['test-net']\n",
+        "[features]\nconvenient = [\"chervo-lan/test-net\"]\n",
+        "[features]\ntest-net = [\"x\"]\n",
+        "[target.'cfg(unix)'.dependencies]\nx = { path = \"..\", features = [\"test-net\"] }\n",
     ];
     for (i, m) in bad.iter().enumerate() {
         assert!(!violations(m).is_empty(), "обход {i} не пойман: {m:?}");
@@ -101,6 +107,8 @@ fn guard_sees_every_bypass_form() {
     // разрешённое: dev-таблицы в любом виде, пустые определения, комментарии
     let ok = [
         "[dev-dependencies]\nx = { path = \".\", features = [\"fuzzing\", \"test-store\"] }\n",
+        "[dev-dependencies]\nchervo-lan = { workspace = true, features = [\"test-net\"] }\n",
+        "[features]\ntest-net = []\n",
         "[target.'cfg(unix)'.dev-dependencies]\nx = { path = \".\", features = ['fuzzing'] }\n",
         "[dev-dependencies.x]\nfeatures = [\"test-store\"]\n",
         "[dev-dependencies]\nx = { features = [\n  \"fuzzing\",\n] }\n",

@@ -33,7 +33,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use chervo_addr::PortMapper;
+use chervo_addr::{LanDiscovery, PortMapper};
 use chervo_connect::{
     AllowSet, Clock, ConnectConfig, Engine, EngineEvents, RouteProbe, SystemClock, SystemProbe,
 };
@@ -48,7 +48,7 @@ use chervo_transport_quinn::{QuinnConfig, QuinnTransport};
 use chervo_upnp::{UpnpMapper, UpnpSettings};
 use tokio::runtime::Handle;
 
-pub use chervo_addr::{MapStatus, NatView};
+pub use chervo_addr::{LanMode, LanStatus, MapStatus, NatView};
 pub use chervo_connect::{ConnectError, InviteOutcome, NoDirectPath, PathKind};
 pub use chervo_friends::{FriendsError, TrustConfirmation};
 pub use chervo_receive::{ReceiveLimits, RootError};
@@ -105,6 +105,8 @@ impl std::fmt::Debug for NodeConfig {
 pub(crate) const MAX_INPUT_BYTES: usize = 4096;
 /// Предел ожидания снятия проброса при выходе.
 const RELEASE_BOUND: Duration = Duration::from_secs(8);
+/// Предел ожидания остановки потока поиска в локальной сети при выходе.
+const LAN_STOP_BOUND: Duration = Duration::from_secs(1);
 /// Срок остановки передач при `Drop` без `shutdown`.
 const DROP_DEADLINE: Duration = Duration::from_secs(5);
 
@@ -167,8 +169,9 @@ fn pick_port() -> u16 {
     random_port()
 }
 
-/// Настройки движка соединений из настроек узла. Здесь же (и только здесь) позже подключается
-/// параметр поиска в локальной сети из этапа 13в.
+/// Настройки движка соединений из настроек узла. Поиск в локальной сети настройками движка не
+/// управляется: режим живёт в службе `LanBeacon` (как список роутеров в `UpnpSettings`), у
+/// движка только срок записи находки `lan_seen_ttl` (по умолчанию).
 fn connect_config(s: &Settings) -> ConnectConfig {
     ConnectConfig {
         manual_forward: s.manual_forward,
@@ -313,6 +316,12 @@ impl Node {
         // и при просроченном ожидании движок и транспорт останавливаются (оба вызова синхронные)
         self.core.engine.shutdown();
         self.core.transport.shutdown();
+        // поток поиска в локальной сети: сигнал уже подан движком, ждём недолго
+        let lan = lock(&self.core.lan).take();
+        if let Some(b) = lan {
+            b.shutdown();
+            let _ = b.wait_stopped(LAN_STOP_BOUND);
+        }
         // проброс снимается явно: движок сам `release` при выходе не вызывает
         let mapper = lock(&self.core.mapper).take();
         if let Some(m) = mapper {
@@ -481,6 +490,13 @@ fn build_core(cfg: &NodeConfig, p: Parts) -> Result<Built, NodeError> {
         Some(m)
     };
 
+    // поиск друзей в локальной сети: служба создаётся, только если режим не «выключено»
+    let lan = if st.lan_mode == LanMode::Off {
+        None
+    } else {
+        Some(network::new_beacon(st.lan_mode, &clock, &engine)?)
+    };
+
     let inbox = engine
         .stream_inbox(&[STREAM_TRANSFER_CTL, STREAM_TRANSFER_DATA])
         .map_err(NodeError::from)?;
@@ -538,6 +554,7 @@ fn build_core(cfg: &NodeConfig, p: Parts) -> Result<Built, NodeError> {
         live,
         reg: Mutex::new(Registry::default()),
         mapper: Mutex::new(mapper),
+        lan: Mutex::new(lan),
     });
     Ok((core, events, tevents, warnings))
 }

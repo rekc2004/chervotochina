@@ -99,6 +99,7 @@ fn workspace_layout() {
         "chervo-friends",
         "chervo-connect",
         "chervo-upnp",
+        "chervo-lan",
         "chervo-transfer",
         "chervo-receive",
         "chervo-core",

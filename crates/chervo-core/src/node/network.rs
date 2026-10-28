@@ -4,17 +4,33 @@
 
 use std::sync::Arc;
 
-use chervo_addr::{MapStatus, NatView, PortMapper};
-use chervo_connect::RouteProbe;
+use std::net::Ipv4Addr;
+
+use chervo_addr::{LanDiscovery, LanMode, LanStatus, MapStatus, NatView, PortMapper};
+use chervo_connect::{Clock, RouteProbe, SystemClock};
+use chervo_lan::LanBeacon;
 use chervo_timesync::{ClockOffset, SyncConfig, SyncError};
 use chervo_upnp::{AllowedRouter, UpnpError, UpnpMapper, UpnpSettings};
 
 use super::Node;
-use super::core::{diagnosis_view, lock};
+use super::core::{Eng, diagnosis_view, lock};
 use super::error::NodeError;
 use super::profile;
 use super::settings::{self, MAX_CLOCK_OFFSET_MS};
 use super::views::{ClockProposal, ClockSync, DiagnosisView, FriendRef, RouterCandidate};
+
+/// Служба поиска друзей: время берётся у поправленных часов узла; подключается к движку сразу.
+pub(crate) fn new_beacon(
+    mode: LanMode,
+    clock: &Arc<SystemClock>,
+    engine: &Arc<Eng>,
+) -> Result<Arc<LanBeacon>, NodeError> {
+    let c = clock.clone();
+    let beacon = Arc::new(LanBeacon::new(mode, Arc::new(move || c.now_unix())));
+    let dynamic: Arc<dyn LanDiscovery> = beacon.clone();
+    engine.attach_lan(dynamic).map_err(NodeError::from)?;
+    Ok(beacon)
+}
 
 /// Поправка больше этого значения (5 минут) применяется только после подтверждения человека
 /// (SECURITY_REVIEW разд. 8, T15).
@@ -39,6 +55,46 @@ impl Node {
     /// Кнопка «обновить проброс»: повторить опрос роутера сейчас.
     pub fn refresh_mapping(&self) {
         self.core.engine.refresh_mapping();
+    }
+
+    /// Состояние поиска друзей в локальной сети; `None`, пока служба не создана (режим
+    /// «выключено» с самого начала).
+    pub fn lan_status(&self) -> Option<LanStatus> {
+        self.core.engine.lan_status()
+    }
+
+    /// Адреса, на которых идёт поиск друзей в локальной сети (до 4); пусто, если служба не
+    /// создана, выключена или частных интерфейсов нет.
+    pub fn lan_addrs(&self) -> Vec<Ipv4Addr> {
+        lock(&self.core.lan)
+            .as_ref()
+            .map_or_else(Vec::new, |b| b.addrs())
+    }
+
+    /// Выбор режима поиска друзей в локальной сети. Сначала запись в настройки, потом служба:
+    /// при сбое записи ничего не меняется. «Сообщать о себе» включает рассылку в сеть, поэтому
+    /// только по явному выбору человека (оболочка вызывает метод из обработчика выбора).
+    pub fn set_lan_mode(&self, mode: LanMode) -> Result<(), NodeError> {
+        self.update_settings(|s| {
+            s.lan_mode = mode;
+            Ok(())
+        })?;
+        self.sync_lan()
+    }
+
+    /// Привести службу поиска в соответствие с режимом в настройках.
+    fn sync_lan(&self) -> Result<(), NodeError> {
+        let mode = lock(&self.core.settings).lan_mode;
+        let _g = self.enter();
+        let mut slot = lock(&self.core.lan);
+        match slot.as_ref() {
+            Some(b) => b.set_mode(mode),
+            None if mode != LanMode::Off => {
+                *slot = Some(new_beacon(mode, &self.core.clock, &self.core.engine)?);
+            }
+            None => {}
+        }
+        Ok(())
     }
 
     /// Кнопка «Найти роутер». Берёт собственный IPv4 основного маршрута у пробы маршрута (она

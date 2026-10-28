@@ -18,6 +18,9 @@ chervo-receive.workspace = true
 # подключаются только по действию пользователя. Новых внешних пакетов нет.
 chervo-transport-quinn.workspace = true
 chervo-upnp.workspace = true
+# Этап 13в: поиск друзей в локальной сети (свой маяк), по умолчанию «только слушать»; без новых
+# пакетов (`socket2` уже у chervo-upnp).
+chervo-lan.workspace = true
 chervo-timesync.workspace = true
 # Этап 19г-1: офлайн-проверка выпусков и единственный вход в сеть для проверки новых версий
 # (`update.rs`). Без `features` (у `chervo-update-check` есть `fuzzing`). Новых пакетов нет.

@@ -17,6 +17,10 @@ pub use chervo_connect::{
     UNKNOWN_TEXT,
 };
 pub use chervo_friends::KEY_LOST_TEXT;
+pub use chervo_lan::{
+    ADDRS_PREFIX_TEXT, MODE_ANNOUNCE_TEXT, MODE_LISTEN_TEXT, MODE_OFF_TEXT, VPN_HINT_TEXT,
+    mode_text as lan_mode_text, status_text as lan_status_text,
+};
 pub use chervo_receive::{
     ACTIVE_DOC_TEXT, ASK_FILE_TEXT, CHOOSE_OTHER_FOLDER_TEXT, DECEPTIVE_TEXT, DISK_IMAGE_TEXT,
     EXECUTABLE_TEXT, HOSTILE_DECLINED_TEXT, LONG_PATH_TEXT, NAME_CHANGED_TEXT, SHARED_ROOT_TEXT,

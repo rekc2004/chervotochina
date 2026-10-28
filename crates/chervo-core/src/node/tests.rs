@@ -102,6 +102,7 @@ fn full_sample() -> Settings {
     s.update_consent = Some(true);
     s.update_checked_at = 1_700_000_500;
     s.ntp_servers = vec!["ntp.example.org".to_owned(), "10.0.0.1".to_owned()];
+    s.lan_mode = chervo_addr::LanMode::Announce;
     s
 }
 
@@ -125,6 +126,22 @@ fn settings_roundtrip() {
     let d = parse(base().as_bytes()).unwrap();
     assert_eq!((d.min_free_percent, d.invite_ttl_secs), (10, 900));
     assert!(d.routers.is_empty() && d.ntp_servers.is_empty() && !d.shared_root_confirmed);
+    // поиск в локальной сети: без строки «только слушать» (решение В1), и все три значения
+    // записываются и читаются обратно
+    assert_eq!(d.lan_mode, chervo_addr::LanMode::Listen);
+    for (text, mode) in [
+        ("off", chervo_addr::LanMode::Off),
+        ("listen", chervo_addr::LanMode::Listen),
+        ("announce", chervo_addr::LanMode::Announce),
+    ] {
+        let s = parse(format!("{}lan={text}\n", base()).as_bytes()).unwrap();
+        assert_eq!(s.lan_mode, mode);
+        let mut t = Settings::new(49152, abs(&["recv"]), false);
+        t.lan_mode = mode;
+        let out = serialize(&t).unwrap();
+        assert!(out.contains(&format!("lan={text}\n")), "{out}");
+        assert_eq!(parse(out.as_bytes()).unwrap().lan_mode, mode);
+    }
     // граница: строка ровно 4096 байт проходит
     let prefix = format!("receive_root={}", abs_text(&["a"]));
     let pad = 4096 - prefix.len();
@@ -226,6 +243,20 @@ fn settings_hostile_table() {
             format!("{ok}invite_ttl_secs=100\ninvite_ttl_secs=100\n").into_bytes(),
         ),
         ("unknown key", format!("{ok}color=red\n").into_bytes()),
+        ("lan on", format!("{ok}lan=on\n").into_bytes()),
+        ("lan empty", format!("{ok}lan=\n").into_bytes()),
+        ("lan upper case", format!("{ok}lan=ANNOUNCE\n").into_bytes()),
+        ("lan trailing space", format!("{ok}lan=off \n").into_bytes()),
+        ("lan number", format!("{ok}lan=1\n").into_bytes()),
+        (
+            "duplicate lan",
+            format!("{ok}lan=off\nlan=off\n").into_bytes(),
+        ),
+        (
+            "duplicate lan other value",
+            format!("{ok}lan=listen\nlan=announce\n").into_bytes(),
+        ),
+        ("lan key case", format!("{ok}LAN=off\n").into_bytes()),
         ("key without =", format!("{ok}port\n").into_bytes()),
         ("empty key", format!("{ok}=1\n").into_bytes()),
         ("key case", format!("{ok}Min_Free_Percent=5\n").into_bytes()),
@@ -1093,6 +1124,9 @@ fn events_debug_redacted() {
         },
         NodeEvent::Warning(NodeWarning::AnchorNotUpdated),
         NodeEvent::OwnAddressChanged,
+        NodeEvent::LanStatusChanged {
+            status: chervo_addr::LanStatus::Announcing,
+        },
         NodeEvent::Internal,
         NodeEvent::Lagged,
         NodeEvent::Stopped,

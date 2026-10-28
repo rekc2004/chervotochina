@@ -703,6 +703,7 @@ dependencies = [
  "chervo-core",
  "chervo-friends",
  "chervo-identity",
+ "chervo-lan",
  "chervo-receive",
  "chervo-timesync",
  "chervo-token",

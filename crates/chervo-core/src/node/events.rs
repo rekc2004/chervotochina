@@ -10,7 +10,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TryRecvError, sync
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use chervo_addr::MapStatus;
+use chervo_addr::{LanStatus, MapStatus};
 use chervo_connect::{InviteOutcome, PathKind};
 
 use super::views::{
@@ -53,6 +53,10 @@ pub enum NodeEvent {
     MappingChanged {
         status: MapStatus,
     },
+    /// Состояние поиска друзей в локальной сети изменилось (`Node::lan_status`).
+    LanStatusChanged {
+        status: LanStatus,
+    },
     OfferIncoming {
         transfer: TransferRef,
     },
@@ -86,6 +90,7 @@ impl NodeEvent {
             Self::Unreachable { .. } => "Unreachable",
             Self::OwnAddressChanged => "OwnAddressChanged",
             Self::MappingChanged { .. } => "MappingChanged",
+            Self::LanStatusChanged { .. } => "LanStatusChanged",
             Self::OfferIncoming { .. } => "OfferIncoming",
             Self::OfferAutoAccepted { .. } => "OfferAutoAccepted",
             Self::TransferChanged { .. } => "TransferChanged",
