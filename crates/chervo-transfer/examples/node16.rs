@@ -862,6 +862,11 @@ async fn main() -> ExitCode {
                         engine.nat_view(),
                         engine.mapping_status().map_or_else(|| "none".to_owned(), |m| format!("{m:?}"))
                     );
+                    // поиск в локальной сети (13в): состояние службы и число интерфейсов поиска
+                    if let Some(b) = &lan {
+                        let st = engine.lan_status().map_or_else(|| "none".to_owned(), |s| format!("{s:?}"));
+                        line.push_str(&format!(" lan={st} lan_addrs={}", b.addrs().len()));
+                    }
                     for (pair, addrs) in active_friends(&engine) {
                         let list: Vec<String> = addrs.iter().map(ToString::to_string).collect();
                         line.push_str(&format!(" friend:{}=[{}]", labels.label(&pair), list.join(",")));
