@@ -1,18 +1,25 @@
 //! Формат датаграммы маяка (430 байт, фиксированная длина) и её разбор. Чистый код без сокетов.
 //!
 //! `ver(1) = 0x01 || reserved(1) = 0x00 || nonce(12) || слот * 16`, слот = 26 байт
-//! (`chervo_identity::LanKeys::seal`). Неиспользованные слоты: 26 случайных байт. Порядок слотов
+//! (`chervo_identity::LanKeys::seal`). Пустой слот устроен как настоящий: 8 байт метки и 18 байт,
+//! случайных в каждой датаграмме (у настоящего это шифротекст и тег, меняющиеся с nonce). Метка
+//! пустого слота постоянна внутри окна (`lan_pad_id`, ключ `R` из памяти службы), как и метки
+//! настоящих: иначе сравнение двух датаграмм серии выдало бы число друзей. Порядок слотов
 //! перемешан в каждой датаграмме. Всё, что приходит из сети, считается враждебным: порядок
 //! проверок `parse`: длина, заголовок, правила источника, слоты (поиск метки, AEAD только при
 //! попадании).
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::time::Instant;
 
 use chervo_addr::{AddrClass, LanSighting, classify};
-use chervo_identity::{LAN_HDR, LAN_NONCE_LEN, LAN_SLOT_LEN, LanKeys, PairId};
+use chervo_identity::{
+    LAN_HDR, LAN_ID_LEN, LAN_NONCE_LEN, LAN_SLOT_LEN, LanKeys, PairId, lan_pad_id,
+};
 
 use crate::error::LanError;
 use crate::limits::{DGRAM_LEN, MAX_DGRAMS_PER_ROUND, SLOTS};
+use crate::rate::{RxLimiter, RxVerdict};
 use crate::table::IdTable;
 
 /// Правило источника. В продукте принимаются только частные адреса; в тестах на петле можно
@@ -51,13 +58,15 @@ fn shuffle(slots: &mut [[u8; LAN_SLOT_LEN]]) -> Result<(), LanError> {
 
 /// Раунд маяка: датаграммы для пар `peers` с адресом отправителя `src` и портом `port`.
 /// Не больше `SLOTS * MAX_DGRAMS_PER_ROUND` пар за раунд; если пар больше, пары идут по кругу
-/// со сдвигом по `round`. Сбой ГСЧ даёт ошибку: ничего не отправляется.
+/// со сдвигом по `round`. `pad_key` это ключ `R` меток пустых слотов. Сбой ГСЧ даёт ошибку:
+/// ничего не отправляется.
 pub(crate) fn build(
     peers: &[(PairId, &LanKeys)],
     window: u64,
     src: Ipv4Addr,
     port: u16,
     round: u64,
+    pad_key: &[u8; 32],
 ) -> Result<Vec<[u8; DGRAM_LEN]>, LanError> {
     if port == 0 {
         return Err(LanError::Crypto);
@@ -94,10 +103,17 @@ pub(crate) fn build(
                     .map_err(|_| LanError::Crypto)?,
             );
         }
+        let mut pad_index = 0u8;
         while slots.len() < SLOTS {
+            // метка постоянна в окне, остальное случайно в каждой датаграмме
             let mut pad = [0u8; LAN_SLOT_LEN];
-            random(&mut pad)?;
+            random(pad.get_mut(LAN_ID_LEN..).unwrap_or_default())?;
+            let id = lan_pad_id(pad_key, window, pad_index).map_err(|_| LanError::Crypto)?;
+            for (d, s) in pad.iter_mut().zip(id.iter()) {
+                *d = *s;
+            }
             slots.push(pad);
+            pad_index = pad_index.saturating_add(1);
         }
         shuffle(&mut slots)?;
         let mut d = [0u8; DGRAM_LEN];
@@ -131,6 +147,19 @@ fn src_ip(src: SocketAddr, own: &[Ipv4Addr], policy: SrcPolicy) -> Option<Ipv4Ad
         AddrClass::Loopback if policy.allow_loopback => Some(ip),
         _ => None,
     }
+}
+
+/// Допуск датаграммы до разбора: правила источника (O(1), без разбора байт) раньше общей корзины
+/// приёма. Поток с публичных адресов, из CGNAT и по IPv6 корзину не расходует и приём из
+/// локальной сети не вытесняет (решение дирижёра, ревью безопасности 13в).
+pub(crate) fn admit(
+    limiter: &mut RxLimiter,
+    now: Instant,
+    src: SocketAddr,
+    own: &[Ipv4Addr],
+    policy: SrcPolicy,
+) -> bool {
+    src_ip(src, own, policy).is_some() && limiter.check(now, src) == RxVerdict::Pass
 }
 
 /// Разбор датаграммы. Находки: не больше одной на пару.

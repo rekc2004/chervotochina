@@ -7,9 +7,10 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 
 use chervo_identity::{LAN_HDR, PairId};
 
+use super::build;
 use super::{OWN, PORT, SRC, W, fixture, sock};
 use crate::limits::DGRAM_LEN;
-use crate::wire::{SrcPolicy, build, parse};
+use crate::wire::{SrcPolicy, parse};
 
 struct XorShift(u64);
 

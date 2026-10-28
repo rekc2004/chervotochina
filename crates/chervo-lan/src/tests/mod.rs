@@ -26,6 +26,19 @@ use crate::table::IdTable;
 use crate::testkit::duo;
 
 pub const W: u64 = 56_789_012;
+/// Ключ `R` меток пустых слотов в тестах.
+pub const PAD_KEY: [u8; 32] = [0x5A; 32];
+
+/// `wire::build` с ключом `PAD_KEY`.
+pub fn build(
+    peers: &[(PairId, &LanKeys)],
+    window: u64,
+    src: Ipv4Addr,
+    port: u16,
+    round: u64,
+) -> Result<Vec<[u8; crate::limits::DGRAM_LEN]>, crate::error::LanError> {
+    crate::wire::build(peers, window, src, port, round, &PAD_KEY)
+}
 pub const OWN: Ipv4Addr = Ipv4Addr::new(192, 168, 50, 1);
 pub const SRC: Ipv4Addr = Ipv4Addr::new(192, 168, 50, 7);
 pub const PORT: u16 = 45_000;

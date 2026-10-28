@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use chervo_addr::{LanDiscovery, LanLocal, LanMode, LanSighting, LanStatus, route_source_for};
 use chervo_identity::{KxPeer, LAN_WINDOW_SECS, LanKeys, PairId};
+use zeroize::Zeroizing;
 
 use crate::ifaces::select;
 use crate::limits::{
@@ -23,9 +24,9 @@ use crate::limits::{
     RECV_BUF, SEND_BUDGET_COUNT, SEND_BUDGET_WINDOW, SWEEP_INTERVAL,
 };
 use crate::net::{OpenError, Recv, Route, Sockets};
-use crate::rate::{RxLimiter, RxVerdict};
+use crate::rate::RxLimiter;
 use crate::table::IdTable;
-use crate::wire::{SrcPolicy, build, parse};
+use crate::wire::{SrcPolicy, admit, build, parse};
 
 /// Тестовая сеть на петле: юникаст вместо группы. Только под `test` и `test-net`.
 #[cfg(any(test, feature = "test-net"))]
@@ -400,6 +401,10 @@ struct Worker<'a> {
     sh: &'a Shared,
     table: IdTable,
     limiter: RxLimiter,
+    /// Ключ `R` меток пустых слотов: случаен, создаётся при запуске и при каждом открытии сокетов
+    /// (смена набора интерфейсов), в памяти, на диск не пишется. `None`: ГСЧ недоступен, маяк не
+    /// рассылается (без ключа метки пустых слотов были бы предсказуемы).
+    pad_key: Option<Zeroizing<[u8; 32]>>,
     net: Option<Sockets>,
     /// Для чего открыты сокеты.
     opened_for: Option<OpenKey>,
@@ -426,11 +431,18 @@ struct Worker<'a> {
     buf: [u8; RECV_BUF],
 }
 
+fn new_pad_key() -> Option<Zeroizing<[u8; 32]>> {
+    let mut k = Zeroizing::new([0u8; 32]);
+    getrandom::fill(k.as_mut_slice()).ok()?;
+    Some(k)
+}
+
 fn run(sh: &Arc<Shared>) {
     let mut w = Worker {
         sh,
         table: IdTable::empty(),
         limiter: RxLimiter::new(Instant::now()),
+        pad_key: new_pad_key(),
         net: None,
         opened_for: None,
         failed_for: None,
@@ -593,6 +605,7 @@ impl Worker<'_> {
                 self.effective = n.members();
                 self.sent = n.send_ips().iter().map(|_| VecDeque::new()).collect();
                 self.publish_addrs(&self.effective);
+                self.pad_key = new_pad_key();
                 self.net = Some(n);
                 self.opened_for = Some(key);
                 self.failed_for = None;
@@ -646,13 +659,18 @@ impl Worker<'_> {
             self.bursts.pop_front();
         }
         self.next_regular = now.checked_add(jittered(iv, scaled(JITTER, iv)));
+        let Some(pad_key) = self.pad_key.as_ref() else {
+            return;
+        };
         let peers: Vec<(PairId, &LanKeys)> = self.table.peers().collect();
         // слот запечатывается адресом привязки своего сокета, поэтому датаграммы у каждого
         // интерфейса свои; сбой ГСЧ или сборки: ничего не отправляется, следующий раунд по
         // расписанию
         let per_iface: Vec<Vec<[u8; DGRAM_LEN]>> = srcs
             .iter()
-            .map(|src| build(&peers, w, *src, opened.local.listen_port, round).unwrap_or_default())
+            .map(|src| {
+                build(&peers, w, *src, opened.local.listen_port, round, pad_key).unwrap_or_default()
+            })
             .collect();
         for (i, dgrams) in per_iface.iter().enumerate() {
             for d in dgrams {
@@ -708,7 +726,14 @@ impl Worker<'_> {
             Recv::Data { len, src } => {
                 self.sh.rx_total.fetch_add(1, Ordering::Relaxed);
                 let t = Instant::now();
-                if self.limiter.check(t, src) != RxVerdict::Pass {
+                // правила источника раньше корзины приёма: чужие классы корзину не расходуют
+                if !admit(
+                    &mut self.limiter,
+                    t,
+                    src,
+                    &self.effective,
+                    self.sh.cfg.policy,
+                ) {
                     return;
                 }
                 self.sh.rx_passed.fetch_add(1, Ordering::Relaxed);

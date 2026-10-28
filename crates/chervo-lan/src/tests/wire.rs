@@ -5,10 +5,11 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 
 use chervo_identity::{LAN_HDR, LAN_ID_LEN, LAN_NONCE_LEN, LAN_SLOT_LEN, PairId};
 
+use super::build;
 use super::{OWN, PORT, SRC, W, fixture, sock};
 use crate::error::LanError;
 use crate::limits::{DGRAM_LEN, LAN_GROUP, MAX_DGRAMS_PER_ROUND, RECV_BUF, SLOTS};
-use crate::wire::{SrcPolicy, build, parse};
+use crate::wire::{SrcPolicy, parse};
 
 const HDR_LEN: usize = 2;
 const SLOTS_AT: usize = HDR_LEN + LAN_NONCE_LEN;
@@ -439,4 +440,158 @@ fn beacon_unlinkable_across_windows() {
     assert!(real0.is_disjoint(&real1));
     assert!(ids(&s0).is_disjoint(&real1));
     assert!(ids(&s1).is_disjoint(&real0));
+}
+
+// ---------------------------------------------------------------- метки слотов (ревью безопасности)
+
+/// 16 меток (первые 8 байт слотов) датаграммы и хвост (18 байт) каждой.
+fn slots_of(d: &[u8; DGRAM_LEN]) -> Vec<([u8; LAN_ID_LEN], Vec<u8>)> {
+    (0..SLOTS)
+        .map(|i| {
+            let at = SLOTS_AT + i * LAN_SLOT_LEN;
+            let mut id = [0u8; LAN_ID_LEN];
+            id.copy_from_slice(&d[at..at + LAN_ID_LEN]);
+            (id, d[at + LAN_ID_LEN..at + LAN_SLOT_LEN].to_vec())
+        })
+        .collect()
+}
+
+fn label_set(d: &[u8; DGRAM_LEN]) -> Vec<[u8; LAN_ID_LEN]> {
+    let mut v: Vec<_> = slots_of(d).into_iter().map(|(id, _)| id).collect();
+    v.sort_unstable();
+    v
+}
+
+/// Внутри окна метки всех 16 слотов (настоящих и пустых) постоянны: по двум датаграммам серии
+/// число друзей не определить. Остальное содержимое слота случайно в каждой датаграмме у обоих.
+#[test]
+fn beacon_window_labels_stable() {
+    for n in [1usize, 5, 15, 16] {
+        let fx = fixture(n);
+        let first = build(&fx.refs(), W, SRC, PORT, 0).unwrap();
+        assert_eq!(first.len(), 1);
+        let want = label_set(&first[0]);
+        let uniq: HashSet<_> = want.iter().collect();
+        assert_eq!(uniq.len(), SLOTS, "n={n}: 16 различных меток");
+        // настоящие метки среди них
+        for (_, k) in &fx.sender {
+            assert!(want.contains(&k.send_id(W)), "n={n}: нет настоящей метки");
+        }
+        let mut prev = first[0];
+        for round in 1..6u64 {
+            let d = build(&fx.refs(), W, SRC, PORT, round).unwrap()[0];
+            assert_eq!(
+                label_set(&d),
+                want,
+                "n={n}, раунд {round}: набор меток изменился"
+            );
+            // хвосты (шифротекст и тег у настоящих, случайные байты у пустых) в каждой датаграмме новые
+            let (a, b) = (slots_of(&prev), slots_of(&d));
+            for (id, tail) in &a {
+                let other = &b.iter().find(|(i, _)| i == id).unwrap().1;
+                assert_ne!(tail, other, "n={n}: хвост слота повторился");
+            }
+            prev = d;
+        }
+    }
+    // 17 друзей: две датаграммы; у каждой свой постоянный набор меток
+    let fx = fixture(17);
+    let r0 = build(&fx.refs(), W, SRC, PORT, 0).unwrap();
+    let r1 = build(&fx.refs(), W, SRC, PORT, 1).unwrap();
+    assert_eq!((r0.len(), r1.len()), (2, 2));
+    for j in 0..2 {
+        assert_eq!(label_set(&r0[j]), label_set(&r1[j]), "датаграмма {j}");
+    }
+}
+
+/// Метки пустых слотов меняются со сменой окна и со сменой ключа `R`; метки настоящих слотов со
+/// сменой окна. Все 13 пустых меток различны.
+#[test]
+fn beacon_pad_labels_rotate() {
+    let fx = fixture(3);
+    let real = |w: u64| -> HashSet<[u8; LAN_ID_LEN]> {
+        fx.sender.iter().map(|(_, k)| k.send_id(w)).collect()
+    };
+    let pads = |d: &[u8; DGRAM_LEN], w: u64| -> HashSet<[u8; LAN_ID_LEN]> {
+        label_set(d)
+            .into_iter()
+            .filter(|l| !real(w).contains(l))
+            .collect()
+    };
+    let d0 = build(&fx.refs(), W, SRC, PORT, 0).unwrap()[0];
+    let p0 = pads(&d0, W);
+    assert_eq!(p0.len(), 13, "13 пустых слотов с разными метками");
+    // другое окно: пустые и настоящие метки другие
+    let d1 = build(&fx.refs(), W + 1, SRC, PORT, 0).unwrap()[0];
+    let p1 = pads(&d1, W + 1);
+    assert!(p0.is_disjoint(&p1), "пустые метки пережили смену окна");
+    assert!(real(W).is_disjoint(&real(W + 1)));
+    // другой ключ R в том же окне: настоящие метки те же, пустые другие
+    let other_key = [0xA5u8; 32];
+    let d2 = crate::wire::build(&fx.refs(), W, SRC, PORT, 0, &other_key).unwrap()[0];
+    let p2 = pads(&d2, W);
+    assert!(p0.is_disjoint(&p2), "пустые метки пережили смену ключа R");
+    for r in real(W) {
+        assert!(label_set(&d0).contains(&r) && label_set(&d2).contains(&r));
+    }
+}
+
+/// Поток с публичных адресов, из CGNAT, по IPv6 и с прочих чужих классов общую корзину приёма не
+/// расходует: приём из локальной сети идёт как без потока.
+#[test]
+fn rx_public_flood_does_not_starve_lan() {
+    use crate::limits::{RX_BURST, RX_RATE};
+    use crate::rate::RxLimiter;
+    use crate::wire::admit;
+    use std::net::{IpAddr, Ipv6Addr, SocketAddrV6};
+    use std::time::Instant;
+
+    let now = Instant::now();
+    let mut lim = RxLimiter::new(now);
+    let own = [OWN];
+    let foreign: Vec<SocketAddr> = vec![
+        sock(Ipv4Addr::new(8, 8, 8, 8)),
+        sock(Ipv4Addr::new(100, 64, 1, 2)),
+        sock(Ipv4Addr::new(198, 18, 0, 5)),
+        sock(Ipv4Addr::new(169, 254, 7, 7)),
+        sock(Ipv4Addr::new(127, 0, 0, 1)),
+        sock(Ipv4Addr::new(224, 0, 0, 251)),
+        SocketAddr::V6(SocketAddrV6::new(
+            Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1),
+            5,
+            0,
+            0,
+        )),
+        SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 5, 0, 0)),
+        SocketAddr::new(IpAddr::V6(OWN.to_ipv6_mapped()), 5),
+    ];
+    for i in 0..100_000usize {
+        let src = foreign[i % foreign.len()];
+        assert!(!admit(&mut lim, now, src, &own, SrcPolicy::PRODUCT));
+    }
+    assert_eq!(lim.dropped_global(), 0, "корзина не тронута");
+    // сразу после потока: полный всплеск из локальной сети (разные источники: предел на адрес 16)
+    let mut passed = 0u32;
+    for i in 0..(RX_BURST + 40) {
+        let lan = sock(Ipv4Addr::new(
+            192,
+            168,
+            1,
+            u8::try_from(10 + i % 200).unwrap(),
+        ));
+        if admit(&mut lim, now, lan, &own, SrcPolicy::PRODUCT) {
+            passed += 1;
+        }
+    }
+    assert_eq!(passed, RX_BURST, "всплеск корзины из LAN цел");
+    // и скорость пополнения прежняя
+    let later = now + std::time::Duration::from_secs(1);
+    let lan = sock(Ipv4Addr::new(192, 168, 2, 1));
+    let mut more = 0;
+    for _ in 0..(RX_RATE + 10) {
+        if admit(&mut lim, later, lan, &own, SrcPolicy::PRODUCT) {
+            more += 1;
+        }
+    }
+    assert!(more > 0 && more <= RX_RATE);
 }

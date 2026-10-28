@@ -722,6 +722,65 @@ fn svc_sweep_respects_shutdown() {
     );
 }
 
+/// Все датаграммы приёмника за `dur`.
+fn collect_raw(s: &UdpSocket, dur: Duration) -> Vec<Vec<u8>> {
+    let end = Instant::now() + dur;
+    let mut out = Vec::new();
+    let mut buf = [0u8; 2048];
+    while Instant::now() < end {
+        if let Ok((n, _)) = s.recv_from(&mut buf) {
+            out.push(buf[..n].to_vec());
+        }
+    }
+    out
+}
+
+fn labels_of(d: &[u8]) -> Vec<Vec<u8>> {
+    let mut v: Vec<Vec<u8>> = (0..16)
+        .map(|i| d[14 + i * 26..14 + i * 26 + 8].to_vec())
+        .collect();
+    v.sort();
+    v
+}
+
+/// Служба держит ключ `R` меток пустых слотов постоянным, пока сокеты открыты (метки всех слотов
+/// в окне одни и те же), и берёт новый при смене набора интерфейсов (здесь: открытие заново).
+#[test]
+fn svc_pad_labels_stable_then_new_key_on_reopen() {
+    let rp = port_for(REC_IP);
+    let rec = recorder(rp);
+    let (pa, _, _) = peers(3);
+    let a = mk(
+        LanMode::Announce,
+        A_IP,
+        port_for(A_IP),
+        rec_target(rp),
+        Duration::from_millis(150),
+    );
+    a.set_peers(pa);
+    a.set_local(local(A_IP, 40_001));
+    let first = collect_raw(&rec, Duration::from_millis(1000));
+    assert!(first.len() >= 3, "датаграмм {}", first.len());
+    let want = labels_of(&first[0]);
+    assert!(
+        first.iter().all(|d| labels_of(d) == want),
+        "метки в окне меняются"
+    );
+    // порт в адресе изменился: сокеты открыты заново, ключ новый (окно то же: часы стоят)
+    a.set_local(local(A_IP, 40_002));
+    std::thread::sleep(Duration::from_millis(300));
+    let _ = collect_raw(&rec, Duration::from_millis(100));
+    let second = collect_raw(&rec, Duration::from_millis(1000));
+    assert!(second.len() >= 3, "датаграмм {}", second.len());
+    let want2 = labels_of(&second[0]);
+    assert!(second.iter().all(|d| labels_of(d) == want2));
+    let common = want.iter().filter(|l| want2.contains(l)).count();
+    assert_eq!(
+        common, 3,
+        "общими остались только метки трёх настоящих слотов"
+    );
+}
+
 /// Вручную на настоящей сети: открывает приём в группе на маршрутном адресе. Полная проверка
 /// (две машины, приём чужого маяка) делается примером `lan_probe` и стендом, не здесь.
 #[test]
