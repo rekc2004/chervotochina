@@ -213,6 +213,29 @@ guard_no_verifier_in_release() { # release.yml
     if grep -qi 'verifier' <<<"$block"; then
       echo "$f: job $j mentions 'verifier' (the CI verifier must not reach the release)" >&2; bad=1
     fi
+    # Review 19g-3, L2: what the job downloads is pinned, not only what it must not mention.
+    # assemble: exactly one download step and exactly one `pattern:`, equal to `bin-*`.
+    # draft: exactly one download step, no `pattern:`, `name: release-files`.
+    local line t downloads=0 patterns=0 wrong=0 names=0
+    while IFS= read -r line; do
+      t="${line#"${line%%[![:space:]]*}"}"
+      t="${t%"${t##*[![:space:]]}"}"
+      [[ "$t" =~ ^(-[[:space:]]+)?uses:[[:space:]]*actions/download-artifact@ ]] && downloads=$((downloads + 1))
+      if [[ "$t" =~ ^pattern: ]]; then
+        patterns=$((patterns + 1))
+        [[ "$t" == 'pattern: bin-*' ]] || wrong=1
+      fi
+      [[ "$t" == 'name: release-files' ]] && names=$((names + 1))
+    done <<<"$block"
+    if [[ "$downloads" -ne 1 || "$wrong" -ne 0 ]]; then
+      echo "$f: job $j must have exactly one download-artifact step and, if it has 'pattern:', only 'pattern: bin-*'" >&2; bad=1
+    fi
+    if [[ "$j" == assemble && "$patterns" -ne 1 ]]; then
+      echo "$f: job assemble must download with exactly one 'pattern: bin-*' (found $patterns pattern line(s))" >&2; bad=1
+    fi
+    if [[ "$j" == draft && ( "$patterns" -ne 0 || "$names" -ne 1 ) ]]; then
+      echo "$f: job draft must download only 'name: release-files' (patterns: $patterns, names: $names)" >&2; bad=1
+    fi
   done
   return "$bad"
 }
@@ -379,7 +402,14 @@ jobs:
           pattern: bin-*
   draft:
     steps:
+      - uses: actions/download-artifact@0123456789abcdef0123456789abcdef01234567 # v4.3.0
+        with:
+          name: release-files
       - run: bash scripts/release/draft.sh release
+'
+  local dl2='      - uses: actions/download-artifact@0123456789abcdef0123456789abcdef01234567 # v4.3.0
+        with:
+          name: release-files
 '
   f="$tmp/v0.yml"; printf '%s' "$asm" > "$f"
   expect verifier-rule-ok 0 guard_no_verifier_in_release "$f"
@@ -391,6 +421,25 @@ jobs:
   expect verifier-in-assemble-mixed-case 1 guard_no_verifier_in_release "$f"
   f="$tmp/v4.yml"; subst "$asm" '  assemble:' '  assemble2:' > "$f"
   expect verifier-rule-job-missing 1 guard_no_verifier_in_release "$f"
+  # L2: the download of assemble / draft is pinned.
+  f="$tmp/v5.yml"; subst "$asm" 'pattern: bin-*' "pattern: '*'" > "$f"
+  expect assemble-pattern-star 1 guard_no_verifier_in_release "$f"
+  f="$tmp/v6.yml"; subst "$asm" 'pattern: bin-*' 'pattern: verifier-*' > "$f"
+  expect assemble-pattern-verifier-star 1 guard_no_verifier_in_release "$f"
+  f="$tmp/v7.yml"; subst "$asm" 'pattern: bin-*' $'pattern: bin-*\n      - uses: actions/download-artifact@0123456789abcdef0123456789abcdef01234567 # v4.3.0\n        with:\n          pattern: bin-*' > "$f"
+  expect assemble-second-download 1 guard_no_verifier_in_release "$f"
+  f="$tmp/v8.yml"; subst "$asm" 'pattern: bin-*' 'name: bin-linux-x86_64' > "$f"
+  expect assemble-no-pattern 1 guard_no_verifier_in_release "$f"
+  f="$tmp/v9.yml"; subst "$asm" 'pattern: bin-*' $'pattern: bin-*\n      - uses: actions/download-artifact@0123456789abcdef0123456789abcdef01234567 # v4.3.0\n        with:\n          name: release-files' > "$f"
+  expect assemble-bin-plus-name-download 1 guard_no_verifier_in_release "$f"
+  f="$tmp/v10.yml"; subst "$asm" 'pattern: bin-*' 'pattern: bin-linux-*' > "$f"
+  expect assemble-pattern-narrower 1 guard_no_verifier_in_release "$f"
+  f="$tmp/v11.yml"; subst "$asm" 'name: release-files' "pattern: '*'" > "$f"
+  expect draft-pattern 1 guard_no_verifier_in_release "$f"
+  f="$tmp/v12.yml"; subst "$asm" 'name: release-files' 'name: bin-linux-x86_64' > "$f"
+  expect draft-other-name 1 guard_no_verifier_in_release "$f"
+  f="$tmp/v14.yml"; subst "$asm" "      - run: bash scripts/release/draft.sh release" "$dl2      - run: bash scripts/release/draft.sh release" > "$f"
+  expect draft-second-download 1 guard_no_verifier_in_release "$f"
 
   # 3. common and release.yml
   local rel='on:
