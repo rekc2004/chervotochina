@@ -362,6 +362,7 @@ impl Node {
    - `CHANGELOG.md` репозитория `EmbarkStudios/cargo-about` на этом теге: нет известных проблем с `--locked`;
    - справка по конфигу на том же теге (`docs/src/cli/generate/config.md` или аналог) и вывод `cargo about generate --help`.
    Номер вписывается сюда и в `release.yml` как `cargo install --locked --version =X.Y.Z cargo-about`. Ключи и флаги ниже помечены [В]; если в выбранной версии их нет, это стоп, а не подбор.
+   **Сверено дирижёром 2026-10-28:** версия **0.9.2** (crates.io: 2026-08-18, не отозвана, `rust_version` 1.88.0, MIT OR Apache-2.0). 0.9.3 вышла 2026-10-26: слишком свежая для инструмента цепочки поставок, не брать. По исходникам тега 0.9.2 (`src/cargo-about/generate.rs`, `src/licenses/config.rs`) [П]: флаги `-c/--config`, `-m/--manifest-path`, `--fail`, `--locked`, `--offline`, `--frozen`, `--target` есть; ключи конфига `targets`, `private`, `ignore-build-dependencies`, `ignore-dev-dependencies`, `accepted` и точечный `[<крейт>] accepted` есть. **Ключа `no-clearly-defined` нет**, а неизвестный ключ — ошибка разбора (`tab.finalize`): строку ниже не писать. Сети без него нет, кроме `clarify` через git, а его мы не используем.
 2. **`packaging/licenses/about.toml`** (ключи сверить с документацией версии из п. 1):
    ```toml
    # Stage 19g-4 (Q6 = a). Keep in sync with deny.toml [licenses]: same allow list, same crate-scoped exceptions.
