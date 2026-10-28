@@ -67,7 +67,7 @@ if grep -q '^{{' "$lic"; then echo "licence file has a line starting with '{{'" 
 lic_sections="$(grep -c '^=\{16,\}$' "$lic" || true)"
 lic_stubs=0
 for stub in '<copyright holders>' '<year>' '<Copyright Holder>'; do
-  n="$(grep -oF -- "$stub" "$lic" | wc -l | tr -d '[:space:]')"
+  n="$( { grep -oF -- "$stub" "$lic" || true; } | wc -l | tr -d '[:space:]')"  # grep exits 1 on no match: pipefail + set -e
   lic_stubs=$((lic_stubs + n))
 done
 # Apache-2.0 requires NOTICE files to travel along: only recorded here (crate sources), the owner decides.
