@@ -42,7 +42,7 @@ pub use knock::{KNOCK_ID_LABEL, KNOCK_KDF_LABEL, KNOCK_LEN, KNOCK_TAG_LABEL, Kno
 pub use kx::{KxPublicKey, PairKx};
 pub use lan::{
     LAN_AEADKEY_LABEL, LAN_HDR, LAN_ID_LABEL, LAN_ID_LEN, LAN_IDKEY_LABEL, LAN_KDF_LABEL,
-    LAN_NONCE_LEN, LAN_SLOT_LEN, LAN_WINDOW_SECS, LanKeys,
+    LAN_NONCE_LEN, LAN_PAD_LABEL, LAN_SLOT_LEN, LAN_WINDOW_SECS, LanKeys, lan_pad_id,
 };
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 pub use os::OsKeyStore;

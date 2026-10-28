@@ -38,6 +38,9 @@ pub const LAN_AEADKEY_LABEL: &[u8] = b"chervotochina/v1/lan-aead-key\0";
 /// Метка вычисления метки окна.
 pub const LAN_ID_LABEL: &[u8] = b"chervotochina/v1/lan-id\0";
 
+/// Метка вычисления метки пустого слота (ключ `R` случайный, живёт в памяти службы).
+pub const LAN_PAD_LABEL: &[u8] = b"chervotochina/v1/lan-pad\0";
+
 const PORT_LEN: usize = 2;
 const TAG_LEN: usize = 16;
 /// `LAN_HDR(2) || window(8) || src(4) || id(8)`.
@@ -115,6 +118,25 @@ fn id_of(key: &[u8; 32], window: u64) -> Option<[u8; LAN_ID_LEN]> {
         *d = *s;
     }
     Some(o)
+}
+
+/// Метка пустого слота `index` в окне `window`:
+/// `first8(BLAKE2s-MAC(R, LAN_PAD_LABEL || w || index))`. Постоянна внутри окна, как метки
+/// настоящих слотов (`LanKeys::send_id`), поэтому по числу постоянных меток в серии датаграмм
+/// число друзей не определить. Меняется со сменой окна и ключа `R`; ключ `R` создаёт служба
+/// заново при запуске и при смене набора интерфейсов и никуда не пишет.
+pub fn lan_pad_id(
+    key: &[u8; 32],
+    window: u64,
+    index: u8,
+) -> Result<[u8; LAN_ID_LEN], IdentityError> {
+    let w = window.to_be_bytes();
+    let full = mac_full(key, &[LAN_PAD_LABEL, &w, &[index]]).ok_or(IdentityError::AuthFailed)?;
+    let mut o = [0u8; LAN_ID_LEN];
+    for (d, s) in o.iter_mut().zip(full.iter()) {
+        *d = *s;
+    }
+    Ok(o)
 }
 
 fn aead_key(key: &[u8; 32]) -> Option<LessSafeKey> {

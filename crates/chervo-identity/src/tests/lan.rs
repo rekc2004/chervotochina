@@ -4,8 +4,8 @@ use std::net::Ipv4Addr;
 
 use crate::{
     KNOCK_ID_LABEL, KNOCK_KDF_LABEL, KNOCK_TAG_LABEL, KxPeer, LAN_AEADKEY_LABEL, LAN_HDR,
-    LAN_ID_LABEL, LAN_IDKEY_LABEL, LAN_KDF_LABEL, LAN_NONCE_LEN, LAN_SLOT_LEN, LanKeys, PairId,
-    PairKey,
+    LAN_ID_LABEL, LAN_IDKEY_LABEL, LAN_KDF_LABEL, LAN_NONCE_LEN, LAN_PAD_LABEL, LAN_SLOT_LEN,
+    LanKeys, PairId, PairKey, lan_pad_id,
 };
 
 const SRC: Ipv4Addr = Ipv4Addr::new(192, 168, 50, 7);
@@ -186,11 +186,12 @@ fn lan_keys_equal_pubkeys_rejected() {
 
 #[test]
 fn lan_labels_distinct_from_knock() {
-    let all: [&[u8]; 7] = [
+    let all: [&[u8]; 8] = [
         LAN_KDF_LABEL,
         LAN_IDKEY_LABEL,
         LAN_AEADKEY_LABEL,
         LAN_ID_LABEL,
+        LAN_PAD_LABEL,
         KNOCK_KDF_LABEL,
         KNOCK_ID_LABEL,
         KNOCK_TAG_LABEL,
@@ -242,4 +243,21 @@ fn lan_keys_debug_redacted() {
     let (a, _) = pair_keys(1);
     assert_eq!(format!("{a:?}"), "LanKeys(..)");
     assert_eq!(format!("{a:#?}"), "LanKeys(..)");
+}
+
+/// Метка пустого слота: постоянна внутри окна, меняется с окном, ключом и номером; значение
+/// сверено независимым расчётом на Python (`hashlib.blake2s` с ключом).
+#[test]
+fn lan_pad_id_stable_and_golden() {
+    let r = [7u8; 32];
+    let id = lan_pad_id(&r, 1_000_000, 3).unwrap();
+    assert_eq!(hex(&id), "2a7b05fd695a9826");
+    assert_eq!(id, lan_pad_id(&r, 1_000_000, 3).unwrap());
+    assert_ne!(id, lan_pad_id(&r, 1_000_001, 3).unwrap(), "другое окно");
+    assert_ne!(id, lan_pad_id(&r, 1_000_000, 4).unwrap(), "другой номер");
+    assert_ne!(
+        id,
+        lan_pad_id(&[8u8; 32], 1_000_000, 3).unwrap(),
+        "другой ключ R"
+    );
 }
