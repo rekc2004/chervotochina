@@ -17,6 +17,8 @@ tokio.workspace = true
 [dev-dependencies]
 chervo-addr.workspace = true
 chervo-upnp.workspace = true
+# Пример node16 для стенда 13в (`--lan`); в продуктовой сборке крейта её нет.
+chervo-lan.workspace = true
 chervo-transport-quinn.workspace = true
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }
 zeroize.workspace = true
