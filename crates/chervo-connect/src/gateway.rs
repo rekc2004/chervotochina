@@ -62,7 +62,7 @@ impl Gateway {
 
 /// Запрос к отображателю по снимку: маршрутный IPv4 класса `Private` и порт прослушивания
 /// IPv4, не нулевой. Иначе проброс не нужен (белый адрес, CGNAT, нет IPv4, нет порта).
-pub(crate) fn request_of<C>(st: &State<C>) -> Option<MapRequest> {
+fn request_of<C>(st: &State<C>) -> Option<MapRequest> {
     let local = st.own.local()?;
     let ip = local.route.v4?;
     if classify(IpAddr::V4(ip)) != AddrClass::Private {

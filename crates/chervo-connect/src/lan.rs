@@ -17,7 +17,6 @@ use chervo_transport::ManagedTransport;
 use tokio::time::Instant;
 
 use crate::engine::{ConnectError, Engine, EngineEvent, Inner, State};
-use crate::gateway::request_of;
 use crate::plan::{Candidate, Plan, dialable, family_ok};
 
 /// Не больше находок за один такт (служба сама держит очередь не больше 64).
@@ -40,15 +39,25 @@ impl LanHook {
     }
 }
 
-/// Наш адрес для службы маяка: частный маршрутный IPv4 и порт прослушивания IPv4 (не 0). Это
-/// единственное место, где он берётся (источник адреса можно сменить, не трогая остальное);
-/// пока что то же правило, что у проброса порта.
+/// Наш адрес для службы маяка: маршрутный IPv4 по умолчанию любого класса (петля и неуказанный
+/// адрес не годятся) и порт прослушивания IPv4 (не 0). Класс не проверяется: под VPN маршрут
+/// по умолчанию идёт в туннель, а какие интерфейсы частные, решает служба опросом маршрутов.
+/// Это единственное место, где адрес берётся (источник можно сменить, не трогая остальное).
 pub(crate) fn lan_local<C>(st: &State<C>) -> Option<LanLocal> {
-    let req = request_of(st)?;
-    Some(LanLocal {
-        own: *req.internal.ip(),
-        listen_port: req.internal.port(),
-    })
+    let local = st.own.local()?;
+    let own = local
+        .route
+        .v4
+        .filter(|ip| !ip.is_loopback() && !ip.is_unspecified())?;
+    let listen_port = local
+        .listen
+        .iter()
+        .find_map(|a| match a {
+            SocketAddr::V4(v4) => Some(v4.port()),
+            SocketAddr::V6(_) => None,
+        })
+        .filter(|p| *p != 0)?;
+    Some(LanLocal { own, listen_port })
 }
 
 impl<T, S> Inner<T, S>

@@ -157,8 +157,34 @@ async fn lan_attach_twice_rejected() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn lan_local_private_only() {
-    for v4 in [Some("7.7.7.7"), Some("100.64.0.9"), Some("127.0.0.1"), None] {
+async fn lan_local_any_class() {
+    // класс адреса не проверяется: под VPN маршрут по умолчанию идёт в туннель (198.18.0.1,
+    // 100.64.0.9, 172.18.0.1), частные интерфейсы находит сама служба
+    for v4 in [
+        "7.7.7.7",
+        "100.64.0.9",
+        "198.18.0.1",
+        "172.18.0.1",
+        "169.254.3.4",
+        "192.168.1.5",
+    ] {
+        let mut pre = Pre::new();
+        pre.solo_friend(vec![inv("5.6.7.8:4000")]);
+        let n = Node::start_with(
+            pre,
+            ConnectConfig::default(),
+            FakeTransport::new(),
+            FakeProbe::new(Some(v4)),
+        );
+        let lan = FakeLan::new();
+        n.engine.attach_lan(lan.clone()).unwrap();
+        tokio::time::sleep(secs(30)).await;
+        let l = lan.last_local().unwrap_or_else(|| panic!("{v4}: None"));
+        assert_eq!(l.own, v4.parse::<std::net::Ipv4Addr>().unwrap(), "{v4}");
+        assert_eq!(l.listen_port, 4000);
+    }
+    // нет маршрутного IPv4 (петля и неуказанный пробой отбрасывает, здесь ещё и защита): `None`
+    for v4 in [None, Some("127.0.0.1"), Some("0.0.0.0")] {
         let mut pre = Pre::new();
         pre.solo_friend(vec![inv("5.6.7.8:4000")]);
         let n = Node::start_with(
@@ -172,7 +198,7 @@ async fn lan_local_private_only() {
         tokio::time::sleep(secs(30)).await;
         assert_eq!(lan.last_local(), None, "{v4:?}");
     }
-    // частный маршрут, но порта IPv4 нет: тоже `None`
+    // маршрут есть, но порта прослушивания IPv4 нет: тоже `None`
     for local in [vec![addr("0.0.0.0:0")], vec![addr("[::]:4000")], vec![]] {
         let mut pre = Pre::new();
         pre.solo_friend(vec![inv("5.6.7.8:4000")]);
@@ -189,11 +215,6 @@ async fn lan_local_private_only() {
         tokio::time::sleep(secs(30)).await;
         assert_eq!(lan.last_local(), None, "{local:?}");
     }
-    // частный маршрут и порт: адрес и порт передаются
-    let (_n, _x, lan) = node_with_lan();
-    let l = lan.last_local().unwrap();
-    assert_eq!(l.own, "192.168.1.5".parse::<std::net::Ipv4Addr>().unwrap());
-    assert_eq!(l.listen_port, 4000);
 }
 
 #[tokio::test(start_paused = true)]
@@ -203,16 +224,21 @@ async fn lan_local_on_own_change() {
     // без смены адреса новых вызовов нет
     tokio::time::sleep(secs(10)).await;
     assert_eq!(lan.local_calls(), 1);
-    // белый адрес: службе `None`
+    // адрес туннеля по умолчанию: службе уходит он (любой класс), фильтрует служба
     n.probe.set_v4(Some("7.7.7.7"));
     tokio::time::sleep(secs(5)).await;
-    assert_eq!(lan.last_local(), None);
+    let l = lan.last_local().unwrap();
+    assert_eq!(l.own, "7.7.7.7".parse::<std::net::Ipv4Addr>().unwrap());
     // другой частный адрес: службе новый адрес
     n.probe.set_v4(Some("10.0.0.2"));
     tokio::time::sleep(secs(5)).await;
     let l = lan.last_local().unwrap();
     assert_eq!(l.own, "10.0.0.2".parse::<std::net::Ipv4Addr>().unwrap());
     assert_eq!(l.listen_port, 4000);
+    // маршрута нет вовсе: `None`
+    n.probe.set_v4(None);
+    tokio::time::sleep(secs(5)).await;
+    assert_eq!(lan.last_local(), None);
 }
 
 /// Гостевая пара с настоящими ключами (в наборе транспорта она есть, у службы быть не должна).
