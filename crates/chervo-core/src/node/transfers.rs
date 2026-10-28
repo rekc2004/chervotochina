@@ -26,6 +26,7 @@ use super::views::{
     FileKind, FriendRef, IncomingOffer, NodeWarning, OfferFile, RouterCandidate, RouterView,
     SettingsView, SpaceView, TransferRef, TransferView, path_for_display,
 };
+use crate::update::UpdateConsent;
 
 fn kind_of(p: &chervo_receive::SafeRelPath) -> (FileKind, bool, bool) {
     let info = classify(p);
@@ -369,6 +370,11 @@ impl Node {
             clock_offset_at: s.clock_offset_at,
             ntp_servers,
             key_store: self.core.store.kind(),
+            update_consent: match s.update_consent {
+                None => UpdateConsent::NotAsked,
+                Some(true) => UpdateConsent::Enabled,
+                Some(false) => UpdateConsent::Disabled,
+            },
             restart_needed,
         }
     }

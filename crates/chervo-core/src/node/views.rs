@@ -349,6 +349,8 @@ pub struct SettingsView {
     /// Серверы времени (по умолчанию список из `chervo_timesync`).
     pub ntp_servers: Vec<String>,
     pub key_store: KeyStoreKind,
+    /// Согласие на проверку новых версий (этап 19г). Время последней проверки наружу не отдаётся.
+    pub update_consent: crate::update::UpdateConsent,
     /// Порт, папка приёма, запас места или ручной проброс изменены: вступят в силу после
     /// перезапуска программы.
     pub restart_needed: bool,

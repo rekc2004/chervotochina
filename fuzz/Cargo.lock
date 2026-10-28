@@ -189,6 +189,8 @@ dependencies = [
  "chervo-transfer",
  "chervo-transport",
  "chervo-transport-quinn",
+ "chervo-update",
+ "chervo-update-check",
  "chervo-upnp",
  "rustix",
  "tokio",

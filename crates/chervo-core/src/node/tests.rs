@@ -99,6 +99,8 @@ fn full_sample() -> Settings {
     ];
     s.clock_offset_ms = -123_456;
     s.clock_offset_at = 1_700_000_000;
+    s.update_consent = Some(true);
+    s.update_checked_at = 1_700_000_500;
     s.ntp_servers = vec!["ntp.example.org".to_owned(), "10.0.0.1".to_owned()];
     s
 }
@@ -145,6 +147,39 @@ fn settings_roundtrip() {
         base()
     );
     assert!(parse(edge.as_bytes()).is_ok());
+}
+
+#[test]
+fn settings_update_keys_roundtrip() {
+    // нет строки: «не спрашивали», время 0; в записи строки согласия тоже нет
+    let d = parse(base().as_bytes()).unwrap();
+    assert_eq!((d.update_consent, d.update_checked_at), (None, 0));
+    let text = serialize(&d).unwrap();
+    assert!(!text.contains("update_check="), "{text}");
+    assert!(text.contains("update_checked_at=0\n"));
+    assert_eq!(parse(text.as_bytes()).unwrap(), d);
+    // строка есть: 0 и 1 различаются и не теряются
+    for (value, want) in [("0", Some(false)), ("1", Some(true))] {
+        let t = format!(
+            "{}update_check={value}\nupdate_checked_at=1700000000\n",
+            base()
+        );
+        let s = parse(t.as_bytes()).unwrap();
+        assert_eq!(
+            (s.update_consent, s.update_checked_at),
+            (want, 1_700_000_000)
+        );
+        let back = serialize(&s).unwrap();
+        assert!(back.contains(&format!("update_check={value}\n")));
+        assert_eq!(parse(back.as_bytes()).unwrap(), s);
+        assert_eq!(serialize(&parse(back.as_bytes()).unwrap()).unwrap(), back);
+    }
+    // крайнее время
+    let t = format!("{}update_checked_at={}\n", base(), u64::MAX);
+    assert_eq!(parse(t.as_bytes()).unwrap().update_checked_at, u64::MAX);
+    // повторная запись настроек первого запуска даёт то же
+    let fresh = Settings::new(49152, abs(&["recv"]), false);
+    assert_eq!((fresh.update_consent, fresh.update_checked_at), (None, 0));
 }
 
 #[test]
@@ -351,6 +386,51 @@ fn settings_hostile_table() {
         (
             "ntp too long",
             format!("{ok}ntp_server={}\n", "a".repeat(254)).into_bytes(),
+        ),
+        // этап 19г: ключи согласия на проверку новых версий
+        (
+            "update_check 2",
+            format!("{ok}update_check=2\n").into_bytes(),
+        ),
+        (
+            "update_check empty",
+            format!("{ok}update_check=\n").into_bytes(),
+        ),
+        (
+            "update_check 01",
+            format!("{ok}update_check=01\n").into_bytes(),
+        ),
+        (
+            "update_check word",
+            format!("{ok}update_check=true\n").into_bytes(),
+        ),
+        (
+            "update_check duplicate",
+            format!("{ok}update_check=1\nupdate_check=1\n").into_bytes(),
+        ),
+        (
+            "update_checked_at negative",
+            format!("{ok}update_checked_at=-1\n").into_bytes(),
+        ),
+        (
+            "update_checked_at leading zero",
+            format!("{ok}update_checked_at=01\n").into_bytes(),
+        ),
+        (
+            "update_checked_at 21 digits",
+            format!("{ok}update_checked_at=100000000000000000000\n").into_bytes(),
+        ),
+        (
+            "update_checked_at beyond u64",
+            format!("{ok}update_checked_at=18446744073709551616\n").into_bytes(),
+        ),
+        (
+            "update_checked_at empty",
+            format!("{ok}update_checked_at=\n").into_bytes(),
+        ),
+        (
+            "update_checked_at duplicate",
+            format!("{ok}update_checked_at=5\nupdate_checked_at=5\n").into_bytes(),
         ),
     ];
     // 17 папок приёма (основная и 16 дополнительных)

@@ -696,6 +696,7 @@ dependencies = [
 name = "chervo-core"
 version = "0.0.0"
 dependencies = [
+ "blake2",
  "chervo-addr",
  "chervo-connect",
  "chervo-core",
@@ -707,7 +708,10 @@ dependencies = [
  "chervo-transfer",
  "chervo-transport",
  "chervo-transport-quinn",
+ "chervo-update",
+ "chervo-update-check",
  "chervo-upnp",
+ "ed25519-dalek",
  "rustix 1.1.5",
  "tokio",
  "zeroize",
