@@ -16,6 +16,7 @@ members = [
     "crates/chervo-update-check",
     "crates/chervo-core",
     "crates/chervo-cli",
+    "crates/chervo-gui",
 ]
 # libFuzzer crate: own workspace and Cargo.lock, nightly only (stage 17, B4)
 exclude = ["fuzz"]
@@ -63,6 +64,11 @@ webpki-roots = { version = "=1.0.10" }
 fs4 = { version = "=1.1.0" }
 ring = { version = "=0.17.14", default-features = false, features = ["alloc"] }
 tokio = { version = "=1.53.3", default-features = false, features = ["rt", "net", "time", "sync", "macros"] }
+# Stage 18b (DECISION 2.9): GUI framework crates, only for chervo-gui. `accesskit` is added per target
+# in the crate manifest (not on Linux: it would pull accesskit_unix -> zbus 5 / zvariant, banned).
+eframe = { version = "=0.37.0", default-features = false, features = ["clipboard", "default_fonts", "wgpu", "glow", "wayland", "x11"] }
+rfd = { version = "=0.17.2", default-features = false }
+qrcode = { version = "=0.14.1", default-features = false }
 unicode-normalization = { version = "=0.1.26", default-features = false, features = ["std"] }
 
 [workspace.lints.rust]

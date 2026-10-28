@@ -1,3 +1,11 @@
+[graph]
+# Stage 18b (DECISION 2.9, owner decision "Доступность на Linux"): accesskit_unix is an optional
+# Linux-only dependency of accesskit_winit. eframe's accesskit feature is enabled only for non-Linux
+# targets, so the crate is never built; cargo-deny does not evaluate features per target and would
+# still see it. scripts/check-gui-linux-tree.sh (CI) guards that the Linux tree has no zbus,
+# zvariant, zbus_names or accesskit_unix. The bans on zbus/zvariant below stay in force.
+exclude = ["accesskit_unix"]
+
 [advisories]
 # No exceptions. The RUSTSEC-2026-0370/0371/0372 ignores (zvariant 5.x via the old Secret Service
 # client) were removed in stage 17a together with the crates.
@@ -28,6 +36,23 @@ confidence-threshold = 0.93
 [[licenses.exceptions]]
 name = "webpki-roots"
 allow = ["CDLA-Permissive-2.0"]
+
+# Stage 18b (DECISION 2.9, owner decision Q4): bundled egui fonts (Cyrillic) under font licences.
+# Crate-scoped, never in the general allow list; they put no conditions on the program itself.
+[[licenses.exceptions]]
+name = "epaint_default_fonts"
+allow = ["OFL-1.1", "Ubuntu-font-1.0"]
+
+# Stage 18b (DECISION 2.9, owner decision "BSL-1.0"): Windows clipboard crates of eframe's clipboard
+# feature. Crate-scoped.
+[[licenses.exceptions]]
+name = "clipboard-win"
+allow = ["BSL-1.0"]
+
+# Stage 18b (DECISION 2.9, owner decision "BSL-1.0"): dependency of clipboard-win. Crate-scoped.
+[[licenses.exceptions]]
+name = "error-code"
+allow = ["BSL-1.0"]
 
 [licenses.private]
 ignore = true

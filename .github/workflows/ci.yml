@@ -26,6 +26,9 @@ jobs:
       - run: bash scripts/release/check-whitelist.sh --self-test
       - run: bash scripts/release/check-deps.sh --self-test
       - run: bash scripts/release/version.sh --self-test
+      # Stage 18b (DECISION 2.9): the Linux tree of the GUI has no zbus 5 / zvariant / accesskit_unix.
+      - run: bash scripts/check-gui-linux-tree.sh --self-test
+      - run: bash scripts/check-gui-linux-tree.sh
   test:
     strategy:
       fail-fast: false
@@ -39,6 +42,36 @@ jobs:
       - run: rustup toolchain install 1.99.1 --profile minimal
       - run: cargo build --workspace --locked
       - run: cargo test --workspace --locked
+  # Stage 18b: the real GUI binary renders 3 frames and exits 0 (`--render-check`: no node, no keys,
+  # no files). Linux runs under xvfb with Mesa software drivers; apt is used in CI only, the program
+  # itself needs nothing installed. If a runner cannot create a window, record it as "CI cannot
+  # test this": the item then falls to the owner's manual checklist (spec 18, 4.5).
+  gui-render:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.99.1 --profile minimal
+      - run: cargo build --release -p chervo-gui --locked
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb mesa-vulkan-drivers libgl1-mesa-dri libegl1 libvulkan1 libx11-6 libxcursor1 libxrandr2 libxi6 libxkbcommon-x11-0
+      - if: runner.os == 'Linux'
+        run: timeout 120 xvfb-run -a target/release/chervotochina --render-check
+      - if: runner.os == 'macOS'
+        run: target/release/chervotochina --render-check
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath target/release/chervotochina.exe -ArgumentList '--render-check' -Wait -PassThru
+          "render-check exit code: $($p.ExitCode)"
+          exit $p.ExitCode
   # Stage 17a: our Secret Service client against a real gnome-keyring in a private session bus.
   secret-service-live:
     runs-on: ubuntu-latest

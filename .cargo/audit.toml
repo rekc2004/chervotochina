@@ -1,0 +1,10 @@
+[advisories]
+# Owner decision 2026-10-28 (stage 18b, option 1). RUSTSEC-2026-0370/0371/0372: zvariant, zbus_names,
+# zvariant_derive 5.x are "unmaintained", not a vulnerability. They are in Cargo.lock only through
+# accesskit_unix (optional Linux dep of accesskit_winit), which is compiled for no target: eframe
+# `accesskit` is off on Linux (owner decision "Доступность на Linux"). cargo audit reads the whole lock
+# without per-target resolution, cargo deny excludes that crate from the graph.
+# Real presence is still caught: deny.toml bans zvariant/zbus_names/zbus 5 outside accesskit_unix, and
+# scripts/check-gui-linux-tree.sh fails CI if they reach the Linux build tree. Other advisory IDs on
+# these crates are not ignored.
+ignore = ["RUSTSEC-2026-0370", "RUSTSEC-2026-0371", "RUSTSEC-2026-0372"]
