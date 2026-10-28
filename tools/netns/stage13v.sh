@@ -7,7 +7,8 @@
 #   и CHV_NODE16=target/release/examples/node16. CAPTURE считается по записи LAN1 и запускается вместе с ней.
 # Нужны: Linux, root, ip, nft, tcpdump, python3 (pcap13v.py лежит рядом), cargo не нужен (узел собран заранее).
 # Переменные: CHV_NODE16 (обязательна), CHV_LOGS (по умолчанию tools/netns/logs13v), CHV_STATE, CHV_KEEP=1,
-#   LAN3_SECS (600, окно записи маяков), LAN8_BURST_S (2, предел до первого маяка с нового адреса, с).
+#   LAN3_SECS (600, окно записи маяков), LAN8_BURST_S (4, предел до первого маяка с нового адреса, с; решение дирижёра:
+#   опрос смены адреса движком раз в 2 с и серия через 1 с в 2 с не укладываются).
 #
 # НЕ ЗАПУСКАЛСЯ НА LINUX СБОРЩИКОМ (not run on Linux by the builder): на машине сборки (Windows) проверен только
 # `bash -n`, pcap13v.py проверен на синтетическом pcap. Прогон на Linux делает дирижёр или владелец. Ожидания строк взяты
@@ -45,7 +46,7 @@ O_IP=192.168.50.99
 PORT_OLD=4433
 PORT_NEW=4444
 LAN3_SECS="${LAN3_SECS:-600}"
-LAN8_BURST_S="${LAN8_BURST_S:-2}"
+LAN8_BURST_S="${LAN8_BURST_S:-4}"
 STARTED=0
 ROW_ID=""
 DL=900
@@ -497,7 +498,7 @@ row_lan8() {
   if awk -v d="$dt" -v m="$LAN8_BURST_S" 'BEGIN { exit !(d <= m) }' && (( reconnected >= 1 )); then
     vd LAN8 lan PASS "первый маяк с нового адреса через ${dt} с (≤ ${LAN8_BURST_S}); B переподключался ${reconnected} раз" "время включает опрос смены адреса движком (2 с) и серию (1 с)"
   else
-    vd LAN8 lan FAIL "первый маяк с нового адреса через ${dt} с (≤ ${LAN8_BURST_S}), переподключений ${reconnected}" "опрос движком раз в 2 с и серия через 1 с могут не уложиться в ${LAN8_BURST_S} с: решает дирижёр"
+    vd LAN8 lan FAIL "первый маяк с нового адреса через ${dt} с (≤ ${LAN8_BURST_S}), переподключений ${reconnected}" "предел ${LAN8_BURST_S} с (решение дирижёра): опрос смены адреса движком раз в 2 с, затем серия через 1 с"
   fi
   row_end
 }

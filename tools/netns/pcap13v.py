@@ -150,6 +150,32 @@ def cmd_lan3(path, keys_file, a_ip, port, host, n_friends):
         if max(ws) - min(ws) >= 2:
             bad.append("метка слота повторилась через окна")
             break
+    # 5а. метки всех 16 слотов (настоящих и пустых) постоянны внутри окна: по двум датаграммам серии
+    # число друзей не определить. Датаграммы раунда нумеруются по порядку; в одном окне набор меток
+    # j-й датаграммы раунда один и тот же во всех раундах. Раунд, пересёкший границу окна, пропускается.
+    rounds_dg = []
+    cur_dg = []
+    last_ts = None
+    for ts, _s, p in items:
+        if last_ts is not None and ts - last_ts > 1.0:
+            rounds_dg.append(cur_dg)
+            cur_dg = []
+        cur_dg.append((ts, p))
+        last_ts = ts
+    rounds_dg.append(cur_dg)
+    label_sets = {}
+    for rd in rounds_dg:
+        if not rd or int(rd[0][0] // 30) != int(rd[-1][0] // 30):
+            continue
+        w = int(rd[0][0] // 30)
+        for j, (_ts, p) in enumerate(rd):
+            heads = tuple(sorted(p[SLOTS_AT + i * SLOT:SLOTS_AT + i * SLOT + 8] for i in range(16)))
+            label_sets.setdefault((w, j), set()).add(heads)
+    unstable = [k for k, v in label_sets.items() if len(v) > 1]
+    if unstable:
+        bad.append(f"метки слотов меняются внутри окна (окно, номер датаграммы): {unstable[:3]}")
+    if not any(len(v) >= 1 for v in label_sets.values()):
+        bad.append("нет ни одного целого раунда внутри окна: стабильность меток не проверена")
     # 6. датаграмм в раунде: раунд это серия с промежутками меньше секунды
     want = (n_friends + 15) // 16
     rounds = []
