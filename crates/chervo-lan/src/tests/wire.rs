@@ -27,7 +27,7 @@ fn wire_exact_len_any_n() {
         assert_eq!(d.len(), DGRAM_LEN);
         assert_eq!(d[..2], LAN_HDR);
         let t = fx.table(W);
-        let found = parse(&d, sock(SRC), OWN, &t, SrcPolicy::PRODUCT);
+        let found = parse(&d, sock(SRC), &[OWN], &t, SrcPolicy::PRODUCT);
         assert_eq!(found.len(), n);
         assert_eq!(pairs_of(&found).len(), n);
         for s in &found {
@@ -45,7 +45,7 @@ fn wire_n17_two_datagrams() {
     let t = fx.table(W);
     let mut all = HashSet::new();
     for d in &ds {
-        for s in parse(d, sock(SRC), OWN, &t, SrcPolicy::PRODUCT) {
+        for s in parse(d, sock(SRC), &[OWN], &t, SrcPolicy::PRODUCT) {
             all.insert(s.pair);
         }
     }
@@ -65,7 +65,7 @@ fn wire_n65_rotates() {
     let t = fx.table(W);
     let seen = |ds: &[[u8; DGRAM_LEN]]| -> HashSet<PairId> {
         ds.iter()
-            .flat_map(|d| parse(d, sock(SRC), OWN, &t, SrcPolicy::PRODUCT))
+            .flat_map(|d| parse(d, sock(SRC), &[OWN], &t, SrcPolicy::PRODUCT))
             .map(|s| s.pair)
             .collect()
     };
@@ -106,12 +106,15 @@ fn wire_bad_len_table() {
     let mut fx = fixture(3);
     let d = build(&fx.refs(), W, SRC, PORT, 0).unwrap()[0];
     let t = fx.table(W);
-    assert_eq!(parse(&d, sock(SRC), OWN, &t, SrcPolicy::PRODUCT).len(), 3);
+    assert_eq!(
+        parse(&d, sock(SRC), &[OWN], &t, SrcPolicy::PRODUCT).len(),
+        3
+    );
     for len in [0usize, 1, 13, 14, 429, 431, RECV_BUF, 1472] {
         let mut v = d.to_vec();
         v.resize(len, 0);
         assert!(
-            parse(&v, sock(SRC), OWN, &t, SrcPolicy::PRODUCT).is_empty(),
+            parse(&v, sock(SRC), &[OWN], &t, SrcPolicy::PRODUCT).is_empty(),
             "длина {len}"
         );
     }
@@ -128,7 +131,7 @@ fn wire_bad_header() {
         x[0] = v;
         let ok = v == LAN_HDR[0];
         assert_eq!(
-            !parse(&x, sock(SRC), OWN, &t, SrcPolicy::PRODUCT).is_empty(),
+            !parse(&x, sock(SRC), &[OWN], &t, SrcPolicy::PRODUCT).is_empty(),
             ok,
             "версия {v}"
         );
@@ -136,7 +139,7 @@ fn wire_bad_header() {
         y[1] = v;
         let ok = v == LAN_HDR[1];
         assert_eq!(
-            !parse(&y, sock(SRC), OWN, &t, SrcPolicy::PRODUCT).is_empty(),
+            !parse(&y, sock(SRC), &[OWN], &t, SrcPolicy::PRODUCT).is_empty(),
             ok,
             "резерв {v}"
         );
@@ -169,14 +172,14 @@ fn wire_src_class_table() {
     let t = crate::table::IdTable::from_peers(t_keys, W);
     for ip in ok_src {
         let d = build(&fx.refs(), W, ip, PORT, 0).unwrap()[0];
-        let f = parse(&d, sock(ip), OWN, &t, SrcPolicy::PRODUCT);
+        let f = parse(&d, sock(ip), &[OWN], &t, SrcPolicy::PRODUCT);
         assert_eq!(f.len(), 1, "{ip}");
         assert_eq!(f[0].addr.ip(), &ip);
     }
     let before = t.opens();
     for ip in bad_src {
         let d = build(&fx.refs(), W, ip, PORT, 0).unwrap()[0];
-        let f = parse(&d, sock(ip), OWN, &t, SrcPolicy::PRODUCT);
+        let f = parse(&d, sock(ip), &[OWN], &t, SrcPolicy::PRODUCT);
         assert!(f.is_empty(), "{ip}");
     }
     assert_eq!(t.opens(), before, "правила источника раньше AEAD");
@@ -184,11 +187,30 @@ fn wire_src_class_table() {
     let lo = Ipv4Addr::new(127, 0, 0, 2);
     let d = build(&fx.refs(), W, lo, PORT, 0).unwrap()[0];
     assert_eq!(
-        parse(&d, sock(lo), OWN, &t, SrcPolicy::LOOPBACK_OK).len(),
+        parse(&d, sock(lo), &[OWN], &t, SrcPolicy::LOOPBACK_OK).len(),
         1
     );
-    assert!(parse(&d, sock(lo), lo, &t, SrcPolicy::LOOPBACK_OK).is_empty());
-    assert!(parse(&d, sock(lo), OWN, &t, SrcPolicy::PRODUCT).is_empty());
+    assert!(parse(&d, sock(lo), &[lo], &t, SrcPolicy::LOOPBACK_OK).is_empty());
+    assert!(parse(&d, sock(lo), &[OWN], &t, SrcPolicy::PRODUCT).is_empty());
+}
+
+#[test]
+fn wire_src_any_own_dropped() {
+    let mut fx = fixture(1);
+    let d = build(&fx.refs(), W, SRC, PORT, 0).unwrap()[0];
+    let t = fx.table(W);
+    let other = Ipv4Addr::new(192, 168, 50, 99);
+    // источник совпал с любым из наших интерфейсов: отброшен
+    for own in [vec![SRC], vec![other, SRC], vec![SRC, other]] {
+        assert!(parse(&d, sock(SRC), &own, &t, SrcPolicy::PRODUCT).is_empty());
+    }
+    assert_eq!(t.opens(), 0, "правило источника раньше AEAD");
+    // не совпал ни с одним: принят
+    assert_eq!(
+        parse(&d, sock(SRC), &[other, OWN], &t, SrcPolicy::PRODUCT).len(),
+        1
+    );
+    assert_eq!(parse(&d, sock(SRC), &[], &t, SrcPolicy::PRODUCT).len(), 1);
 }
 
 #[test]
@@ -206,9 +228,12 @@ fn wire_v6_src_dropped() {
     ];
     for a in v6 {
         let s = SocketAddr::V6(SocketAddrV6::new(a, 55_555, 0, 0));
-        assert!(parse(&d, s, OWN, &t, SrcPolicy::PRODUCT).is_empty(), "{a}");
         assert!(
-            parse(&d, s, OWN, &t, SrcPolicy::LOOPBACK_OK).is_empty(),
+            parse(&d, s, &[OWN], &t, SrcPolicy::PRODUCT).is_empty(),
+            "{a}"
+        );
+        assert!(
+            parse(&d, s, &[OWN], &t, SrcPolicy::LOOPBACK_OK).is_empty(),
             "{a}"
         );
     }
@@ -229,7 +254,7 @@ fn wire_random_no_sighting() {
             seed ^= seed << 17;
             *b = seed.to_le_bytes()[0];
         }
-        assert!(parse(&d, sock(SRC), OWN, &t, SrcPolicy::PRODUCT).is_empty());
+        assert!(parse(&d, sock(SRC), &[OWN], &t, SrcPolicy::PRODUCT).is_empty());
     }
     assert_eq!(t.opens(), 0, "случайные слоты: ни одного вызова AEAD");
 }
@@ -240,9 +265,12 @@ fn wire_replay_other_ip_rejected() {
     let d = build(&fx.refs(), W, SRC, PORT, 0).unwrap()[0];
     let t = fx.table(W);
     let other = Ipv4Addr::new(192, 168, 50, 99);
-    assert!(parse(&d, sock(other), OWN, &t, SrcPolicy::PRODUCT).is_empty());
+    assert!(parse(&d, sock(other), &[OWN], &t, SrcPolicy::PRODUCT).is_empty());
     assert_eq!(t.opens(), 2, "метки нашлись, AEAD отказал");
-    assert_eq!(parse(&d, sock(SRC), OWN, &t, SrcPolicy::PRODUCT).len(), 2);
+    assert_eq!(
+        parse(&d, sock(SRC), &[OWN], &t, SrcPolicy::PRODUCT).len(),
+        2
+    );
 }
 
 #[test]
@@ -250,8 +278,8 @@ fn wire_replay_same_ip_same_info() {
     let mut fx = fixture(2);
     let d = build(&fx.refs(), W, SRC, PORT, 0).unwrap()[0];
     let mut t = fx.table(W);
-    let first = parse(&d, sock(SRC), OWN, &t, SrcPolicy::PRODUCT);
-    let again = parse(&d, sock(SRC), OWN, &t, SrcPolicy::PRODUCT);
+    let first = parse(&d, sock(SRC), &[OWN], &t, SrcPolicy::PRODUCT);
+    let again = parse(&d, sock(SRC), &[OWN], &t, SrcPolicy::PRODUCT);
     assert_eq!(first.len(), 2);
     let key = |v: &[chervo_addr::LanSighting]| -> HashSet<(PairId, std::net::SocketAddrV4)> {
         v.iter().map(|s| (s.pair, s.addr)).collect()
@@ -260,12 +288,12 @@ fn wire_replay_same_ip_same_info() {
     // окно позже (w+1): метки окна w ещё в таблице
     t.rebuild(W + 1);
     assert_eq!(
-        key(&parse(&d, sock(SRC), OWN, &t, SrcPolicy::PRODUCT)),
+        key(&parse(&d, sock(SRC), &[OWN], &t, SrcPolicy::PRODUCT)),
         key(&first)
     );
     t.rebuild(W - 1);
     assert_eq!(
-        key(&parse(&d, sock(SRC), OWN, &t, SrcPolicy::PRODUCT)),
+        key(&parse(&d, sock(SRC), &[OWN], &t, SrcPolicy::PRODUCT)),
         key(&first)
     );
 }
@@ -283,7 +311,7 @@ fn wire_window_pm2_rejected() {
     ] {
         let d = build(&fx.refs(), w, SRC, PORT, 0).unwrap()[0];
         let before = t.opens();
-        let f = parse(&d, sock(SRC), OWN, &t, SrcPolicy::PRODUCT);
+        let f = parse(&d, sock(SRC), &[OWN], &t, SrcPolicy::PRODUCT);
         assert_eq!(!f.is_empty(), hit, "окно {w}");
         if !hit {
             assert_eq!(t.opens(), before, "метка вне окон не даёт вызова AEAD");
@@ -314,7 +342,7 @@ fn wire_dup_pair_once() {
         }
     }
     let t = fx.table(W);
-    let f = parse(&d, sock(SRC), OWN, &t, SrcPolicy::PRODUCT);
+    let f = parse(&d, sock(SRC), &[OWN], &t, SrcPolicy::PRODUCT);
     assert_eq!(f.len(), 1);
     assert_eq!(f[0].addr.port(), PORT);
 }

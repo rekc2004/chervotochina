@@ -50,7 +50,7 @@ fn fuzz_smoke_beacon() {
     let valid = build(&fx.refs(), W, SRC, PORT, 0).unwrap()[0];
     let t = fx.table(W);
     let orig: HashSet<(PairId, SocketAddrV4)> =
-        parse(&valid, sock(SRC), OWN, &t, SrcPolicy::PRODUCT)
+        parse(&valid, sock(SRC), &[OWN], &t, SrcPolicy::PRODUCT)
             .iter()
             .map(|s| (s.pair, s.addr))
             .collect();
@@ -65,7 +65,7 @@ fn fuzz_smoke_beacon() {
             0 => {
                 let len = rng.below(700);
                 let v = rng.bytes(len);
-                assert!(parse(&v, sock(SRC), OWN, &t, SrcPolicy::PRODUCT).is_empty());
+                assert!(parse(&v, sock(SRC), &[OWN], &t, SrcPolicy::PRODUCT).is_empty());
                 crate::fuzz_beacon(&v);
                 random_in += 1;
             }
@@ -73,7 +73,7 @@ fn fuzz_smoke_beacon() {
             1 => {
                 let mut v = rng.bytes(DGRAM_LEN);
                 v[..2].copy_from_slice(&LAN_HDR);
-                assert!(parse(&v, sock(SRC), OWN, &t, SrcPolicy::PRODUCT).is_empty());
+                assert!(parse(&v, sock(SRC), &[OWN], &t, SrcPolicy::PRODUCT).is_empty());
                 crate::fuzz_beacon(&v);
                 random_in += 1;
             }
@@ -81,7 +81,7 @@ fn fuzz_smoke_beacon() {
             2 => {
                 let ip = Ipv4Addr::new(10, rng.byte(), rng.byte(), rng.byte());
                 if ip != SRC && ip != OWN {
-                    let f = parse(&valid, sock(ip), OWN, &t, SrcPolicy::PRODUCT);
+                    let f = parse(&valid, sock(ip), &[OWN], &t, SrcPolicy::PRODUCT);
                     assert!(f.is_empty(), "{ip}");
                 }
             }
@@ -97,7 +97,7 @@ fn fuzz_smoke_beacon() {
                     v.resize(len, rng.byte());
                 }
                 mutated += 1;
-                let f = parse(&v, sock(SRC), OWN, &t, SrcPolicy::PRODUCT);
+                let f = parse(&v, sock(SRC), &[OWN], &t, SrcPolicy::PRODUCT);
                 for s in &f {
                     assert!(orig.contains(&(s.pair, s.addr)), "другой порт или адрес");
                 }

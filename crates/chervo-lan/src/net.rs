@@ -49,8 +49,10 @@ pub(crate) enum Recv {
 
 pub(crate) struct Sockets {
     listen: UdpSocket,
-    send: Option<UdpSocket>,
-    send_ip: Ipv4Addr,
+    /// Интерфейсы, на которых приём вошёл в группу (в тесте: все заданные).
+    members: Vec<Ipv4Addr>,
+    /// Сокет отправки на каждый интерфейс: запрошенный адрес и сокет.
+    sends: Vec<(Ipv4Addr, UdpSocket)>,
     target: SocketAddrV4,
 }
 
@@ -58,7 +60,8 @@ fn is_busy(k: ErrorKind) -> bool {
     matches!(k, ErrorKind::AddrInUse)
 }
 
-fn open_listen(own: Ipv4Addr, route: Route) -> Result<UdpSocket, OpenError> {
+/// Один сокет приёма на все интерфейсы: привязка как в продукте или в тесте, без входа в группу.
+fn open_listen(route: Route) -> Result<Socket, OpenError> {
     let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
         .map_err(|_| OpenError::Other)?;
     let bind_to = match route {
@@ -81,17 +84,13 @@ fn open_listen(own: Ipv4Addr, route: Route) -> Result<UdpSocket, OpenError> {
             OpenError::Other
         }
     })?;
-    if matches!(route, Route::Product) {
-        sock.join_multicast_v4(&LAN_GROUP, &own)
-            .map_err(|_| OpenError::Other)?;
-    }
-    Ok(UdpSocket::from(sock))
+    Ok(sock)
 }
 
 fn open_send(own: Ipv4Addr, route: Route) -> Result<UdpSocket, OpenError> {
     let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
         .map_err(|_| OpenError::Other)?;
-    // в тесте адрес маршрута может быть выдуманным (частный, которого на машине нет): тогда
+    // в тесте адрес интерфейса может быть выдуманным (частный, которого на машине нет): тогда
     // отправитель привязывается к адресу приёма на петле, а запечатывается адресом привязки
     let from = match route {
         Route::Product => own,
@@ -113,46 +112,77 @@ fn open_send(own: Ipv4Addr, route: Route) -> Result<UdpSocket, OpenError> {
 }
 
 impl Sockets {
-    /// Открыть приём и, если `want_send`, отправку. Адрес отправки: `own`.
-    pub(crate) fn open(own: Ipv4Addr, want_send: bool, route: Route) -> Result<Self, OpenError> {
-        let listen = open_listen(own, route)?;
-        let send = if want_send {
-            Some(open_send(own, route)?)
-        } else {
-            None
-        };
+    /// Открыть приём на интерфейсах `members` и, если `want_send`, отправку с каждого из них.
+    /// Интерфейс, на котором не удался вход в группу (или открытие сокета отправки), отбрасывается;
+    /// не осталось ни одного: ошибка.
+    pub(crate) fn open(
+        members: &[Ipv4Addr],
+        want_send: bool,
+        route: Route,
+    ) -> Result<Self, OpenError> {
+        let listen = open_listen(route)?;
+        let mut joined: Vec<Ipv4Addr> = Vec::new();
+        for m in members {
+            let ok = match route {
+                Route::Product => listen.join_multicast_v4(&LAN_GROUP, m).is_ok(),
+                #[cfg(any(test, feature = "test-net"))]
+                Route::Test { .. } => true,
+            };
+            if ok && !joined.contains(m) {
+                joined.push(*m);
+            }
+        }
+        let mut sends: Vec<(Ipv4Addr, UdpSocket)> = Vec::new();
+        let mut kept: Vec<Ipv4Addr> = Vec::new();
+        for m in joined {
+            if want_send {
+                match open_send(m, route) {
+                    Ok(s) => sends.push((m, s)),
+                    Err(_) => continue,
+                }
+            }
+            kept.push(m);
+        }
+        if kept.is_empty() {
+            return Err(OpenError::Other);
+        }
         let target = match route {
             Route::Product => SocketAddrV4::new(LAN_GROUP, LAN_PORT),
             #[cfg(any(test, feature = "test-net"))]
             Route::Test { target, .. } => target,
         };
         Ok(Self {
-            listen,
-            send,
-            send_ip: own,
+            listen: UdpSocket::from(listen),
+            members: kept,
+            sends,
             target,
         })
     }
 
-    /// Адрес, которым запечатываются слоты: адрес привязки сокета отправки.
-    pub(crate) fn send_ip(&self) -> Ipv4Addr {
-        self.send
-            .as_ref()
-            .and_then(|s| match s.local_addr() {
-                Ok(SocketAddr::V4(a)) => Some(*a.ip()),
-                _ => None,
+    /// Интерфейсы, на которых идёт поиск.
+    pub(crate) fn members(&self) -> Vec<Ipv4Addr> {
+        self.members.clone()
+    }
+
+    /// Адреса, которыми запечатываются слоты: адрес привязки каждого сокета отправки.
+    pub(crate) fn send_ips(&self) -> Vec<Ipv4Addr> {
+        self.sends
+            .iter()
+            .map(|(m, s)| match s.local_addr() {
+                Ok(SocketAddr::V4(a)) => *a.ip(),
+                _ => *m,
             })
-            .unwrap_or(self.send_ip)
+            .collect()
     }
 
     pub(crate) fn can_send(&self) -> bool {
-        self.send.is_some()
+        !self.sends.is_empty()
     }
 
-    /// Отправка одной датаграммы на назначение; без сокета отправки (режим «слушать») ничего не
-    /// делает и сообщает об ошибке.
-    pub(crate) fn send(&self, d: &[u8]) -> bool {
-        let Some(s) = self.send.as_ref() else {
+    /// Отправка одной датаграммы сокетом номер `i` на назначение; без такого сокета (режим
+    /// «слушать») ничего не делает и сообщает об ошибке.
+    pub(crate) fn send(&self, i: usize, d: &[u8]) -> bool {
+        let Some((_, s)) = self.sends.get(i) else {
             return false;
         };
         matches!(s.send_to(d, SocketAddr::V4(self.target)), Ok(n) if n == d.len())

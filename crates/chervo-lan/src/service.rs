@@ -6,18 +6,21 @@
 //! Ничего не печатается и не пишется в журнал.
 
 use std::collections::VecDeque;
-use std::net::IpAddr;
+#[cfg(any(test, feature = "test-net"))]
+use std::net::{IpAddr, SocketAddrV4};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use chervo_addr::{AddrClass, LanDiscovery, LanLocal, LanMode, LanSighting, LanStatus, classify};
+use chervo_addr::{LanDiscovery, LanLocal, LanMode, LanSighting, LanStatus, route_source_for};
 use chervo_identity::{KxPeer, LAN_WINDOW_SECS, LanKeys, PairId};
 
+use crate::ifaces::select;
 use crate::limits::{
-    BURST, FAIL_RETRY, INTERVAL, JITTER, MAX_PEERS, MAX_SIGHTINGS, READ_TIMEOUT, RECV_BUF,
-    SEND_BUDGET_COUNT, SEND_BUDGET_WINDOW,
+    BURST, DGRAM_LEN, FAIL_RETRY, INTERVAL, JITTER, MAX_PEERS, MAX_SIGHTINGS, READ_TIMEOUT,
+    RECV_BUF, SEND_BUDGET_COUNT, SEND_BUDGET_WINDOW, SWEEP_INTERVAL,
 };
 use crate::net::{OpenError, Recv, Route, Sockets};
 use crate::rate::{RxLimiter, RxVerdict};
@@ -26,17 +29,32 @@ use crate::wire::{SrcPolicy, build, parse};
 
 /// Тестовая сеть на петле: юникаст вместо группы. Только под `test` и `test-net`.
 #[cfg(any(test, feature = "test-net"))]
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct TestNet {
     /// Куда уходят датаграммы.
-    pub target: std::net::SocketAddrV4,
+    pub target: SocketAddrV4,
     /// Адрес приёма (порт `listen_port`); общий доступ к порту не включается.
-    pub bind: std::net::Ipv4Addr,
+    pub bind: Ipv4Addr,
     pub listen_port: u16,
     /// Принимать источники из `127.0.0.0/8` (адрес самого получателя всё равно отбрасывается).
     pub allow_loopback: bool,
-    /// Период раунда; серия после запуска и разброс сжимаются в той же пропорции.
+    /// Период раунда; серия после запуска, разброс и повторный опрос интерфейсов сжимаются в
+    /// той же пропорции.
     pub interval: Duration,
+    /// Вместо опроса маршрутов системы: «какой свой адрес был бы на пути к цели».
+    pub oracle: TestOracle,
+}
+
+/// Подставной опрос маршрутов для тестов.
+#[cfg(any(test, feature = "test-net"))]
+pub type TestOracle = Arc<dyn Fn(SocketAddrV4) -> Option<IpAddr> + Send + Sync>;
+
+#[cfg(any(test, feature = "test-net"))]
+impl TestNet {
+    /// Опрос, который никогда ничего не находит: интерфейс остаётся один, адрес из `set_local`.
+    pub fn no_oracle() -> TestOracle {
+        Arc::new(|_| None)
+    }
 }
 
 #[cfg(any(test, feature = "test-net"))]
@@ -46,7 +64,7 @@ impl std::fmt::Debug for TestNet {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Cfg {
     interval: Duration,
     policy: SrcPolicy,
@@ -66,7 +84,7 @@ impl Cfg {
 
     fn route(&self) -> Route {
         #[cfg(any(test, feature = "test-net"))]
-        if let Some(t) = self.test {
+        if let Some(t) = &self.test {
             return Route::Test {
                 bind: t.bind,
                 port: t.listen_port,
@@ -74,6 +92,21 @@ impl Cfg {
             };
         }
         Route::Product
+    }
+
+    /// Опрос маршрутов: набор интерфейсов для адреса по умолчанию `default`. Пакетов не шлёт.
+    fn sweep(&self, default: Ipv4Addr, stop: &dyn Fn() -> bool) -> Vec<Ipv4Addr> {
+        #[cfg(any(test, feature = "test-net"))]
+        if let Some(t) = &self.test {
+            let oracle = t.oracle.clone();
+            return select(default, &mut |a| oracle(a), self.policy, stop);
+        }
+        select(
+            default,
+            &mut |a| route_source_for(SocketAddr::V4(a)),
+            self.policy,
+            stop,
+        )
     }
 }
 
@@ -95,6 +128,8 @@ struct Shared {
     finished: AtomicBool,
     rx_total: AtomicU64,
     rx_passed: AtomicU64,
+    /// Адреса интерфейсов, на которых идёт поиск (пусто при `Off` и без адреса).
+    addrs: Mutex<Vec<Ipv4Addr>>,
     now_unix: Arc<dyn Fn() -> u64 + Send + Sync>,
     cfg: Cfg,
 }
@@ -133,15 +168,6 @@ fn idle_status(mode: LanMode, local_ok: bool) -> LanStatus {
         LanStatus::NoPrivateRoute
     } else {
         LanStatus::Failed
-    }
-}
-
-fn local_ok(cfg: &Cfg, l: Option<LanLocal>) -> Option<LanLocal> {
-    let l = l?;
-    match classify(IpAddr::V4(l.own)) {
-        AddrClass::Private => Some(l),
-        AddrClass::Loopback if cfg.policy.allow_loopback => Some(l),
-        _ => None,
     }
 }
 
@@ -220,6 +246,7 @@ impl LanBeacon {
             finished: AtomicBool::new(false),
             rx_total: AtomicU64::new(0),
             rx_passed: AtomicU64::new(0),
+            addrs: Mutex::new(Vec::new()),
             now_unix,
             cfg,
         });
@@ -235,6 +262,12 @@ impl LanBeacon {
             g.mode = m;
         }
         self.after_change();
+    }
+
+    /// Адреса интерфейсов, на которых идёт поиск сейчас (до `MAX_IFACES`); пусто при `Off`,
+    /// без адреса и без частных интерфейсов.
+    pub fn addrs(&self) -> Vec<Ipv4Addr> {
+        lock(&self.shared.addrs).clone()
     }
 
     /// Только для проверок вручную и тестов: сколько датаграмм принято и сколько прошло
@@ -268,7 +301,7 @@ impl LanBeacon {
             let g = lock(&self.shared.inbox);
             (g.mode, g.local)
         };
-        let ok = local_ok(&self.shared.cfg, local).is_some();
+        let ok = local.is_some();
         let want = mode != LanMode::Off && ok;
         let mut h = lock(&self.handle);
         if h.is_none() {
@@ -341,22 +374,39 @@ impl LanDiscovery for LanBeacon {
 // Поток службы
 // ----------------------------------------------------------------------------------------
 
+/// Для чего открыты (или не открылись) сокеты: адрес, «отправлять ли» и набор интерфейсов.
+#[derive(Clone, PartialEq, Eq)]
+struct OpenKey {
+    local: LanLocal,
+    send: bool,
+    members: Vec<Ipv4Addr>,
+}
+
 struct Worker<'a> {
     sh: &'a Shared,
     table: IdTable,
     limiter: RxLimiter,
     net: Option<Sockets>,
-    /// Для чего открыты сокеты: адрес и «отправлять ли».
-    opened_for: Option<(LanLocal, bool)>,
+    /// Для чего открыты сокеты.
+    opened_for: Option<OpenKey>,
     /// Для чего открытие не удалось, и когда пробовать снова.
-    failed_for: Option<(LanLocal, bool)>,
+    failed_for: Option<OpenKey>,
     fail_until: Option<Instant>,
     seen_seq: u64,
     pair_ids: Vec<[u8; 16]>,
     bursts: VecDeque<Instant>,
     next_regular: Option<Instant>,
     round: u64,
-    sent: VecDeque<Instant>,
+    /// Бюджет отправки отдельно на каждый сокет отправки (по порядку `Sockets::send_ips`).
+    sent: Vec<VecDeque<Instant>>,
+    /// Интерфейсы по итогу последнего опроса маршрутов.
+    members: Vec<Ipv4Addr>,
+    /// Для какого адреса и режима и когда сделан последний опрос.
+    sweep_for: Option<LanLocal>,
+    last_mode: LanMode,
+    last_sweep: Option<Instant>,
+    /// Фактические адреса приёма (вошли в группу); по ним отбрасываются свои датаграммы.
+    effective: Vec<Ipv4Addr>,
     /// Окно подсчёта ошибок приёма: начало и число.
     rx_err: (Instant, u32),
     buf: [u8; RECV_BUF],
@@ -376,7 +426,12 @@ fn run(sh: &Arc<Shared>) {
         bursts: VecDeque::new(),
         next_regular: None,
         round: 0,
-        sent: VecDeque::new(),
+        sent: Vec::new(),
+        members: Vec::new(),
+        sweep_for: None,
+        last_mode: LanMode::Off,
+        last_sweep: None,
+        effective: Vec::new(),
         rx_err: (Instant::now(), 0),
         buf: [0u8; RECV_BUF],
     };
@@ -384,12 +439,17 @@ fn run(sh: &Arc<Shared>) {
         w.step();
     }
     w.net = None;
+    w.publish_addrs(&[]);
     sh.finished.store(true, Ordering::SeqCst);
 }
 
 impl Worker<'_> {
     fn set_status(&self, s: LanStatus) {
         self.sh.status.store(status_to_u8(s), Ordering::SeqCst);
+    }
+
+    fn publish_addrs(&self, addrs: &[Ipv4Addr]) {
+        *lock(&self.sh.addrs) = addrs.to_vec();
     }
 
     fn window_now(&self) -> u64 {
@@ -408,11 +468,13 @@ impl Worker<'_> {
         } else if w != self.table.window() {
             self.table.rebuild(w);
         }
+        let mut force_sweep = false;
         if seq != self.seen_seq {
             self.seen_seq = seq;
             self.fail_until = None;
+            force_sweep = true;
         }
-        self.apply(mode, local_ok(&self.sh.cfg, local), now);
+        self.apply(mode, local, now, force_sweep);
         self.send_if_due(mode, now);
         self.receive(mode, now);
     }
@@ -441,33 +503,82 @@ impl Worker<'_> {
             .collect();
     }
 
-    /// Открыть, закрыть или перекрыть сокеты под текущие режим и адрес.
-    fn apply(&mut self, mode: LanMode, local: Option<LanLocal>, now: Instant) {
-        let Some(l) = local.filter(|_| mode != LanMode::Off) else {
-            self.net = None;
-            self.opened_for = None;
-            self.failed_for = None;
-            self.fail_until = None;
-            self.bursts.clear();
-            self.next_regular = None;
-            self.set_status(idle_status(mode, local.is_some()));
-            return;
-        };
-        let want_send = mode == LanMode::Announce;
-        let key = (l, want_send);
-        if self.net.is_some() && self.opened_for == Some(key) {
-            return;
-        }
-        if self.failed_for == Some(key) && self.fail_until.is_some_and(|t| now < t) {
-            return;
-        }
-        // порт нужно освободить до повторной привязки
+    /// Закрыть сокеты и забыть расписание.
+    fn close_net(&mut self) {
         self.net = None;
         self.opened_for = None;
         self.bursts.clear();
         self.next_regular = None;
-        match Sockets::open(l.own, want_send, self.sh.cfg.route()) {
+        self.sent.clear();
+        self.effective.clear();
+        self.publish_addrs(&[]);
+    }
+
+    /// Опрос маршрутов (нужен при выходе из `Off`, при `set_local`, при смене режима и раз в
+    /// `SWEEP_INTERVAL`): набор интерфейсов. Идёт в потоке службы, пакетов не отправляет.
+    fn sweep_if_due(&mut self, mode: LanMode, l: LanLocal, now: Instant, force: bool) {
+        let iv = self.sh.cfg.interval;
+        let due = force
+            || self.sweep_for != Some(l)
+            || mode != self.last_mode
+            || self
+                .last_sweep
+                .is_none_or(|t| now.saturating_duration_since(t) >= scaled(SWEEP_INTERVAL, iv));
+        if !due {
+            return;
+        }
+        let sh = self.sh;
+        let stop = move || sh.stop.load(Ordering::SeqCst);
+        self.members = sh.cfg.sweep(l.own, &stop);
+        self.sweep_for = Some(l);
+        self.last_sweep = Some(Instant::now());
+    }
+
+    /// Открыть, закрыть или перекрыть сокеты под текущие режим, адрес и набор интерфейсов.
+    fn apply(&mut self, mode: LanMode, local: Option<LanLocal>, now: Instant, force_sweep: bool) {
+        let Some(l) = local.filter(|_| mode != LanMode::Off) else {
+            self.close_net();
+            self.members.clear();
+            self.sweep_for = None;
+            self.last_sweep = None;
+            self.last_mode = mode;
+            self.failed_for = None;
+            self.fail_until = None;
+            self.set_status(idle_status(mode, local.is_some()));
+            return;
+        };
+        self.sweep_if_due(mode, l, now, force_sweep);
+        self.last_mode = mode;
+        if self.sh.stop.load(Ordering::SeqCst) {
+            return;
+        }
+        if self.members.is_empty() {
+            // ни одного частного интерфейса
+            self.close_net();
+            self.failed_for = None;
+            self.fail_until = None;
+            self.set_status(LanStatus::NoPrivateRoute);
+            return;
+        }
+        let want_send = mode == LanMode::Announce;
+        let key = OpenKey {
+            local: l,
+            send: want_send,
+            members: self.members.clone(),
+        };
+        if self.net.is_some() && self.opened_for.as_ref() == Some(&key) {
+            return;
+        }
+        if self.failed_for.as_ref() == Some(&key) && self.fail_until.is_some_and(|t| now < t) {
+            return;
+        }
+        // порт нужно освободить до повторной привязки
+        self.close_net();
+        match Sockets::open(&key.members, want_send, self.sh.cfg.route()) {
             Ok(n) => {
+                self.effective = n.members();
+                self.sent = n.send_ips().iter().map(|_| VecDeque::new()).collect();
+                self.publish_addrs(&self.effective);
                 self.net = Some(n);
                 self.opened_for = Some(key);
                 self.failed_for = None;
@@ -501,10 +612,10 @@ impl Worker<'_> {
     fn send_if_due(&mut self, mode: LanMode, now: Instant) {
         let can = self.net.as_ref().is_some_and(Sockets::can_send);
         let ready = mode == LanMode::Announce && self.table.peer_count() > 0 && can;
-        let opened = self.opened_for.filter(|o| o.0.listen_port != 0);
+        let opened = self.opened_for.clone().filter(|o| o.local.listen_port != 0);
         let Some(opened) = opened.filter(|_| ready) else {
             // отправлять нечего или нельзя: расписание не копится (оно вернётся со сменой
-            // набора пар или адреса)
+            // набора пар, адреса или интерфейсов)
             self.bursts.clear();
             self.next_regular = None;
             return;
@@ -514,44 +625,53 @@ impl Worker<'_> {
         }
         let iv = self.sh.cfg.interval;
         let w = self.window_now();
-        let src = self.net.as_ref().map_or(opened.0.own, Sockets::send_ip);
+        let srcs = self.net.as_ref().map_or_else(Vec::new, Sockets::send_ips);
         let round = self.round;
         self.round = self.round.wrapping_add(1);
-        let peers: Vec<(PairId, &LanKeys)> = self.table.peers().collect();
-        // сбой ГСЧ или сборки: ничего не отправляется, следующий раунд по расписанию
-        let dgrams = build(&peers, w, src, opened.0.listen_port, round).unwrap_or_default();
         while self.bursts.front().is_some_and(|t| *t <= now) {
             self.bursts.pop_front();
         }
         self.next_regular = now.checked_add(jittered(iv, scaled(JITTER, iv)));
-        for d in &dgrams {
-            while self
-                .sent
-                .front()
-                .is_some_and(|t| now.saturating_duration_since(*t) >= SEND_BUDGET_WINDOW)
-            {
-                self.sent.pop_front();
+        let peers: Vec<(PairId, &LanKeys)> = self.table.peers().collect();
+        // слот запечатывается адресом привязки своего сокета, поэтому датаграммы у каждого
+        // интерфейса свои; сбой ГСЧ или сборки: ничего не отправляется, следующий раунд по
+        // расписанию
+        let per_iface: Vec<Vec<[u8; DGRAM_LEN]>> = srcs
+            .iter()
+            .map(|src| build(&peers, w, *src, opened.local.listen_port, round).unwrap_or_default())
+            .collect();
+        for (i, dgrams) in per_iface.iter().enumerate() {
+            for d in dgrams {
+                let Some(log) = self.sent.get_mut(i) else {
+                    break;
+                };
+                while log
+                    .front()
+                    .is_some_and(|t| now.saturating_duration_since(*t) >= SEND_BUDGET_WINDOW)
+                {
+                    log.pop_front();
+                }
+                if log.len() >= SEND_BUDGET_COUNT {
+                    break;
+                }
+                let ok = self.net.as_ref().is_some_and(|n| n.send(i, d));
+                if !ok {
+                    self.close_net();
+                    self.failed_for = Some(opened);
+                    self.fail_until = now.checked_add(FAIL_RETRY);
+                    self.set_status(LanStatus::Failed);
+                    return;
+                }
+                log.push_back(now);
             }
-            if self.sent.len() >= SEND_BUDGET_COUNT {
-                break;
-            }
-            let ok = self.net.as_ref().is_some_and(|n| n.send(d));
-            if !ok {
-                self.net = None;
-                self.opened_for = None;
-                self.failed_for = Some(opened);
-                self.fail_until = now.checked_add(FAIL_RETRY);
-                self.bursts.clear();
-                self.next_regular = None;
-                self.set_status(LanStatus::Failed);
-                return;
-            }
-            self.sent.push_back(now);
         }
     }
 
     fn receive(&mut self, mode: LanMode, now: Instant) {
-        let Some(opened) = self.opened_for else {
+        if self.opened_for.is_none() {
+            if self.sh.stop.load(Ordering::SeqCst) {
+                return;
+            }
             // сокетов нет: ждём изменения входных данных или остановки
             let g = lock(&self.sh.inbox);
             let _ = self
@@ -560,7 +680,7 @@ impl Worker<'_> {
                 .wait_timeout(g, READ_TIMEOUT)
                 .unwrap_or_else(PoisonError::into_inner);
             return;
-        };
+        }
         let wait = if mode == LanMode::Announce {
             self.due()
                 .map_or(READ_TIMEOUT, |t| t.saturating_duration_since(now))
@@ -583,7 +703,7 @@ impl Worker<'_> {
                     self.table.rebuild(w);
                 }
                 let found = self.buf.get(..len).map_or_else(Vec::new, |d| {
-                    parse(d, src, opened.0.own, &self.table, self.sh.cfg.policy)
+                    parse(d, src, &self.effective, &self.table, self.sh.cfg.policy)
                 });
                 self.push_sightings(found);
             }

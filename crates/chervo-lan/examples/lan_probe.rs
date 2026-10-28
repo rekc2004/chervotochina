@@ -1,13 +1,17 @@
 //! Ручная проверка поиска в локальной сети (этап 13в). Не часть продукта.
 //!
 //! ```text
+//! cargo run -p chervo-lan --example lan_probe -- ifaces
 //! cargo run -p chervo-lan --example lan_probe -- join-check
 //! cargo run -p chervo-lan --example lan_probe -- listen [SECS]
 //! cargo run -p chervo-lan --example lan_probe -- announce-test --i-know [SECS]
 //! ```
 //!
-//! `join-check` ничего не отправляет: открывает приём на маршрутном адресе, входит в группу и
-//! сообщает, получилось ли (код возврата 0 или 1).
+//! `ifaces` печатает адрес маршрута по умолчанию, найденный набор интерфейсов (опрос маршрутов
+//! по 533 типичным домашним адресам: `UDP connect` без отправки), число обращений к опросу и
+//! время. Сокетов приёма и отправки не открывает, ничего не отправляет.
+//! `join-check` ничего не отправляет: открывает приём на найденных интерфейсах, входит в группу
+//! и сообщает, получилось ли (код возврата 0 или 1).
 //! `listen` то же, но держит приём SECS секунд (по умолчанию 10, не больше 3600) и печатает,
 //! сколько датаграмм принято и сколько из них прошло ограничение. Ничего не отправляет.
 //! `announce-test` РАССЫЛАЕТ маяк в локальную сеть с выдуманной парой (для проверки приёма на
@@ -21,7 +25,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chervo_addr::{LanDiscovery, LanLocal, LanMode, LanStatus, probe_route_sources};
 use chervo_identity::{IdentityError, KxPeer, PairId, SecretStore, create};
-use chervo_lan::{LAN_PORT, LanBeacon, status_text};
+use chervo_lan::{LAN_PORT, LanBeacon, status_text, sweep_report};
 use zeroize::Zeroizing;
 
 fn now_unix() -> u64 {
@@ -100,9 +104,9 @@ fn fake_peer() -> Option<KxPeer> {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str).unwrap_or_default();
-    if !matches!(cmd, "join-check" | "listen" | "announce-test") {
+    if !matches!(cmd, "ifaces" | "join-check" | "listen" | "announce-test") {
         println!(
-            "использование: lan_probe join-check | listen [SECS] | announce-test --i-know [SECS]"
+            "использование: lan_probe ifaces | join-check | listen [SECS] | announce-test --i-know [SECS]"
         );
         return ExitCode::FAILURE;
     }
@@ -112,17 +116,28 @@ fn main() -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
-    let Some(own) = probe_route_sources().v4 else {
+    let default = probe_route_sources().v4;
+    if cmd == "ifaces" {
+        let t = Instant::now();
+        let (set, calls) = sweep_report(default.unwrap_or(Ipv4Addr::UNSPECIFIED));
+        let ms = t.elapsed().as_millis();
+        println!("адрес по умолчанию: {default:?}");
+        println!("интерфейсы ({}): {set:?}", set.len());
+        println!("обращений к опросу {calls}, {ms} мс");
+        return ExitCode::SUCCESS;
+    }
+    let Some(own) = default else {
         println!("нет маршрутного IPv4");
         return ExitCode::FAILURE;
     };
-    println!("порт маяка {LAN_PORT}, маршрутный адрес {own}");
+    println!("порт маяка {LAN_PORT}, адрес по умолчанию {own}");
 
     match cmd {
         "join-check" | "listen" => {
             let b = start(LanMode::Listen, own);
             let st = wait_status(&b, LanStatus::Listening);
             println!("{cmd}: {st:?}: {}", status_text(st));
+            println!("{cmd}: интерфейсы {:?}", b.addrs());
             if st != LanStatus::Listening {
                 b.shutdown();
                 return ExitCode::FAILURE;

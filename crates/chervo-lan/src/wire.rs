@@ -116,14 +116,14 @@ pub(crate) fn build(
     Ok(out)
 }
 
-/// Правила источника: только IPv4 (IPv6 и v4-mapped отбрасываются), не наш адрес, класс
-/// `Private` (в тестах ещё `Loopback`). Возвращает адрес для AAD.
-fn src_ip(src: SocketAddr, own: Ipv4Addr, policy: SrcPolicy) -> Option<Ipv4Addr> {
+/// Правила источника: только IPv4 (IPv6 и v4-mapped отбрасываются), не адрес ни одного из
+/// наших интерфейсов `own`, класс `Private` (в тестах ещё `Loopback`). Возвращает адрес для AAD.
+fn src_ip(src: SocketAddr, own: &[Ipv4Addr], policy: SrcPolicy) -> Option<Ipv4Addr> {
     let SocketAddr::V4(v4) = src else {
         return None;
     };
     let ip = *v4.ip();
-    if ip == own {
+    if own.contains(&ip) {
         return None;
     }
     match classify(IpAddr::V4(ip)) {
@@ -137,7 +137,7 @@ fn src_ip(src: SocketAddr, own: Ipv4Addr, policy: SrcPolicy) -> Option<Ipv4Addr>
 pub(crate) fn parse(
     dgram: &[u8],
     src: SocketAddr,
-    own: Ipv4Addr,
+    own: &[Ipv4Addr],
     table: &IdTable,
     policy: SrcPolicy,
 ) -> Vec<LanSighting> {

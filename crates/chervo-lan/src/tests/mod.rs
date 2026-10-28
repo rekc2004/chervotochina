@@ -10,6 +10,7 @@
 //! Тесты чистых модулей (этап 13в, часть L2).
 
 mod fuzz;
+mod ifaces;
 mod misc;
 mod rate;
 mod src_guard;

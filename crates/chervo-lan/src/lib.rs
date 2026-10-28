@@ -15,6 +15,7 @@
 )]
 
 mod error;
+mod ifaces;
 mod limits;
 mod net;
 mod rate;
@@ -40,6 +41,24 @@ pub use texts::{
     STATUS_PORT_BUSY_TEXT, mode_text, status_text,
 };
 
+/// Только для проверок вручную (`lan_probe ifaces`): набор интерфейсов для адреса по умолчанию
+/// `default` по опросу маршрутов системы и число обращений к опросу. Пакетов не отправляет,
+/// сокетов приёма и отправки не открывает.
+#[doc(hidden)]
+pub fn sweep_report(default: std::net::Ipv4Addr) -> (Vec<std::net::Ipv4Addr>, usize) {
+    let mut calls = 0usize;
+    let set = ifaces::select(
+        default,
+        &mut |a| {
+            calls = calls.saturating_add(1);
+            chervo_addr::route_source_for(std::net::SocketAddr::V4(a))
+        },
+        wire::SrcPolicy::PRODUCT,
+        &|| false,
+    );
+    (set, calls)
+}
+
 /// Только для фаззинга: разбор произвольных байт как датаграммы маяка против фиксированной
 /// таблицы из трёх тестовых пар. Ничего не возвращает; паника здесь была бы найденной ошибкой.
 #[cfg(any(test, feature = "fuzzing"))]
@@ -52,5 +71,5 @@ pub fn fuzz_beacon(bytes: &[u8]) {
     let t = TABLE.get_or_init(|| testkit::fuzz_table(3));
     let own = Ipv4Addr::new(192, 168, 50, 1);
     let src = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 50, 7), 45_000));
-    let _ = wire::parse(bytes, src, own, t, wire::SrcPolicy::PRODUCT);
+    let _ = wire::parse(bytes, src, &[own], t, wire::SrcPolicy::PRODUCT);
 }

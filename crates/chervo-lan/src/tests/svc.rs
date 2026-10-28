@@ -2,16 +2,18 @@
 //! разных участников; порты берутся из общего счётчика и проверяются привязкой.
 
 use std::collections::HashSet;
-use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::net::{IpAddr, Ipv4Addr, SocketAddrV4, UdpSocket};
+use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chervo_addr::{LanDiscovery, LanLocal, LanMode, LanSighting, LanStatus};
 use chervo_identity::{KxPeer, PairId};
 
-use crate::service::{LanBeacon, TestNet};
+use crate::service::{LanBeacon, TestNet, TestOracle};
+use crate::table::IdTable;
 use crate::testkit::peer_duo;
+use crate::wire::{SrcPolicy, parse};
 
 const A_IP: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 2);
 const B_IP: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 3);
@@ -44,6 +46,17 @@ fn mk(
     target: SocketAddrV4,
     interval: Duration,
 ) -> LanBeacon {
+    mk_oracle(mode, bind, port, target, interval, TestNet::no_oracle())
+}
+
+fn mk_oracle(
+    mode: LanMode,
+    bind: Ipv4Addr,
+    port: u16,
+    target: SocketAddrV4,
+    interval: Duration,
+    oracle: TestOracle,
+) -> LanBeacon {
     LanBeacon::new_on_loopback(
         mode,
         clock(),
@@ -53,6 +66,7 @@ fn mk(
             listen_port: port,
             allow_loopback: true,
             interval,
+            oracle,
         },
     )
 }
@@ -176,14 +190,30 @@ fn svc_no_local_sends_nothing() {
     assert_eq!(collect(&rec, Duration::from_millis(1500)).len(), 0);
     assert_eq!(b.status(), LanStatus::NoPrivateRoute);
     assert!(!b.thread_started());
-    // адрес не частный (не петля в продукте) считается отсутствием адреса
-    let prod = LanBeacon::new(LanMode::Announce, clock());
-    prod.set_local(local(Ipv4Addr::new(8, 8, 8, 8), 40_000));
-    assert_eq!(prod.status(), LanStatus::NoPrivateRoute);
-    assert!(!prod.thread_started());
-    prod.set_local(local(Ipv4Addr::new(100, 64, 0, 5), 40_000));
-    assert_eq!(prod.status(), LanStatus::NoPrivateRoute);
-    assert!(!prod.thread_started());
+    // адрес по умолчанию не частный и опрос ничего не нашёл: частных интерфейсов нет, ничего
+    // не открыто и не отправлено
+    for default in [
+        Ipv4Addr::new(8, 8, 8, 8),
+        Ipv4Addr::new(100, 64, 0, 5),
+        Ipv4Addr::new(198, 18, 0, 1),
+    ] {
+        let rp = port_for(REC_IP);
+        let rec = recorder(rp);
+        let (pa, _, _) = peers(1);
+        let c = mk(
+            LanMode::Announce,
+            A_IP,
+            port_for(A_IP),
+            rec_target(rp),
+            Duration::from_millis(100),
+        );
+        c.set_peers(pa);
+        c.set_local(local(default, 40_000));
+        assert!(wait_until(Duration::from_secs(2), || c.status()
+            == LanStatus::NoPrivateRoute));
+        assert_eq!(collect(&rec, Duration::from_millis(600)).len(), 0);
+        assert!(c.addrs().is_empty());
+    }
 }
 
 #[test]
@@ -490,6 +520,205 @@ fn svc_shutdown_fast() {
     assert!(
         took <= Duration::from_millis(300),
         "остановка заняла {took:?}"
+    );
+}
+
+// ---------------------------------------------------------------- несколько интерфейсов
+
+/// Подставной опрос маршрутов: «цель -> какой свой адрес»; таблицу можно менять на ходу.
+type Routes = Arc<Mutex<Vec<(Ipv4Addr, Ipv4Addr)>>>;
+
+fn routes_oracle(t: &Routes) -> TestOracle {
+    let t = t.clone();
+    Arc::new(move |a: SocketAddrV4| {
+        t.lock()
+            .unwrap()
+            .iter()
+            .find(|(target, _)| target == a.ip())
+            .map(|(_, own)| IpAddr::V4(*own))
+    })
+}
+
+const HOME_GW: Ipv4Addr = Ipv4Addr::new(192, 168, 1, 1);
+const OTHER_GW: Ipv4Addr = Ipv4Addr::new(10, 1, 0, 1);
+const IF_1: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 1);
+const IF_4: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 4);
+
+/// Источники всех датаграмм, пришедших на приёмник за `dur`.
+fn collect_sources(s: &UdpSocket, dur: Duration) -> Vec<Ipv4Addr> {
+    let end = Instant::now() + dur;
+    let mut out = Vec::new();
+    let mut buf = [0u8; 2048];
+    while Instant::now() < end {
+        if let Ok((_, std::net::SocketAddr::V4(src))) = s.recv_from(&mut buf) {
+            out.push(*src.ip());
+        }
+    }
+    out
+}
+
+fn sorted_ips(mut v: Vec<Ipv4Addr>) -> Vec<Ipv4Addr> {
+    v.sort();
+    v
+}
+
+#[test]
+fn svc_multi_iface_both_send() {
+    let (pa, pb, ids) = peers(1);
+    let rp = port_for(REC_IP);
+    let rec = recorder(rp);
+    let iv = Duration::from_millis(200);
+    let routes: Routes = Arc::new(Mutex::new(vec![(HOME_GW, IF_1), (OTHER_GW, IF_4)]));
+    let a = mk_oracle(
+        LanMode::Announce,
+        A_IP,
+        port_for(A_IP),
+        rec_target(rp),
+        iv,
+        routes_oracle(&routes),
+    );
+    a.set_peers(pa);
+    // адрес по умолчанию (туннель, класс не частный) не годится; интерфейсы находит опрос
+    a.set_local(local(Ipv4Addr::new(198, 18, 0, 1), 40_001));
+    // приёмник вместо сети записывает датаграммы с адресами отправителей
+    let end = Instant::now() + Duration::from_millis(1500);
+    let mut raw: Vec<(std::net::SocketAddr, Vec<u8>)> = Vec::new();
+    let mut buf = [0u8; 2048];
+    while Instant::now() < end {
+        if let Ok((n, src)) = rec.recv_from(&mut buf) {
+            raw.push((src, buf[..n].to_vec()));
+        }
+    }
+    assert_eq!(sorted_ips(a.addrs()), vec![IF_1, IF_4]);
+    assert_eq!(a.status(), LanStatus::Announcing);
+    // получатель с ключами второй стороны разбирает датаграммы обоих интерфейсов
+    let keys = pb[0].lan_keys().unwrap();
+    let table = IdTable::from_peers(vec![(ids[0], keys)], 1_700_000_000 / 30);
+    let mut seen: HashSet<SocketAddrV4> = HashSet::new();
+    for (src, d) in &raw {
+        for s in parse(d, *src, &[B_IP], &table, SrcPolicy::LOOPBACK_OK) {
+            assert_eq!(s.pair, ids[0]);
+            seen.insert(s.addr);
+        }
+    }
+    let want: HashSet<SocketAddrV4> = [
+        SocketAddrV4::new(IF_1, 40_001),
+        SocketAddrV4::new(IF_4, 40_001),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(seen, want, "получено датаграмм {}", raw.len());
+    // выключен: адресов нет
+    a.set_mode(LanMode::Off);
+    assert!(wait_until(Duration::from_secs(2), || a.addrs().is_empty()));
+}
+
+#[test]
+fn svc_rebind_on_iface_change() {
+    let (pa, pb, _) = peers(1);
+    let (port_a, port_b) = (port_for(A_IP), port_for(B_IP));
+    let iv = Duration::from_millis(200);
+    let routes: Routes = Arc::new(Mutex::new(Vec::new()));
+    let a = mk_oracle(
+        LanMode::Announce,
+        A_IP,
+        port_a,
+        SocketAddrV4::new(B_IP, port_b),
+        iv,
+        routes_oracle(&routes),
+    );
+    let b = mk(
+        LanMode::Listen,
+        B_IP,
+        port_b,
+        SocketAddrV4::new(A_IP, port_a),
+        iv,
+    );
+    a.set_peers(pa);
+    b.set_peers(pb);
+    a.set_local(local(A_IP, 40_001));
+    b.set_local(local(B_IP, 40_002));
+    let mut got = Vec::new();
+    assert!(gather(&b, &mut got, Duration::from_secs(3), |g| !g.is_empty()));
+    assert_eq!(a.addrs(), vec![A_IP]);
+    // второй интерфейс появился (сеть сменилась под VPN), `set_local` не вызывался
+    routes.lock().unwrap().push((HOME_GW, IF_4));
+    assert!(wait_until(Duration::from_secs(3), || a.addrs().len() == 2));
+    assert_eq!(sorted_ips(a.addrs()), vec![A_IP, IF_4]);
+    got.clear();
+    let want = SocketAddrV4::new(IF_4, 40_001);
+    assert!(
+        gather(&b, &mut got, Duration::from_secs(3), |g| g
+            .iter()
+            .any(|s| s.addr == want)),
+        "с нового интерфейса маяк не пришёл"
+    );
+    // интерфейс исчез: набор снова из одного адреса
+    routes.lock().unwrap().clear();
+    assert!(wait_until(Duration::from_secs(3), || a.addrs() == vec![A_IP]));
+}
+
+#[test]
+fn svc_send_budget_per_iface() {
+    let rp = port_for(REC_IP);
+    let rec = recorder(rp);
+    // 64 пары: 4 датаграммы за раунд на каждый интерфейс, бюджет 24 за 60 с на интерфейс
+    let (pa, _, _) = peers(64);
+    let routes: Routes = Arc::new(Mutex::new(vec![(HOME_GW, IF_4)]));
+    let a = mk_oracle(
+        LanMode::Announce,
+        A_IP,
+        port_for(A_IP),
+        rec_target(rp),
+        Duration::from_millis(20),
+        routes_oracle(&routes),
+    );
+    a.set_peers(pa);
+    a.set_local(local(A_IP, 40_001));
+    let from = collect_sources(&rec, Duration::from_millis(2500));
+    let count = |ip: Ipv4Addr| from.iter().filter(|s| **s == ip).count();
+    assert_eq!(count(A_IP), 24, "бюджет первого интерфейса");
+    assert_eq!(count(IF_4), 24, "бюджет второго интерфейса");
+    assert_eq!(from.len(), 48);
+}
+
+#[test]
+fn svc_sweep_respects_shutdown() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = calls.clone();
+    // каждое обращение к опросу занимает около 1 мс (ожидание без сна: у сна на Windows грубый шаг)
+    let slow: TestOracle = Arc::new(move |_| {
+        c.fetch_add(1, Ordering::SeqCst);
+        let end = Instant::now() + Duration::from_millis(1);
+        while Instant::now() < end {
+            std::hint::spin_loop();
+        }
+        None
+    });
+    let b = mk_oracle(
+        LanMode::Listen,
+        B_IP,
+        port_for(B_IP),
+        rec_target(port_for(REC_IP)),
+        Duration::from_millis(200),
+        slow,
+    );
+    b.set_local(local(B_IP, 40_002));
+    assert!(wait_until(Duration::from_secs(2), || calls
+        .load(Ordering::SeqCst)
+        > 10));
+    let t = Instant::now();
+    b.shutdown();
+    assert!(wait_until(Duration::from_secs(2), || b.thread_finished()));
+    let took = t.elapsed();
+    assert!(
+        took <= Duration::from_millis(300),
+        "остановка заняла {took:?}"
+    );
+    assert!(
+        calls.load(Ordering::SeqCst) < 533,
+        "опрос прерван остановкой, обращений {}",
+        calls.load(Ordering::SeqCst)
     );
 }
 

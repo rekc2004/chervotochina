@@ -42,6 +42,14 @@ pub(crate) const IP_MAP: usize = 256;
 pub(crate) const MAX_SIGHTINGS: usize = 64;
 pub(crate) const READ_TIMEOUT: Duration = Duration::from_millis(250);
 pub(crate) const FAIL_RETRY: Duration = Duration::from_secs(60);
+/// Интерфейсов, на которых идёт поиск (опрос маршрутов находит их до этого числа).
+pub(crate) const MAX_IFACES: usize = 4;
+/// Повторный опрос маршрутов, пока служба не в режиме `Off`.
+pub(crate) const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+/// Порт целей опроса: пакет не отправляется, порт нужен только для `connect`.
+pub(crate) const SWEEP_PORT: u16 = 9;
+/// Через сколько обращений к опросу проверяется остановка.
+pub(crate) const SWEEP_CHUNK: usize = 64;
 
 const _: () = assert!(DGRAM_LEN == 2 + LAN_NONCE_LEN + SLOTS * LAN_SLOT_LEN);
 const _: () = assert!(RECV_BUF > DGRAM_LEN);
