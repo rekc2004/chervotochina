@@ -19,7 +19,8 @@
 # /etc/netns/chv13v-*; снимок хоста до и после каждой команды (HOSTSAFE). В реальную сеть ничего не уходит.
 #
 # Топология (192.168.50.0/24 и 192.168.60.0/24, адреса «интернета» не нужны):
-#   sw : мост br0 (коммутатор домашней сети)
+#   sw : мост br0 (коммутатор домашней сети; без IGMP-snooping: иначе мост без адреса сам объявляет себя в группе
+#        224.0.0.106 отчётом IGMPv3 с адреса 0.0.0.0, и этот чужой пакет попадает в записи узлов, см. LAN2)
 #   a : 192.168.50.11 (узел A), b : .12 (узел B), o : .99 (наблюдатель O, он же отправитель потока и подделок),
 #   r : маршрутизатор .1 (eth0 в br0) и 192.168.60.1 (eth1), c : 192.168.60.11 за маршрутизатором (узел C).
 # Книги: A и B дружат (приглашение A -> B), метки: у A друг o1 (B), у B друг i1 (A). Для LAN3-17 у A ещё 16 друзей
@@ -104,7 +105,7 @@ topo_body() {
     ip netns add "$PFX$n"
     ipn "$n" link set lo up
   done
-  ipn sw link add br0 type bridge
+  ipn sw link add br0 type bridge mcast_snooping 0
   ipn sw link set br0 up
   for n in a b o r; do
     vl "$n" eth0 sw "p-$n"
@@ -306,6 +307,10 @@ row_lan2() {
   udp=$(( $(cap_count capa dport=$LAN_PORT) + $(cap_count capb dport=$LAN_PORT) ))
   igmp="$(( $(cap_total capa) - $(cap_count capa dport=$LAN_PORT) + $(cap_total capb) - $(cap_count capb dport=$LAN_PORT) ))"
   cap_stop capa; cap_stop capb
+  if [[ "$igmp" != 0 ]]; then
+    # для разбора: кто послал, видно по источнику, группе и признаку исходящего (фильтр и порог не меняются)
+    { echo "--- capa"; tcpdump -nn -e -v -r "$RD/capa.pcap" 2>&1; echo "--- capb"; tcpdump -nn -e -v -r "$RD/capb.pcap" 2>&1; } > "$RD/lan2-pkts.txt"
+  fi
   if [[ "$conn" == 0 && "$udp" == 0 && "$igmp" == 0 ]]; then
     vd LAN2 lan PASS "70 с: соединений 0, датаграмм на порт маяка 0, IGMP 0" "оба узла «только слушать», адреса друг друга в книгах устарели"
   else
@@ -378,29 +383,43 @@ dial_count() {
   echo "${c:-0}"
 }
 
+# Длина IPv4-пакета со стуком: 20 (IP) + 8 (UDP) + 48 (KNOCK_LEN). Стук уходит три раза за один набор (0, 1 и 3 с);
+# повторы рукопожатия QUIC (Initial с растущим шагом) и хвост прежнего соединения имеют другую длину.
+KNOCK_IP_LEN=76
+
 row_lan5() {
   lan_row LAN5 260 1 || { vd LAN5 lan INCONCLUSIVE "-" "топология или книги"; return 0; }
-  cap_start capa o eth0 "udp dst port $LAN_PORT and src host $A_IP"
-  b_start listen "$PORT_OLD"
-  a_start announce "$PORT_NEW"
-  connected_lan b 40 || { vd LAN5 lan INCONCLUSIVE "-" "B не нашёл A до подделки"; row_end; return 0; }
-  hold 10
-  # A уходит: узел останавливается (соединение закрывается), адрес снимается
-  node_stop a
-  cap_stop capa
-  ipn a addr del "$A_IP/24" dev eth0
+  # A и B соединиться не могут: A не набирает B (выход на B_IP закрыт) и не принимает набор на PORT_NEW. Иначе (прогон
+  # cfc103f) живое соединение гасит находки, его хвост (PTO, keep-alive) шумит в счётчике, а запись маяков живёт
+  # лишь около минуты после ухода A и успевает дать один набор. Маяки A идут весь срок.
+  nsx a nft -f - <<NFT
+table inet chv13v_blk {
+  chain out { type filter hook output priority 0; policy accept; ip daddr $B_IP drop; }
+  chain in { type filter hook input priority 0; policy accept; udp dport $PORT_NEW drop; }
+}
+NFT
+  # Счётчик набора B считает только стуки (длина $KNOCK_IP_LEN) на адрес A; udp_all для разбора (все пакеты на этот порт).
   nsx b nft -f - <<NFT
 table inet chv13v {
   counter dial { }
-  chain out { type filter hook output priority 0; policy accept; ip daddr $A_IP udp dport $PORT_NEW counter name "dial"; }
+  counter udp_all { }
+  chain out {
+    type filter hook output priority 0; policy accept;
+    ip daddr $A_IP udp dport $PORT_NEW counter name "udp_all"
+    ip daddr $A_IP udp dport $PORT_NEW meta length $KNOCK_IP_LEN counter name "dial"
+  }
 }
 NFT
-  # Повтор записанных маяков с подставленным источником $A_IP раз в 5 с (запись не старше окон ключа, около
-  # минуты). Счётчик набора B читается каждые полсекунды: начало всплеска = рост после 3 с без роста.
-  local i c last=0 t0 now_t prev_change=-100 starts=() gap min_gap=999 k
+  cap_start capa o eth0 "udp dst port $LAN_PORT and src host $A_IP"
+  b_start listen "$PORT_OLD"
+  # Счётчик читается каждые полсекунды с запуска A: начало набора = рост после 3 с без роста (стуки идут с шагом 1 и 2 с).
+  # Первые 15 с идёт запись маяков, потом раз в 5 с их повтор с подставленным источником $A_IP поверх настоящих маяков A.
+  local i c last=0 t0 now_t prev_change=-100 starts=() gap min_gap=999 k span
   t0="$(now_s)"
-  for i in $(seq 0 99); do
-    if (( i % 10 == 0 )); then
+  a_start announce "$PORT_NEW"
+  for i in $(seq 0 219); do
+    if (( i == 30 )); then cap_stop capa; fi
+    if (( i >= 30 && (i - 30) % 10 == 0 )); then
       nsx o python3 -I "$PYT" spoof "$RD/capa.pcap" "$A_IP" "$O_IP" >> "$RD/spoof.txt" 2>&1
     fi
     c="$(dial_count)"
@@ -412,17 +431,20 @@ NFT
     fi
     sleep 0.5
   done
+  span=$(( $(now_s) - t0 ))
   for (( k = 1; k < ${#starts[@]}; k++ )); do
     gap=$(( starts[k] - starts[k - 1] ))
     (( gap < min_gap )) && min_gap=$gap
   done
-  nsx b nft list counter inet chv13v dial > "$RD/dial.txt" 2>&1
-  if (( ${#starts[@]} == 0 )); then
-    vd LAN5 lan INCONCLUSIVE "B не набирал $A_IP" "подделка не дошла или окно ключа истекло; повторите"
+  nsx b nft list table inet chv13v > "$RD/dial.txt" 2>&1
+  if (( $(cntl a '^EVENT connected ') + $(cntl b '^EVENT connected ') > 0 )); then
+    vd LAN5 lan INCONCLUSIVE "узлы соединились, блокировка не сработала" "наборов нет при живом соединении; смотрите a.log, b.log"
+  elif (( ${#starts[@]} < 2 )); then
+    vd LAN5 lan INCONCLUSIVE "наборов (стуков) на $A_IP:$PORT_NEW за ${span} с: ${#starts[@]}, нужно не меньше двух" "один набор не проверяет промежуток; повторите"
   elif (( min_gap >= 31 )); then
-    vd LAN5 lan PASS "всплесков набора на $A_IP:$PORT_NEW за 50 с: ${#starts[@]}, наименьший промежуток ${min_gap} с (≥ 31)" "ограничитель: строгий адрес не чаще раза в 32 с"
+    vd LAN5 lan PASS "наборов на $A_IP:$PORT_NEW за ${span} с: ${#starts[@]}, наименьший промежуток ${min_gap} с (≥ 31)" "ограничитель: строгий адрес не чаще раза в 32 с, находки идут каждые 5 с"
   else
-    vd LAN5 lan FAIL "всплесков набора ${#starts[@]}, промежуток ${min_gap} с (< 31)" "строгий предел 32 с на IP нарушен"
+    vd LAN5 lan FAIL "наборов ${#starts[@]}, промежуток ${min_gap} с (< 31)" "строгий предел 32 с на IP нарушен"
   fi
   row_end
 }
@@ -481,6 +503,9 @@ row_lan8() {
   hold 5
   local n_before t_change
   n_before="$(cntl b '^EVENT connected pair=i1 ')"
+  # Без promote_secondaries удаление основного адреса уносит и добавленный после него в той же сети: A оставался без
+  # адреса, а `route replace` падал с «Nexthop has invalid gateway» (прогон cfc103f). Опция только в ns A.
+  nsx a sysctl -qw net.ipv4.conf.eth0.promote_secondaries=1
   t_change="$(date +%s.%N)"
   ipn a addr add 192.168.50.21/24 dev eth0
   ipn a addr del "$A_IP/24" dev eth0
