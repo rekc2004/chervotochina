@@ -64,12 +64,39 @@ pub fn sweep_report(default: std::net::Ipv4Addr) -> (Vec<std::net::Ipv4Addr>, us
 #[cfg(any(test, feature = "fuzzing"))]
 #[doc(hidden)]
 pub fn fuzz_beacon(bytes: &[u8]) {
+    let _ = fuzz_beacon_ports(bytes);
+}
+
+/// Как `fuzz_beacon`, но возвращает порты найденных слотов. Ключи пар фиксированные, поэтому
+/// корпус с настоящей датаграммой (`fuzz/corpus/lan_beacon/`) доходит до `open`.
+#[cfg(any(test, feature = "fuzzing"))]
+#[doc(hidden)]
+pub fn fuzz_beacon_ports(bytes: &[u8]) -> Vec<u16> {
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
     use std::sync::OnceLock;
 
     static TABLE: OnceLock<table::IdTable> = OnceLock::new();
-    let t = TABLE.get_or_init(|| testkit::fuzz_table(3));
+    let t = TABLE.get_or_init(|| testkit::fuzz_table(FUZZ_PAIRS));
     let own = Ipv4Addr::new(192, 168, 50, 1);
-    let src = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 50, 7), 45_000));
-    let _ = wire::parse(bytes, src, &[own], t, wire::SrcPolicy::PRODUCT);
+    let src = SocketAddr::V4(SocketAddrV4::new(FUZZ_SRC, 45_000));
+    wire::parse(bytes, src, &[own], t, wire::SrcPolicy::PRODUCT)
+        .iter()
+        .map(|s| s.addr.port())
+        .collect()
+}
+
+/// Число пар таблицы fuzz-цели, порт, который в них запечатан, и верная датаграмма от этих пар.
+#[cfg(any(test, feature = "fuzzing"))]
+#[doc(hidden)]
+pub const FUZZ_PAIRS: usize = 3;
+#[cfg(any(test, feature = "fuzzing"))]
+#[doc(hidden)]
+pub const FUZZ_PORT: u16 = testkit::FUZZ_PORT;
+#[cfg(any(test, feature = "fuzzing"))]
+const FUZZ_SRC: std::net::Ipv4Addr = std::net::Ipv4Addr::new(192, 168, 50, 7);
+
+#[cfg(any(test, feature = "fuzzing"))]
+#[doc(hidden)]
+pub fn fuzz_valid_beacon() -> Vec<u8> {
+    testkit::fuzz_datagram(FUZZ_PAIRS, FUZZ_SRC).unwrap_or_default()
 }

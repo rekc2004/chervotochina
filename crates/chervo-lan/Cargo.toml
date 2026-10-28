@@ -14,6 +14,10 @@ socket2 = { version = "=0.6.5", default-features = false }
 # Для тестовой оснастки (хранилище ключей в памяти, тип `SecretStore` требует `Zeroizing`);
 # уже в дереве продукта через chervo-identity.
 zeroize.workspace = true
+# Для тестовой оснастки (детерминированные ключи пар для fuzz-цели и корпуса); пакеты уже в
+# дереве продукта через chervo-identity, в коде продукта не используются.
+ed25519-dalek.workspace = true
+x25519-dalek.workspace = true
 
 [features]
 # Точки входа для libFuzzer (`fuzz/`, вне рабочего пространства), не для продукта (S1 L6).

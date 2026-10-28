@@ -4,7 +4,10 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use chervo_identity::{IdentityError, KxPeer, LanKeys, PairId, SecretStore, create};
+use chervo_identity::{
+    IdentityError, KEY_BLOB_VERSION, KxPeer, LanKeys, PairId, PairKey, PublicKey, SecretStore,
+    create, load,
+};
 use zeroize::Zeroizing;
 
 use crate::table::IdTable;
@@ -66,6 +69,40 @@ pub(crate) fn peer_duo() -> Option<(PairId, KxPeer, KxPeer)> {
     ))
 }
 
+/// Ключ пары из фиксированных секретов (по метке `tag`): запись в хранилище собирается вручную и
+/// читается обычным `chervo_identity::load`, обходных входов в идентичность нет.
+fn fixed_pair_key(pair: PairId, tag: u8) -> Option<PairKey> {
+    let seed = [tag; 32];
+    let x_secret = [tag.wrapping_add(100); 32];
+    let ed_public = ed25519_dalek::SigningKey::from_bytes(&seed)
+        .verifying_key()
+        .to_bytes();
+    let x_public =
+        x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(x_secret)).to_bytes();
+    let mut blob = vec![KEY_BLOB_VERSION];
+    for part in [&seed, &ed_public, &x_secret, &x_public] {
+        blob.extend_from_slice(part);
+    }
+    let store = MemStore::default();
+    store.write(&pair, &blob).ok()?;
+    let expected = PublicKey::try_from_slice(&ed_public).ok()?;
+    load(&store, &pair, &expected).ok()
+}
+
+/// Пара `i` с фиксированными ключами: (идентификатор, участник A, участник B). Одни и те же
+/// байты при каждом запуске: нужна fuzz-цели и корпусу с настоящей датаграммой.
+pub(crate) fn fixed_peer_duo(i: u8) -> Option<(PairId, KxPeer, KxPeer)> {
+    let pair = PairId::from_bytes([i; 16]);
+    let ka = fixed_pair_key(pair, i.wrapping_mul(2).wrapping_add(1))?;
+    let kb = fixed_pair_key(pair, i.wrapping_mul(2).wrapping_add(2))?;
+    let (pa, pb) = (ka.kx_public(), kb.kx_public());
+    Some((
+        pair,
+        KxPeer::new(pair, ka.into_kx(), pb),
+        KxPeer::new(pair, kb.into_kx(), pa),
+    ))
+}
+
 /// Одна пара с двух сторон в виде ключей маяка и открытые ключи обмена.
 pub(crate) fn duo() -> Option<Duo> {
     let (pair, pa_peer, pb_peer) = peer_duo()?;
@@ -80,10 +117,31 @@ pub(crate) fn duo() -> Option<Duo> {
     })
 }
 
-/// Таблица получателя из `n` пар (окно 1000), ключи отправителей отбрасываются.
+/// Окно, адрес и порт, под которые собран корпус fuzz-цели.
+pub(crate) const FUZZ_WINDOW: u64 = 1000;
+pub(crate) const FUZZ_PORT: u16 = 40_000;
+
+/// Таблица получателя из `n` пар с фиксированными ключами (окно `FUZZ_WINDOW`).
 pub(crate) fn fuzz_table(n: usize) -> IdTable {
-    let peers: Vec<(PairId, LanKeys)> = (0..n)
-        .filter_map(|_| duo().map(|d| (d.pair, d.b)))
+    let peers: Vec<(PairId, LanKeys)> = (0..u8::try_from(n).unwrap_or(0))
+        .filter_map(|i| {
+            let (pair, _, b) = fixed_peer_duo(i)?;
+            Some((pair, b.lan_keys().ok()?))
+        })
         .collect();
-    IdTable::from_peers(peers, 1000)
+    IdTable::from_peers(peers, FUZZ_WINDOW)
+}
+
+/// Верная датаграмма отправителя от `n` пар с фиксированными ключами: её разберёт `fuzz_table(n)`
+/// с источником 192.168.50.7. Случайны только nonce, порядок слотов и пустые слоты.
+pub(crate) fn fuzz_datagram(n: usize, src: std::net::Ipv4Addr) -> Option<Vec<u8>> {
+    let keyed: Vec<(PairId, LanKeys)> = (0..u8::try_from(n).unwrap_or(0))
+        .filter_map(|i| {
+            let (pair, a, _) = fixed_peer_duo(i)?;
+            Some((pair, a.lan_keys().ok()?))
+        })
+        .collect();
+    let refs: Vec<(PairId, &LanKeys)> = keyed.iter().map(|(p, k)| (*p, k)).collect();
+    let d = crate::wire::build(&refs, FUZZ_WINDOW, src, FUZZ_PORT, 0, &[0x33; 32]).ok()?;
+    d.first().map(|x| x.to_vec())
 }

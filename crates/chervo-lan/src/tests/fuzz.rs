@@ -111,3 +111,82 @@ fn fuzz_smoke_beacon() {
         "fuzz_smoke_beacon: iterations {n}, random {random_in}, mutated {mutated}, sightings kept {kept}"
     );
 }
+
+// ---------------------------------------------------------------- корпус fuzz-цели
+
+fn corpus_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/lan_beacon")
+}
+
+/// Ключи пар у fuzz-цели фиксированные: таблица и верная датаграмма собираются из одних и тех же
+/// секретов при каждом запуске, поэтому корпус с настоящей датаграммой доходит до `open`.
+#[test]
+fn fuzz_keys_are_fixed_and_valid_beacon_opens() {
+    let a = crate::testkit::fixed_peer_duo(0).unwrap();
+    let b = crate::testkit::fixed_peer_duo(0).unwrap();
+    assert_eq!(
+        a.1.lan_keys().unwrap().send_id(1000),
+        b.1.lan_keys().unwrap().send_id(1000)
+    );
+    assert_ne!(
+        a.1.lan_keys().unwrap().send_id(1000),
+        crate::testkit::fixed_peer_duo(1)
+            .unwrap()
+            .1
+            .lan_keys()
+            .unwrap()
+            .send_id(1000)
+    );
+    let d = crate::fuzz_valid_beacon();
+    assert_eq!(d.len(), DGRAM_LEN);
+    assert_eq!(
+        crate::fuzz_beacon_ports(&d),
+        vec![crate::FUZZ_PORT; crate::FUZZ_PAIRS]
+    );
+    // один изменённый байт слота: слот пропадает, порт никогда не другой
+    for at in [14usize, 14 + 26 + 9, 14 + 5 * 26 + 25, 429] {
+        let mut x = d.clone();
+        x[at] ^= 0x40;
+        for p in crate::fuzz_beacon_ports(&x) {
+            assert_eq!(p, crate::FUZZ_PORT);
+        }
+    }
+}
+
+/// Файлы корпуса `fuzz/corpus/lan_beacon/` остаются настоящими датаграммами текущего формата и
+/// ключей: сломается формат или метки, тест напомнит пересоздать корпус (`--ignored fuzz_corpus_write`).
+#[test]
+fn fuzz_corpus_seed_opens() {
+    let valid = std::fs::read(corpus_dir().join("valid-3-pairs")).unwrap();
+    assert_eq!(valid.len(), DGRAM_LEN);
+    assert_eq!(
+        crate::fuzz_beacon_ports(&valid),
+        vec![crate::FUZZ_PORT; crate::FUZZ_PAIRS]
+    );
+    let flipped = std::fs::read(corpus_dir().join("flipped-slot")).unwrap();
+    assert_eq!(flipped.len(), DGRAM_LEN);
+    assert!(crate::fuzz_beacon_ports(&flipped).len() < crate::FUZZ_PAIRS);
+}
+
+/// Создание файлов корпуса. Запускается вручную: `cargo test -p chervo-lan fuzz_corpus_write -- --ignored`.
+#[test]
+#[ignore = "пишет файлы корпуса в fuzz/corpus/lan_beacon"]
+fn fuzz_corpus_write() {
+    let dir = corpus_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    let valid = crate::fuzz_valid_beacon();
+    assert_eq!(crate::fuzz_beacon_ports(&valid).len(), crate::FUZZ_PAIRS);
+    std::fs::write(dir.join("valid-3-pairs"), &valid).unwrap();
+    // испорчен байт первого настоящего слота (метка не найдётся или не откроется)
+    let mut flipped = valid.clone();
+    for at in 14..14 + 26 * 16 {
+        let mut x = valid.clone();
+        x[at] ^= 0x01;
+        if crate::fuzz_beacon_ports(&x).len() < crate::FUZZ_PAIRS {
+            flipped = x;
+            break;
+        }
+    }
+    assert_ne!(flipped, valid);
+    std::fs::write(dir.join("flipped-slot"), &flipped).unwrap();
+}
