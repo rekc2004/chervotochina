@@ -1,6 +1,9 @@
 # Stage 19b. Release pipeline: builds `chervo` from a tag and makes a DRAFT release with an
 # unsigned manifest. It never publishes and has no secrets: the owner signs locally with minisign
 # (scripts/release/sign.sh) and publishes by hand (spec 19, Q1 = a).
+# Stage 19g: the release has the window `chervotochina` for 4 targets and the CLI `chervo` for Linux only
+# (Q5 b). The CLI of Windows and macOS is built as a checker (artifact verifier-<target>, 14 days) and is
+# never put into the release.
 name: release
 on:
   push:
@@ -63,29 +66,55 @@ jobs:
         with:
           persist-credentials: false
       - run: rustup toolchain install 1.99.1 --profile minimal
-      - name: Build chervo (package-only release build)
+      - name: Build chervo and chervotochina (package-only release builds, one cargo call per package)
         env:
           TRIPLE: ${{ matrix.triple }}
-        run: bash scripts/release/build-release.sh "$TRIPLE" dist
-      - name: Dependencies of the binary
+        run: bash scripts/release/build-release.sh "$TRIPLE" dist verifier
+      - name: Dependencies of the binaries
         env:
           KIND: ${{ matrix.kind }}
           TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          files=( dist/chervo-* )
+          shopt -s nullglob
           {
             echo "### build $TARGET"
             if [ "$KIND" = linux ]; then ldd --version | head -n 1; fi
-            echo '```'
-            bash scripts/release/check-deps.sh "$KIND" "${files[0]}"
-            echo '```'
-            echo "sha256: $(bash -c '. scripts/release/lib.sh; sha256_of "$1"' _ "${files[0]}")  ${files[0]##*/}"
+            for pair in "dist:published" "verifier:verifier (not published)"; do
+              d="${pair%%:*}"
+              note="${pair#*:}"
+              for f in "$d"/*; do
+                name="${f##*/}"
+                echo "#### $name ($note)"
+                echo '```'
+                case "$name" in
+                  *.zip)
+                    tmp="$(mktemp -d)"
+                    ditto -x -k "$f" "$tmp"
+                    bash scripts/release/check-deps.sh macos "$tmp/Chervotochina.app/Contents/MacOS/chervotochina"
+                    ;;
+                  *)
+                    bash scripts/release/check-deps.sh "$KIND" "$f"
+                    ;;
+                esac
+                echo '```'
+                echo "sha256: $(bash -c '. scripts/release/lib.sh; sha256_of "$1"' _ "$f")  $name ($note)"
+              done
+            done
           } 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bin-${{ matrix.target }}
           path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+      # Windows and macOS: the CLI is built only as a checker for sign.sh and release-smoke.yml (R19g-11).
+      # It is never part of the release; the name of this artifact is not `bin-*`.
+      - if: matrix.kind != 'linux'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: verifier-${{ matrix.target }}
+          path: verifier/*
           if-no-files-found: error
           retention-days: 14
 
@@ -102,23 +131,26 @@ jobs:
         with:
           persist-credentials: false
       - run: rustup toolchain install 1.99.1 --profile minimal
-      - run: bash scripts/release/build-release.sh x86_64-unknown-linux-gnu repro-dist
+      - run: bash scripts/release/build-release.sh x86_64-unknown-linux-gnu repro-dist repro-verifier
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: bin-linux-x86_64
           path: build-dist
-      - name: Compare SHA-256
+      - name: Compare SHA-256 (CLI and window separately)
         run: |
           set -euo pipefail
-          a=( build-dist/chervo-* )
-          b=( repro-dist/chervo-* )
-          sa="$(sha256sum "${a[0]}" | cut -d' ' -f1)"
-          sb="$(sha256sum "${b[0]}" | cut -d' ' -f1)"
-          if [ "$sa" = "$sb" ]; then r="совпало"; else r="не совпало"; fi
           {
-            echo "### repro (Linux, two independent builds): $r"
-            echo "build: \`$sa\`"
-            echo "repro: \`$sb\`"
+            echo "### repro (Linux, two independent builds)"
+            for prefix in chervo chervotochina; do
+              a=( build-dist/"$prefix"-[0-9]* )
+              b=( repro-dist/"$prefix"-[0-9]* )
+              sa="$(sha256sum "${a[0]}" | cut -d' ' -f1)"
+              sb="$(sha256sum "${b[0]}" | cut -d' ' -f1)"
+              if [ "$sa" = "$sb" ]; then r="совпало"; else r="не совпало"; fi
+              echo "$prefix: $r"
+              echo "build: \`$sa\`"
+              echo "repro: \`$sb\`"
+            done
             echo "Bitwise reproducibility is not claimed; the result is recorded only."
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
@@ -149,15 +181,15 @@ jobs:
 
   # Runs the BUILT file of each target (not a rebuild, not a test wrapper).
   smoke:
-    needs: [gate, assemble]
+    needs: [gate, build, assemble]
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-22.04, target: linux-x86_64, ext: '' }
-          - { os: macos-15, target: macos-aarch64, ext: '' }
-          - { os: macos-15-intel, target: macos-x86_64, ext: '' }
-          - { os: windows-2025, target: windows-x86_64, ext: '.exe' }
+          - { os: ubuntu-22.04, target: linux-x86_64, ext: '', gext: '' }
+          - { os: macos-15, target: macos-aarch64, ext: '', gext: '.zip' }
+          - { os: macos-15-intel, target: macos-x86_64, ext: '', gext: '.zip' }
+          - { os: windows-2025, target: windows-x86_64, ext: '.exe', gext: '.exe' }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     permissions:
@@ -170,14 +202,52 @@ jobs:
         with:
           name: release-files
           path: rel
-      - name: Smoke test of the built file
+      # Windows and macOS: the CLI is not in the release (Q5 b); its CI build is the checker.
+      - if: matrix.target != 'linux-x86_64'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: verifier-${{ matrix.target }}
+          path: verifier
+      - name: Smoke test of the CLI (Linux the released file, others the checker build)
         env:
           TARGET: ${{ matrix.target }}
           EXT: ${{ matrix.ext }}
           SKIP_KEYS: ${{ needs.gate.outputs.skip_keys }}
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
-        run: bash scripts/release/smoke.sh rel "$TARGET" "$EXT"
+        run: |
+          set -euo pipefail
+          if [ "$TARGET" = linux-x86_64 ]; then
+            bash scripts/release/smoke.sh rel "$TARGET" "$EXT"
+          else
+            bash scripts/release/smoke.sh rel "$TARGET" "$EXT" verifier
+          fi
+      # apt is used in CI only; the program itself needs nothing installed (as ci.yml, job gui-render).
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb mesa-vulkan-drivers libgl1-mesa-dri libegl1 libvulkan1 libx11-6 libxcursor1 libxrandr2 libxi6 libxkbcommon-x11-0
+      - name: Smoke test of the window file
+        if: runner.os != 'Windows'
+        env:
+          TARGET: ${{ matrix.target }}
+          GEXT: ${{ matrix.gext }}
+        run: bash scripts/release/smoke-gui.sh rel "$TARGET" "$GEXT"
+      - name: Window file, SHA-256 check (Windows)
+        if: runner.os == 'Windows'
+        env:
+          TARGET: ${{ matrix.target }}
+          GEXT: ${{ matrix.gext }}
+        run: bash scripts/release/smoke-gui.sh rel "$TARGET" "$GEXT" --check-only
+      - name: Window file, --render-check (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $f = @(Get-ChildItem -Path rel -Filter 'chervotochina-*-windows-x86_64.exe')
+          if ($f.Count -ne 1) { "expected exactly one window file, found $($f.Count)"; exit 1 }
+          $p = Start-Process -FilePath $f[0].FullName -ArgumentList '--render-check' -Wait -PassThru
+          "- render-check exit code: $($p.ExitCode)" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          exit $p.ExitCode
 
   # Only for a pushed tag. Creates a DRAFT; publishing is done by the owner by hand.
   draft:

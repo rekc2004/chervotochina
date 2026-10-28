@@ -11,8 +11,10 @@
 # the manifest (before any signature) -> check the manifest `commit` against the tag in THIS clone and
 # compare every file with the artifact `release-files` of the finished push run of release.yml on that
 # commit (the draft alone is not trusted: whoever holds a write token can replace draft and manifest
-# together) -> sign the manifest and every file -> verify with minisign and the embedded keys -> show the
-# list and ask before uploading the signatures to the draft.
+# together) -> find the checker of this OS (Linux: the released chervo; Windows, macOS: the CI verifier of
+# that same run, which is not in the release, Q5 b) -> sign the manifest and every file -> verify with minisign
+# and the checker (files of this target and "any") -> show the list and ask before uploading the signatures.
+# No checker for this OS = nothing is signed (stage 19g: the old "WARNING ... was NOT run" is gone).
 # Run it from a clone of the repository that has the tag (`git fetch --tags` first); gh needs read access
 # to Actions artifacts. Residual risk: spec 19 section 8, T19.
 # [not verified: minisign flags -S -m -s -t -V -p were written from the minisign manual, and this script
@@ -66,7 +68,8 @@ commit="$(git -C "$root" rev-parse --verify --quiet "refs/tags/$tag^{commit}")" 
 
 work="$(mktemp -d)"
 ci="$(mktemp -d)"
-trap 'rm -rf "$work" "$ci"' EXIT
+vdir="$(mktemp -d)"
+trap 'rm -rf "$work" "$ci" "$vdir"' EXIT
 gh release download "$tag" --repo "$repo" --dir "$work"
 # Hidden files count too (the "no extra files" loop below); files that match nothing give an empty list.
 shopt -s dotglob nullglob
@@ -131,32 +134,65 @@ done
 [[ -n "$matched" ]] || die "the draft does NOT match the artifact release-files of any successful push run on $commit; do not sign"
 echo "draft = artifact release-files of run $matched (commit $commit): $(printf '%s ' "${listed[@]}")"
 
+# 1б. The checker of this OS, BEFORE anything is signed (stage 19g, Q5 b, R19g-11). The CLI is released for
+# Linux only. Windows and macOS: the checker is `chervo-verifier-<ver>-<label><ext>` from the artifact
+# verifier-<label> of the SAME run $matched whose release-files equal the draft; it is not in the draft,
+# not in the manifest and not signed. It is run only after the draft was compared with that run.
+case "$(uname -s)-$(uname -m)" in
+  Linux-x86_64)  label=linux-x86_64;   ext='' ;;
+  Darwin-arm64)  label=macos-aarch64;  ext='' ;;
+  Darwin-x86_64) label=macos-x86_64;   ext='' ;;
+  MINGW*-x86_64|MSYS*-x86_64|CYGWIN*-x86_64) label=windows-x86_64; ext='.exe' ;;
+  *) die "sign.sh runs on Linux x86_64, Windows x86_64 (Git Bash) or macOS; nothing was signed" ;;
+esac
+gext="$(gui_ext "$label")"
+if [[ "$label" == linux-x86_64 ]]; then
+  verifier="./chervo-$ver-$label"
+  [[ -f "$verifier" && ! -L "$verifier" ]] || die "chervo-$ver-$label is not in the draft; nothing was signed"
+  chmod +x "$verifier"
+else
+  gh run download "$matched" --repo "$repo" -n "verifier-$label" -D "$vdir" >/dev/null \
+    || die "artifact verifier-$label of run $matched is not available (14 days?); nothing was signed"
+  vfiles=( "$vdir"/* )
+  vname="chervo-verifier-$ver-$label$ext"
+  [[ ${#vfiles[@]} -eq 1 && -f "${vfiles[0]}" && ! -L "${vfiles[0]}" && "${vfiles[0]##*/}" == "$vname" ]] \
+    || die "the artifact verifier-$label must hold exactly one regular file $vname; nothing was signed"
+  verifier="${vfiles[0]}"
+  chmod +x "$verifier"
+  echo "verifier from run $matched, commit $commit, not published, not signed: $(sha256_of "$verifier")  $vname"
+fi
+# Files of this target and of target "any" (the checker is given only these: files of other targets
+# would give WrongTarget).
+own=()
+while read -r kw target sha size name; do
+  [[ "$kw" == "artifact" ]] || continue
+  name="${name%$'\r'}"
+  if [[ "$target" == "$label" || "$target" == "any" ]]; then own+=( "$name" ); fi
+done < chervo-release.txt
+have_gui=no
+for f in "${own[@]}"; do [[ "$f" == "chervotochina-$ver-$label$gext" ]] && have_gui=yes; done
+[[ "$have_gui" == yes ]] || die "the manifest has no chervotochina-$ver-$label$gext for target $label; nothing was signed"
+
 # 2. Sign: the manifest (trusted comment with the version) and each file (password is typed by the owner).
 minisign -Sm chervo-release.txt -s "$key" -t "chervo-release $ver"
 for f in "${artifacts[@]}"; do
   minisign -Sm "$f" -s "$key"
 done
 
-# 3. Verify with minisign and the embedded public key, then with our own program of this OS.
+# 3. Verify with minisign (the manifest and ALL files), then with the checker of this OS (step 1б):
+#    only files of this target and of target "any" are given to it.
 minisign -Vm chervo-release.txt -p "$pub"
 for f in "${artifacts[@]}"; do
   minisign -Vm "$f" -p "$pub"
 done
-case "$(uname -s)-$(uname -m)" in
-  Linux-x86_64)  label=linux-x86_64;   ext='' ;;
-  Darwin-arm64)  label=macos-aarch64;  ext='' ;;
-  Darwin-x86_64) label=macos-x86_64;   ext='' ;;
-  MINGW*-x86_64|MSYS*-x86_64|CYGWIN*-x86_64) label=windows-x86_64; ext='.exe' ;;
-  *) label=''; ext='' ;;
-esac
-bin="chervo-$ver-$label$ext"
-if [[ -n "$label" && -f "$bin" ]]; then
-  chmod +x "$bin"
-  "./$bin" verify-release chervo-release.txt chervo-release.txt.minisig "${artifacts[@]}" \
-    || die "chervo verify-release failed on the signed files"
-else
-  echo "WARNING: no binary for this OS in the release; 'chervo verify-release' was NOT run" >&2
-fi
+vout="$("$verifier" verify-release chervo-release.txt chervo-release.txt.minisig "${own[@]}" | tr -d '\r')" \
+  || die "verify-release failed on the signed files of $label and any"
+echo "$vout"
+ver_re="${ver//./[.]}"
+nok="$(grep -cE "^OK [A-Za-z0-9._-]+ $ver_re same$" <<<"$vout" || true)"
+nlines="$(grep -c . <<<"$vout" || true)"
+[[ "$nok" == "${#own[@]}" && "$nlines" == "${#own[@]}" ]] \
+  || die "verify-release: expected exactly ${#own[@]} lines 'OK <name> $ver same', got $nok of $nlines; nothing was uploaded"
 
 # 4. Ask before changing the draft.
 echo
@@ -178,11 +214,15 @@ CHECKLIST before publishing $tag (the script publishes nothing):
   [ ] docs/SECURITY_REVIEW.md: no open High/Critical on the code of the tag; security reviews of stages 18 and 19 exist
   [ ] CI of the tag is green; job 'smoke' is green on all OS
   [ ] workflow release-smoke.yml for $tag is green on all OS (run it after the upload above)
-  [ ] by hand, with the RELEASE binary: Windows (owner's PC, real Credential Manager) 'chervo doctor' -> available;
-      Linux machine of the owner: 'chervo doctor' per docs/HEADLESS_LINUX.md; macOS: no machine,
-      write 'not verified on macOS' in the release notes
-  [ ] optional, owner decides: file transfer between two machines with release binaries, SHA-256 match
-  [ ] after publishing: 'chervo check-update' with the binary of the previous version (or a 0.0.0 build) shows
-      the new version; with the release binary it says the latest version is installed
-  [ ] key_id of the keys ('chervo release-keys') match the README and the owner's second channel
+  [ ] by hand, with the RELEASE files:
+      Windows (owner's PC, real Credential Manager): run chervotochina-*.exe from the draft; the first screen
+        shows 'хранилище доступно'; on the screen 'Обновления' the downloaded manifest, signature and .exe give
+        'подходит, та же версия'; the keys on that screen match the README;
+      Linux machine of the owner: 'chervo doctor' per docs/HEADLESS_LINUX.md, 'chervo release-keys' matches the README;
+      macOS: no machine, write 'not verified on macOS' in the release notes
+  [ ] optional, owner decides: file transfer between two machines with release files, SHA-256 match
+  [ ] after publishing: Linux: 'chervo check-update' with the binary of the previous version (or a 0.0.0 build) shows
+      the new version, with the release binary it says the latest version is installed;
+      Windows: in the window with the update check switched on, 'Проверить сейчас' says 'Установлена последняя версия'
+  [ ] key_id of the keys ('chervo release-keys' on Linux, the screen 'Обновления' on Windows) match the README and the owner's second channel
 EOF

@@ -1,11 +1,15 @@
 # Stage 19b (3a). The owner runs this by hand after scripts/release/sign.sh, BEFORE publishing:
 # it downloads the signed draft and checks it with the released binary of each OS.
 # Two jobs on purpose (review 19b, M1): a downloaded binary must never run in a job whose token can write.
-#   fetch  - holds `contents: write` (a draft release is visible only with write access to contents)
-#            and only downloads the draft and hands it over as an artifact; it executes nothing downloaded.
-#   check  - `permissions: {}`; downloads the artifact and runs the released binary of its own OS.
+#   fetch  - holds `contents: write` (a draft release is visible only with write access to contents) and
+#            `actions: read` (the CI checkers of the tag commit, stage 19g). It only downloads the draft and
+#            the checkers and hands them over as artifacts; it executes nothing downloaded.
+#   check  - `permissions: {}`; downloads the artifacts and runs the CLI of its own OS: on Linux the released
+#            `chervo`, on Windows and macOS the checker built by CI from the commit of the tag (Q5 b, R19g-11;
+#            it is not in the release).
 # scripts/check-release-guards.sh forbids every gh command that changes anything (create, upload,
-# edit, delete, api) in this file, allows `write` only in `fetch`, and requires `permissions: {}` in `check`.
+# edit, delete, api, `gh run` other than list and download) in this file, allows `write` only in `fetch`,
+# and requires `permissions: {}` in `check`.
 name: release-smoke
 on:
   workflow_dispatch:
@@ -24,9 +28,11 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+      actions: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          fetch-depth: 0
           persist-credentials: false
       - name: Download the draft into a new empty directory
         env:
@@ -42,10 +48,50 @@ jobs:
           mkdir draft-files
           gh release download "$TAG" --repo "$REPO" --dir draft-files
           ls -l draft-files
+      - name: Download the CI verifiers of the tag commit
+        env:
+          TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "bad tag input" >&2
+            exit 1
+          fi
+          commit="$(git rev-parse --verify --quiet "refs/tags/$TAG^{commit}")"
+          if ! [[ "$commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "bad commit of the tag" >&2
+            exit 1
+          fi
+          ids="$(gh run list --repo "$REPO" --workflow release.yml --event push --status success --limit 200 --json databaseId,headSha,event,status,conclusion --jq ".[] | select(.headSha == \"$commit\" and .event == \"push\" and .status == \"completed\" and .conclusion == \"success\") | .databaseId")"
+          id="${ids%%$'\n'*}"
+          if ! [[ "$id" =~ ^[0-9]+$ ]]; then
+            echo "no finished successful push run of release.yml on the commit of the tag" >&2
+            exit 1
+          fi
+          mkdir verifier-files
+          for t in macos-aarch64 macos-x86_64 windows-x86_64; do
+            gh run download "$id" --repo "$REPO" -n "verifier-$t" -D verifier-files
+          done
+          printf 'commit %s\nrun %s\n' "$commit" "$id" > verifier-source.txt
+          ls -l verifier-files
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: draft-files
           path: draft-files/*
+          if-no-files-found: error
+          retention-days: 1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: verifier-files
+          path: verifier-files/*
+          if-no-files-found: error
+          retention-days: 1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: verifier-source
+          path: verifier-source.txt
           if-no-files-found: error
           retention-days: 1
       # The two scripts of this commit travel as data for the next job (it has no checkout and no token).
@@ -64,9 +110,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-22.04, target: linux-x86_64, ext: '' }
-          - { os: macos-15, target: macos-aarch64, ext: '' }
-          - { os: windows-2025, target: windows-x86_64, ext: '.exe' }
+          - { os: ubuntu-22.04, target: linux-x86_64, ext: '', vdir: '' }
+          - { os: macos-15, target: macos-aarch64, ext: '', vdir: verifier-files }
+          - { os: macos-15-intel, target: macos-x86_64, ext: '', vdir: verifier-files }
+          - { os: windows-2025, target: windows-x86_64, ext: '.exe', vdir: verifier-files }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     permissions: {}
@@ -75,12 +122,27 @@ jobs:
         with:
           name: draft-files
           path: draft-files
+      # Windows and macOS: the checker (CI build of the tag commit) and the note of its commit and run.
+      - if: matrix.vdir != ''
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: verifier-files
+          path: verifier-files
+      - if: matrix.vdir != ''
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: verifier-source
+          path: verifier-files
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: smoke-scripts
           path: tools/scripts/release
-      - name: Check the downloaded release with its own binary
+      - name: Check the downloaded release (Linux the released chervo, others the CI checker)
         env:
           TARGET: ${{ matrix.target }}
           EXT: ${{ matrix.ext }}
-        run: bash tools/scripts/release/release-smoke.sh draft-files "$TARGET" "$EXT"
+          VDIR: ${{ matrix.vdir }}
+        run: |
+          args=(draft-files "$TARGET" "$EXT")
+          [[ -n "$VDIR" ]] && args+=("$VDIR")
+          bash tools/scripts/release/release-smoke.sh "${args[@]}"

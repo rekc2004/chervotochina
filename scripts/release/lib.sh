@@ -33,3 +33,14 @@ summary() {
   fi
   printf '%s\n' "$@"
 }
+
+# gui_ext LABEL -> extension of the GUI release file of that target (stage 19g, Q5 b):
+# ".exe" Windows, ".zip" macOS (Chervotochina.app inside), "" Linux. Unknown label: returns 1.
+gui_ext() {
+  case "$1" in
+    linux-x86_64)               printf '\n' ;;
+    macos-aarch64|macos-x86_64) printf '.zip\n' ;;
+    windows-x86_64)             printf '.exe\n' ;;
+    *) return 1 ;;
+  esac
+}

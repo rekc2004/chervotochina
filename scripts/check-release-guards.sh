@@ -5,9 +5,11 @@
 #
 # 1. build form (5a): no cargo command in release.yml / scripts/release/*.sh uses --workspace,
 #    --all-targets, --all-features, --examples (test hooks and examples must not reach the release);
-#    build-release.sh contains the exact package-only build line.
-# 2. release-smoke.yml (3a): no `gh release create|upload|edit|delete`, no `gh api`; the `tag`
-#    input only reaches the job through `env:`, and is checked against the strict pattern.
+#    build-release.sh contains BOTH exact package-only build lines (chervo-cli and chervo-gui, one
+#    cargo call each), and no cargo line has two `-p` (stage 19g: resolver 3 would merge the features).
+# 2. release-smoke.yml (3a): no `gh release create|upload|edit|delete`, no `gh api`, `gh run` only as
+#    `gh run list` or `gh run download` (stage 19g); the `tag` input only reaches the job through
+#    `env:`, and is checked against the strict pattern.
 # 3. workflows: no pull_request_target, no cache action, no secrets in the release workflows
 #    (`secrets.`, `secrets[`, `secrets:`, `toJSON(secrets)`), persist-credentials: false after every
 #    checkout, permissions: {} on top of the release workflows, any `<scope>: write` / `write-all`
@@ -15,6 +17,9 @@
 # 4. release-smoke.yml (review 19b, M1): the job `fetch` (the only one with write access) must not
 #    run anything it downloaded; the job `check` (runs the downloaded binary) has `permissions: {}`.
 #    The text check of `fetch` is BEST EFFORT (a regex over the lines, not a shell parser).
+#    Stage 19g: the downloaded CI verifiers (`verifier-files/`) count as downloaded files too.
+# 6. release.yml (stage 19g, R19g-11): the jobs `assemble` and `draft` never mention `verifier`: the CLI
+#    builds for Windows/macOS must not reach the release files, the manifest or the draft.
 set -euo pipefail
 
 # Joins lines continued with a trailing backslash and drops comment-only lines.
@@ -23,6 +28,9 @@ logical_lines() {
 }
 
 # --- 1 ---
+# Two package selectors in one line: `-p a ... -p b` or `--package a ... -p b`.
+p_pair_re='(^|[[:space:]])(-p|--package)[[:space:]=].*[[:space:]](-p|--package)[[:space:]=]'
+
 guard_build_form() { # files...
   local f bad=0 line
   for f in "$@"; do
@@ -33,29 +41,48 @@ guard_build_form() { # files...
         echo "$f: forbidden cargo flag in: ${line#"${line%%[![:space:]]*}"}" >&2
         bad=1
       fi
+      # Stage 19g: one package per cargo call.
+      if [[ "$line" =~ (^|[^A-Za-z0-9_-])cargo[[:space:]] ]] && [[ "$line" =~ $p_pair_re ]]; then
+        echo "$f: two -p in one cargo call: ${line#"${line%%[![:space:]]*}"}" >&2
+        bad=1
+      fi
     done < <(logical_lines "$f")
   done
   return "$bad"
 }
 
-guard_build_line() { # build-release.sh
-  if logical_lines "$1" | grep -qF 'cargo build --release --locked -p chervo-cli --bin chervo --target'; then
-    return 0
-  fi
-  echo "$1: package-only release build line not found" >&2
-  return 1
+guard_build_line() { # build-release.sh: BOTH package-only build lines (CLI and window)
+  local f="$1" bad=0 want
+  for want in 'cargo build --release --locked -p chervo-cli --bin chervo --target' \
+              'cargo build --release --locked -p chervo-gui --bin chervotochina --target'; do
+    if ! logical_lines "$f" | grep -qF "$want"; then
+      echo "$f: package-only release build line not found: $want" >&2
+      bad=1
+    fi
+  done
+  return "$bad"
 }
 
 # --- 2 ---
 guard_smoke_yml() { # release-smoke.yml
-  local f="$1" bad=0 line
+  local f="$1" bad=0 line rest sub matched
   [[ -f "$f" ]] || { echo "missing file: $f" >&2; return 1; }
   while IFS= read -r line; do
     if [[ "$line" =~ gh[[:space:]]+release[[:space:]]+(create|upload|edit|delete|delete-asset) ]] ||
        [[ "$line" =~ gh[[:space:]]+api([[:space:]]|$) ]] ||
-       [[ "$line" =~ gh[[:space:]]+(workflow|secret|variable|repo|run)[[:space:]] ]]; then
+       [[ "$line" =~ gh[[:space:]]+(workflow|secret|variable|repo)[[:space:]] ]]; then
       echo "$f: forbidden gh command: ${line#"${line%%[![:space:]]*}"}" >&2; bad=1
     fi
+    # Stage 19g: `gh run` only as `list` and `download` (read-only); every occurrence on the line is checked.
+    rest="$line"
+    while [[ "$rest" =~ gh[[:space:]]+run([[:space:]]+([A-Za-z-]+))? ]]; do
+      sub="${BASH_REMATCH[2]:-}"
+      matched="${BASH_REMATCH[0]}"
+      if [[ "$sub" != list && "$sub" != download ]]; then
+        echo "$f: forbidden gh run command (only list and download): ${line#"${line%%[![:space:]]*}"}" >&2; bad=1
+      fi
+      rest="${rest#*"$matched"}"
+    done
     if [[ "$line" == *'${{'*inputs* ]] &&
        ! [[ "$line" =~ ^[[:space:]]+[A-Z_]+:[[:space:]]+\$\{\{[[:space:]]*(github\.event\.)?inputs\.tag[[:space:]]*\}\}[[:space:]]*$ ]]; then
       echo "$f: input used outside an env: line: ${line#"${line%%[![:space:]]*}"}" >&2; bad=1
@@ -163,7 +190,7 @@ guard_fetch_no_exec() { # file job
   local f="$1" j="$2" line bad=0
   local cmd_re='(^|[;&|(`{[:space:]])(chmod|eval|exec|source|bash|sh|zsh|dash|python3?|perl|ruby|node|pwsh|powershell|cargo|rustc|make|java|wine|xargs)([[:space:]]|$)'
   local dot_re='(^|[;&|(`{[:space:]"'"'"'])\.{1,2}/|(^|[;&|(`{[:space:]])\.[[:space:]]'
-  local dir_re='draft-files["'"'"']?/'
+  local dir_re='(draft-files|verifier-files)["'"'"']?/'
   while IFS= read -r line; do
     [[ "$line" =~ ^[[:space:]]*shell: ]] && continue
     [[ "$line" =~ ^[[:space:]]*(-[[:space:]]+)?path: ]] && continue
@@ -171,6 +198,22 @@ guard_fetch_no_exec() { # file job
       echo "$f: job $j seems to run or touch downloaded files: ${line#"${line%%[![:space:]]*}"}" >&2; bad=1
     fi
   done < <(job_block "$f" "$j")
+  return "$bad"
+}
+
+# --- 6 --- (stage 19g, R19g-11) the jobs assemble and draft of release.yml never mention `verifier`.
+guard_no_verifier_in_release() { # release.yml
+  local f="$1" j block bad=0
+  [[ -f "$f" ]] || { echo "missing file: $f" >&2; return 1; }
+  for j in assemble draft; do
+    block="$(job_block "$f" "$j")"
+    if [[ -z "$block" ]]; then
+      echo "$f: job $j not found" >&2; bad=1; continue
+    fi
+    if grep -qi 'verifier' <<<"$block"; then
+      echo "$f: job $j mentions 'verifier' (the CI verifier must not reach the release)" >&2; bad=1
+    fi
+  done
   return "$bad"
 }
 
@@ -182,6 +225,7 @@ run_all() {
   guard_smoke_perms "$wf/release-smoke.yml" || bad=1
   guard_common "$wf"/*.yml || bad=1
   guard_release_yml "$wf/release.yml" || bad=1
+  guard_no_verifier_in_release "$wf/release.yml" || bad=1
   guard_no_secrets "$wf/release-smoke.yml" || bad=1
   # release-smoke may hold write access (draft visibility) in `fetch` only; `fetch` runs nothing
   # downloaded; `check` (runs the downloaded binary) has no permissions at all.
@@ -214,9 +258,21 @@ self_test() {
   local f
 
   # 1. build form
-  f="$tmp/ok.sh";   printf '#!/bin/bash\n# never cargo build --workspace\ncargo build --release --locked -p chervo-cli --bin chervo --target x\ncargo tree --locked -e no-dev,features -p chervo-cli\n' > "$f"
+  local cli_line='cargo build --release --locked -p chervo-cli --bin chervo --target x'
+  local gui_line='cargo build --release --locked -p chervo-gui --bin chervotochina --target x'
+  f="$tmp/ok.sh";   printf '#!/bin/bash\n# never cargo build --workspace\n%s\n%s\ncargo tree --locked -e no-dev,features -p chervo-cli\ncargo tree --locked -e no-dev,features -p chervo-gui\n' "$cli_line" "$gui_line" > "$f"
   expect build-ok 0 guard_build_form "$f"
   expect build-line-ok 0 guard_build_line "$f"
+  f="$tmp/b6.sh";   printf '%s\n' "$cli_line" > "$f"
+  expect build-line-gui-missing 1 guard_build_line "$f"
+  f="$tmp/b6b.sh";  printf '%s\n' "$gui_line" > "$f"
+  expect build-line-cli-missing 1 guard_build_line "$f"
+  f="$tmp/b7.sh";   printf 'cargo build --release --locked -p chervo-cli -p chervo-gui --target x\n' > "$f"
+  expect build-two-packages 1 guard_build_form "$f"
+  f="$tmp/b8.sh";   printf '      - run: cargo test -p chervo-cli \\\n          -p chervo-gui\n' > "$f"
+  expect build-two-packages-continued 1 guard_build_form "$f"
+  f="$tmp/b9.sh";   printf 'cargo build --package chervo-cli -p chervo-gui\n' > "$f"
+  expect build-two-packages-long-form 1 guard_build_form "$f"
   f="$tmp/b1.sh";   printf 'cargo build --release --workspace\n' > "$f"
   expect build-workspace 1 guard_build_form "$f"
   f="$tmp/b2.sh";   printf 'cargo build --release \\\n  --all-targets\n' > "$f"
@@ -243,6 +299,8 @@ jobs:
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           gh release download "$TAG" --dir draft-files
           ls -l draft-files
+          gh run list --repo x --workflow release.yml --json databaseId
+          gh run download 1 --repo x -n verifier-macos-aarch64 -D verifier-files
         env:
           TAG: ${{ inputs.tag }}
         shell: bash
@@ -265,6 +323,7 @@ jobs:
   # M1: the job with write access runs nothing it downloaded.
   local marker='          gh release download "$TAG" --dir draft-files' bad
   for bad in 'chmod +x draft-files/chervo-0.1.0-linux-x86_64' 'draft-files/chervo-0.1.0-linux-x86_64 --version' \
+             'chmod +x verifier-files/x' 'verifier-files/chervo-verifier-0.1.0-windows-x86_64.exe --version' './verifier-files/x' \
              './draft-files/x' 'bash draft-files/x.sh' 'python3 -I draft-files/x.py' 'source draft-files/env' \
              'eval "$(cat draft-files/x)"' '. draft-files/x' 'cargo run' 'xargs -0 sh' '(cd draft-files && ../tool)'; do
     f="$tmp/m1.yml"; subst "$good" "$marker" "$marker"$'\n'"          $bad" > "$f"
@@ -293,7 +352,9 @@ jobs:
     expect "secrets-form[$w]" 1 guard_no_secrets "$f"
   done
   local cmd
-  for cmd in 'gh release upload "$TAG" x' 'gh release create "$TAG"' 'gh release edit "$TAG"' 'gh release delete "$TAG"' 'gh api repos/x/y' 'gh workflow run x'; do
+  for cmd in 'gh release upload "$TAG" x' 'gh release create "$TAG"' 'gh release edit "$TAG"' 'gh release delete "$TAG"' 'gh api repos/x/y' 'gh workflow run x' \
+             'gh run rerun 1' 'gh run cancel 1' 'gh run delete 1' 'gh run watch 1' 'gh run view 1' 'gh run' \
+             'gh run list --repo x; gh run rerun 1'; do
     f="$tmp/s1.yml"; { printf '%s' "$good"; printf '      - run: %s\n' "$cmd"; } > "$f"
     expect "smoke-bad[$cmd]" 1 guard_smoke_yml "$f"
   done
@@ -303,6 +364,33 @@ jobs:
   expect smoke-no-tag-pattern 1 guard_smoke_yml "$f"
   f="$tmp/s4.yml"; printf '%s' "${good/permissions: \{\}/}" > "$f"
   expect smoke-no-top-perms 1 guard_smoke_perms "$f"
+
+  # 6. the verifier must not reach assemble / draft (R19g-11)
+  local asm='jobs:
+  build:
+    steps:
+      - uses: actions/upload-artifact@0123456789abcdef0123456789abcdef01234567 # v4.6.2
+        with:
+          name: verifier-linux-x86_64
+  assemble:
+    steps:
+      - uses: actions/download-artifact@0123456789abcdef0123456789abcdef01234567 # v4.3.0
+        with:
+          pattern: bin-*
+  draft:
+    steps:
+      - run: bash scripts/release/draft.sh release
+'
+  f="$tmp/v0.yml"; printf '%s' "$asm" > "$f"
+  expect verifier-rule-ok 0 guard_no_verifier_in_release "$f"
+  f="$tmp/v1.yml"; subst "$asm" 'pattern: bin-*' 'name: verifier-linux-x86_64' > "$f"
+  expect verifier-in-assemble 1 guard_no_verifier_in_release "$f"
+  f="$tmp/v2.yml"; subst "$asm" 'draft.sh release' 'draft.sh release verifier' > "$f"
+  expect verifier-in-draft 1 guard_no_verifier_in_release "$f"
+  f="$tmp/v3.yml"; subst "$asm" 'pattern: bin-*' 'pattern: Verifier-*' > "$f"
+  expect verifier-in-assemble-mixed-case 1 guard_no_verifier_in_release "$f"
+  f="$tmp/v4.yml"; subst "$asm" '  assemble:' '  assemble2:' > "$f"
+  expect verifier-rule-job-missing 1 guard_no_verifier_in_release "$f"
 
   # 3. common and release.yml
   local rel='on:
