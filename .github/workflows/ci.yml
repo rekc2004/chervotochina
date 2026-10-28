@@ -41,6 +41,12 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install 1.99.1 --profile minimal
       - run: cargo build --workspace --locked
+      # macOS: на lo0 по умолчанию только 127.0.0.1, а тестам службы поиска в локальной сети
+      # (chervo-lan, tests/svc.rs) нужны разные адреса участников и источников. Раннер
+      # одноразовый. Список совпадает с `LOOPBACK_ALIASES` (тест `loopback_aliases_listed_in_ci`).
+      - name: Алиасы lo0 для тестов chervo-lan
+        if: runner.os == 'macOS'
+        run: for n in 2 3 4 9 10 11 12 13 14 15 16 17 18 19; do sudo ifconfig lo0 alias "127.0.0.$n" up; done
       - run: cargo test --workspace --locked
   # Stage 18b: the real GUI binary renders 3 frames and exits 0 (`--render-check`: no node, no keys,
   # no files). Linux runs under xvfb with Mesa software drivers; apt is used in CI only, the program

@@ -15,9 +15,33 @@ use crate::table::IdTable;
 use crate::testkit::peer_duo;
 use crate::wire::{SrcPolicy, parse};
 
+/// Последние октеты адресов 127.0.0.X, которые нужны этим тестам кроме 127.0.0.1 (разные участники
+/// и источники). Linux и Windows принимают весь 127.0.0.0/8, а у macOS на lo0 по умолчанию только
+/// 127.0.0.1: CI добавляет остальные шагом «Алиасы lo0 для тестов chervo-lan» в
+/// `.github/workflows/ci.yml` (тест `loopback_aliases_listed_in_ci` сверяет список с этим шагом и
+/// с адресами в тексте тестов). Локально на macOS: `sudo ifconfig lo0 alias 127.0.0.X up` для
+/// каждого; без алиаса тест падает с понятным сообщением (`need_addr`).
+pub const LOOPBACK_ALIASES: [u8; 14] = [2, 3, 4, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
+/// Источников потока в `svc_flood_bounded` (адреса 127.0.0.10 и далее).
+const FLOOD_SOURCES: u8 = 10;
+
 const A_IP: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 2);
 const B_IP: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 3);
 const REC_IP: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 9);
+
+/// Адрес должен быть на этой машине. Иначе понятная ошибка вместо перебора портов или молчаливого
+/// отказа службы (macOS без алиаса lo0).
+fn need_addr(ip: Ipv4Addr) {
+    if let Err(e) = UdpSocket::bind((ip, 0)) {
+        assert!(
+            e.kind() != std::io::ErrorKind::AddrNotAvailable,
+            "адреса {ip} нет на этой машине (macOS: на lo0 по умолчанию только 127.0.0.1). \
+             Добавьте алиас: sudo ifconfig lo0 alias {ip} up (список: LOOPBACK_ALIASES, шаг CI \
+             «Алиасы lo0 для тестов chervo-lan»)"
+        );
+        panic!("привязка к {ip}: {e}");
+    }
+}
 
 static NEXT_PORT: AtomicU16 = AtomicU16::new(0);
 
@@ -26,6 +50,7 @@ fn port_for(ip: Ipv4Addr) -> u16 {
         let seed = 41_000 + u16::try_from(std::process::id() % 3000).unwrap();
         let _ = NEXT_PORT.compare_exchange(0, seed, Ordering::SeqCst, Ordering::SeqCst);
     }
+    need_addr(ip);
     loop {
         let p = NEXT_PORT.fetch_add(1, Ordering::SeqCst);
         assert!(p < 48_000, "порты кончились");
@@ -353,6 +378,7 @@ fn svc_two_beacons_find_each_other() {
 
 #[test]
 fn svc_rebind_on_local_change() {
+    need_addr(Ipv4Addr::new(127, 0, 0, 4));
     let (pa, pb, _) = peers(1);
     let (port_a, port_b) = (port_for(A_IP), port_for(B_IP));
     let iv = Duration::from_millis(200);
@@ -410,13 +436,15 @@ fn svc_flood_bounded() {
     assert!(wait_until(Duration::from_secs(2), || b.status()
         == LanStatus::Listening));
     let start = Instant::now();
-    // 40 источников по 250 датаграмм нужной длины с верным заголовком
+    // FLOOD_SOURCES источников по 1000 датаграмм нужной длины с верным заголовком
     let mut seed = 0x9E37_79B9_7F4A_7C15u64;
     let mut d = [0u8; 430];
     d[0] = 1;
-    for i in 0..40u8 {
-        let s = UdpSocket::bind((Ipv4Addr::new(127, 0, 0, 10 + i), 0)).unwrap();
-        for _ in 0..250 {
+    for i in 0..FLOOD_SOURCES {
+        let src = Ipv4Addr::new(127, 0, 0, 10 + i);
+        need_addr(src);
+        let s = UdpSocket::bind((src, 0)).unwrap();
+        for _ in 0..1000 {
             for x in d.iter_mut().skip(2) {
                 seed ^= seed << 13;
                 seed ^= seed >> 7;
@@ -564,6 +592,7 @@ fn sorted_ips(mut v: Vec<Ipv4Addr>) -> Vec<Ipv4Addr> {
 
 #[test]
 fn svc_multi_iface_both_send() {
+    need_addr(IF_4);
     let (pa, pb, ids) = peers(1);
     let rp = port_for(REC_IP);
     let rec = recorder(rp);
@@ -615,6 +644,7 @@ fn svc_multi_iface_both_send() {
 
 #[test]
 fn svc_rebind_on_iface_change() {
+    need_addr(IF_4);
     let (pa, pb, _) = peers(1);
     let (port_a, port_b) = (port_for(A_IP), port_for(B_IP));
     let iv = Duration::from_millis(200);
@@ -660,6 +690,7 @@ fn svc_rebind_on_iface_change() {
 
 #[test]
 fn svc_send_budget_per_iface() {
+    need_addr(IF_4);
     let rp = port_for(REC_IP);
     let rec = recorder(rp);
     // 64 пары: 4 датаграммы за раунд на каждый интерфейс, бюджет 24 за 60 с на интерфейс
@@ -719,6 +750,68 @@ fn svc_sweep_respects_shutdown() {
         calls.load(Ordering::SeqCst) < 533,
         "опрос прерван остановкой, обращений {}",
         calls.load(Ordering::SeqCst)
+    );
+}
+
+/// Нет адреса на машине (как 127.0.0.4 на macOS без алиаса): понятная ошибка, а не перебор портов.
+#[test]
+#[should_panic(expected = "нет на этой машине")]
+fn need_addr_reports_missing_address() {
+    need_addr(Ipv4Addr::new(203, 0, 113, 250));
+}
+
+/// Список адресов петли для macOS живёт в одном месте (`LOOPBACK_ALIASES`) и совпадает и с шагом
+/// CI, и с адресами 127.0.0.X в тексте тестов службы: забытый адрес не дойдёт до macOS-раннера
+/// молча.
+#[test]
+fn loopback_aliases_listed_in_ci() {
+    use std::collections::BTreeSet;
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let want: BTreeSet<u32> = LOOPBACK_ALIASES.iter().map(|n| u32::from(*n)).collect();
+    // шаг CI
+    let ci = std::fs::read_to_string(root.join("../../.github/workflows/ci.yml"))
+        .unwrap()
+        .replace("\r\n", "\n");
+    let at = ci
+        .find("Алиасы lo0 для тестов chervo-lan")
+        .expect("в ci.yml нет шага с алиасами lo0");
+    let block = &ci[at..];
+    assert!(
+        block.contains("runner.os == 'macOS'"),
+        "шаг только для macOS"
+    );
+    let line = block
+        .lines()
+        .find(|l| l.contains("for n in "))
+        .expect("в шаге нет списка");
+    let list: BTreeSet<u32> = line
+        .split("for n in ")
+        .nth(1)
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .map(|t| t.parse().unwrap())
+        .collect();
+    assert_eq!(list, want, "список шага CI и LOOPBACK_ALIASES разошлись");
+    // адреса 127.0.0.X в тексте тестов службы и в проверках разбора
+    let prefix = format!("127, 0, {}, ", 0);
+    let flood = 10..10 + u32::from(FLOOD_SOURCES);
+    for file in ["svc.rs", "wire.rs"] {
+        let text = std::fs::read_to_string(root.join("src/tests").join(file)).unwrap();
+        for part in text.split(&prefix).skip(1) {
+            let digits: String = part.chars().take_while(char::is_ascii_digit).collect();
+            let n: u32 = digits.parse().unwrap();
+            assert!(
+                n == 1 || want.contains(&n),
+                "{file}: адрес 127.0.0.{n} не в LOOPBACK_ALIASES"
+            );
+        }
+    }
+    assert!(
+        flood.clone().all(|n| want.contains(&n)),
+        "источники потока вне списка"
     );
 }
 
