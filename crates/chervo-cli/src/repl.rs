@@ -1,22 +1,24 @@
 //! Интерактивный цикл `chervo run` (этап 18в): строки со стандартного ввода, команды к узлу,
 //! события узла выводятся по мере прихода. Только публичный API `chervo_core::Node`. Весь вывод
 //! идёт через модуль `out`. Адреса не показываются, кроме текста токена, который человек сам
-//! попросил (рядом предупреждение об IP).
+//! попросил (рядом предупреждение об IP), и адреса интерфейсов, на которых идёт поиск друзей в
+//! локальной сети (команда `lan`).
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::Duration;
 
+use chervo_core::texts::{ADDRS_PREFIX_TEXT, lan_mode_text, lan_status_text};
 use chervo_core::texts::{
     ASK_FILE_TEXT, CHOOSE_OTHER_FOLDER_TEXT, DISCONNECTED_TEXT, DISK_FULL_TEXT,
     ENABLE_ON_ROUTER_TEXT, INPUT_TOO_LONG_TEXT, KEY_LOST_TEXT, PEER_UNREACHABLE_INVITE_TEXT,
     PREPARING_TEXT, STALLED_TEXT, mapping_text,
 };
 use chervo_core::{
-    ClockProposal, ClockSync, FriendRef, FriendStatus, InviteOutcome, InviteRef, Node, NodeError,
-    NodeEvent, NodeEvents, PathKind, PauseReason, RouterCandidate, SasView, Side, TransferRef,
-    TransferState,
+    ClockProposal, ClockSync, FriendRef, FriendStatus, InviteOutcome, InviteRef, LanMode,
+    LanStatus, Node, NodeError, NodeEvent, NodeEvents, PathKind, PauseReason, RouterCandidate,
+    SasView, Side, TransferRef, TransferState,
 };
 
 use crate::input::{Input, tokenize};
@@ -50,6 +52,8 @@ const HELP: &[&str] = &[
     "  rekey ДРУГ                      пересоздать ключ пары",
     "  block ДРУГ | unblock ДРУГ | remove ДРУГ",
     "  upnp find | upnp allow [--permanent] | upnp forget",
+    "  lan                             поиск друзей в локальной сети: режим, состояние, адреса",
+    "  lan off | lan listen | lan announce   выбрать режим (announce рассылает маяк в сеть)",
     "  clock sync | clock confirm | clock reset",
     "  quit                            выйти (конец ввода тоже выход)",
     "ДРУГ: имя или номер из friends. N: номер из transfers.",
@@ -297,6 +301,7 @@ impl Repl {
                 );
             }
             NodeEvent::MappingChanged { status } => out::line(mapping_text(status)),
+            NodeEvent::LanStatusChanged { status } => out::line(lan_status_text(status)),
             NodeEvent::OfferIncoming { transfer } => {
                 let who = self
                     .node
@@ -381,6 +386,7 @@ impl Repl {
             "unblock" => self.with_friend(args, |n, f| n.unblock(f), "Друг разблокирован."),
             "remove" => self.cmd_remove(args),
             "upnp" => self.cmd_upnp(args),
+            "lan" => self.cmd_lan(args),
             "clock" => self.cmd_clock(args),
             _ => out::err("Неизвестная команда. Список: help."),
         }
@@ -899,6 +905,45 @@ impl Repl {
                 }
             }
             _ => out::err("Использование: upnp find | upnp allow [--permanent] | upnp forget"),
+        }
+    }
+
+    /// `lan`: показать режим, состояние и адреса; `lan off|listen|announce`: выбрать режим.
+    fn cmd_lan(&self, args: &[String]) {
+        match args {
+            [] => self.show_lan(),
+            [m] => {
+                let mode = match m.as_str() {
+                    "off" => LanMode::Off,
+                    "listen" => LanMode::Listen,
+                    "announce" => LanMode::Announce,
+                    _ => {
+                        out::err("Использование: lan | lan off | lan listen | lan announce");
+                        return;
+                    }
+                };
+                match self.node.set_lan_mode(mode) {
+                    Ok(()) => {
+                        out::line("Режим выбран.");
+                        out::line(lan_mode_text(mode));
+                    }
+                    Err(e) => fail(e),
+                }
+            }
+            _ => out::err("Использование: lan | lan off | lan listen | lan announce"),
+        }
+    }
+
+    fn show_lan(&self) {
+        let mode = self.node.settings().lan_mode;
+        out::line(lan_mode_text(mode));
+        out::line(lan_status_text(
+            self.node.lan_status().unwrap_or(LanStatus::Off),
+        ));
+        let addrs = self.node.lan_addrs();
+        if !addrs.is_empty() {
+            let list: Vec<String> = addrs.iter().map(ToString::to_string).collect();
+            out::line(&format!("{ADDRS_PREFIX_TEXT}{}", list.join(", ")));
         }
     }
 
