@@ -91,7 +91,16 @@ fn open_listen(own: Ipv4Addr, route: Route) -> Result<UdpSocket, OpenError> {
 fn open_send(own: Ipv4Addr, route: Route) -> Result<UdpSocket, OpenError> {
     let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
         .map_err(|_| OpenError::Other)?;
-    sock.bind(&SockAddr::from(SocketAddrV4::new(own, 0)))
+    // в тесте адрес маршрута может быть выдуманным (частный, которого на машине нет): тогда
+    // отправитель привязывается к адресу приёма на петле, а запечатывается адресом привязки
+    let from = match route {
+        Route::Product => own,
+        #[cfg(any(test, feature = "test-net"))]
+        Route::Test { bind, .. } if !own.is_loopback() => bind,
+        #[cfg(any(test, feature = "test-net"))]
+        Route::Test { .. } => own,
+    };
+    sock.bind(&SockAddr::from(SocketAddrV4::new(from, 0)))
         .map_err(|_| OpenError::Other)?;
     if matches!(route, Route::Product) {
         sock.set_multicast_if_v4(&own)
