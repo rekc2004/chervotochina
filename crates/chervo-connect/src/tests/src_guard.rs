@@ -115,7 +115,11 @@ fn src_guard() {
     assert!(count("reporter_down(", "engine.rs") >= 1);
     // проба маршрута к цели (сокетный код) вызывается только из `clock.rs`
     assert!(count("route_source_for(", "clock.rs") >= 1);
+    // служба поиска в локальной сети (13в): интерфейс и забор находок только в lan.rs
+    assert!(count("LanDiscovery", "lan.rs") >= 1);
+    assert!(count("take_sightings(", "lan.rs") >= 1);
     // положительный контроль: охрана видит нужные файлы
+    assert!(engine.iter().any(|s| s.rel == "lan.rs"));
     assert!(engine.iter().any(|s| s.rel == "watch.rs"));
     assert!(engine.iter().any(|s| s.rel == "addrinfo.rs"));
     assert!(engine.iter().any(|s| s.rel == "gateway.rs"));
@@ -128,6 +132,18 @@ fn src_guard() {
     for w in ["upnp", "igd", "socket2", "mio", "hyper"] {
         assert!(!manifest.contains(w), "Cargo.toml contains {w}");
     }
+    // 13в: крейта маяка нет в обычных зависимостях (в dev-зависимостях для сквозного теста можно)
+    let (normal, dev) = manifest
+        .split_once("[dev-dependencies]")
+        .expect("в манифесте есть [dev-dependencies]");
+    assert!(
+        !normal.contains("chervo-lan"),
+        "chervo-lan в [dependencies]"
+    );
+    assert!(
+        dev.contains("chervo-lan"),
+        "сквозной тест подключает chervo-lan как dev"
+    );
 }
 
 // ----------------------------------------------------------------------------------------

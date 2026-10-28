@@ -42,7 +42,7 @@ fn is_lan(addr: &SocketAddr) -> bool {
 }
 
 /// Адрес, на который стучать бессмысленно или опасно, даже если он попал в книгу.
-fn dialable(addr: &SocketAddr) -> bool {
+pub(crate) fn dialable(addr: &SocketAddr) -> bool {
     addr.port() != 0
         && !matches!(
             classify(addr.ip()),
@@ -54,7 +54,7 @@ fn dialable(addr: &SocketAddr) -> bool {
 }
 
 /// Семейства, которыми умеет пользоваться транспорт (по его адресам прослушивания).
-fn family_ok(addr: &SocketAddr, local: &[SocketAddr]) -> bool {
+pub(crate) fn family_ok(addr: &SocketAddr, local: &[SocketAddr]) -> bool {
     local.iter().any(|l| l.is_ipv4() == addr.is_ipv4())
 }
 

@@ -685,6 +685,7 @@ dependencies = [
  "chervo-addr",
  "chervo-friends",
  "chervo-identity",
+ "chervo-lan",
  "chervo-token",
  "chervo-transport",
  "chervo-transport-quinn",

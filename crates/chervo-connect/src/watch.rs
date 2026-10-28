@@ -79,6 +79,7 @@ where
             for pair in live.keys() {
                 friends.entry(*pair).or_default().want_addr_info = true;
             }
+            self.lan_sync_local(&st);
         }
         self.gw.wake();
         self.emit(EngineEvent::OwnAddrsChanged);

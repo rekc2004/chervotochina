@@ -46,6 +46,9 @@ pub struct ConnectConfig {
     /// Не чаще одного объявления «внешний адрес изменился» (повторный стук, ADDR_INFO друзьям,
     /// событие) за этот срок. Быстрого окна и сброса ограничителя оно не вызывает.
     pub ext_announce_gap: Duration,
+    /// Сколько живёт запись «друга слышали по маяку в локальной сети» (только в памяти, в
+    /// книгу она не пишется).
+    pub lan_seen_ttl: Duration,
 }
 
 impl Default for ConnectConfig {
@@ -79,6 +82,7 @@ impl Default for ConnectConfig {
             udp_blocked_window: Duration::from_secs(600),
             udp_blocked_min_friends: 2,
             ext_announce_gap: Duration::from_secs(30),
+            lan_seen_ttl: Duration::from_secs(120),
         }
     }
 }
