@@ -57,6 +57,12 @@ fn texts_present() {
     assert!(MODE_ANNOUNCE_TEXT.contains("Червоточина"));
     assert!(MODE_ANNOUNCE_TEXT.contains("Только слушать"));
     assert!(MODE_LISTEN_TEXT.contains("ничего в сеть не рассылает"));
+    // строка адресов и подсказка про VPN (дополнение 1): дословно по спецификации
+    assert_eq!(crate::texts::ADDRS_PREFIX_TEXT, "Ищем на адресах: ");
+    assert_eq!(
+        crate::texts::VPN_HINT_TEXT,
+        "Если включён VPN или прокси, домашние устройства могут быть не видны: VPN может перекрывать домашнюю сеть."
+    );
 }
 
 #[test]

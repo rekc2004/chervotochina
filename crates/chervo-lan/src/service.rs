@@ -264,6 +264,20 @@ impl LanBeacon {
         self.after_change();
     }
 
+    /// Ждёт, пока поток службы завершится после `shutdown` (не дольше `limit`). `true`: потока
+    /// нет или он завершился.
+    pub fn wait_stopped(&self, limit: Duration) -> bool {
+        let end = Instant::now() + limit;
+        let started = lock(&self.handle).is_some();
+        while started && !self.shared.finished.load(Ordering::SeqCst) {
+            if Instant::now() >= end {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        true
+    }
+
     /// Адреса интерфейсов, на которых идёт поиск сейчас (до `MAX_IFACES`); пусто при `Off`,
     /// без адреса и без частных интерфейсов.
     pub fn addrs(&self) -> Vec<Ipv4Addr> {

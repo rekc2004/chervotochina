@@ -36,9 +36,9 @@ pub use service::LanBeacon;
 #[cfg(any(test, feature = "test-net"))]
 pub use service::TestNet;
 pub use texts::{
-    MODE_ANNOUNCE_TEXT, MODE_LISTEN_TEXT, MODE_OFF_TEXT, STATUS_ANNOUNCING_TEXT,
+    ADDRS_PREFIX_TEXT, MODE_ANNOUNCE_TEXT, MODE_LISTEN_TEXT, MODE_OFF_TEXT, STATUS_ANNOUNCING_TEXT,
     STATUS_FAILED_TEXT, STATUS_LISTENING_TEXT, STATUS_NO_PRIVATE_ROUTE_TEXT, STATUS_OFF_TEXT,
-    STATUS_PORT_BUSY_TEXT, mode_text, status_text,
+    STATUS_PORT_BUSY_TEXT, VPN_HINT_TEXT, mode_text, status_text,
 };
 
 /// Только для проверок вручную (`lan_probe ifaces`): набор интерфейсов для адреса по умолчанию
