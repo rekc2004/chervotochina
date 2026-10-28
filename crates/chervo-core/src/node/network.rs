@@ -60,6 +60,11 @@ impl Node {
     /// Состояние поиска друзей в локальной сети; `None`, пока служба не создана (режим
     /// «выключено» с самого начала).
     pub fn lan_status(&self) -> Option<LanStatus> {
+        if self.core.lan_blocked {
+            // порт транспорта равен порту маяка: служба не запущена
+            let off = lock(&self.core.settings).lan_mode == LanMode::Off;
+            return (!off).then_some(LanStatus::PortBusy);
+        }
         self.core.engine.lan_status()
     }
 
@@ -84,6 +89,9 @@ impl Node {
 
     /// Привести службу поиска в соответствие с режимом в настройках.
     fn sync_lan(&self) -> Result<(), NodeError> {
+        if self.core.lan_blocked {
+            return Ok(());
+        }
         let mode = lock(&self.core.settings).lan_mode;
         let _g = self.enter();
         let mut slot = lock(&self.core.lan);

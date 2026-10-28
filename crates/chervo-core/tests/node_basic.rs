@@ -513,3 +513,38 @@ fn set_port_rejects_lan_port() {
     assert_eq!(node.settings().port, before, "порт не изменился");
     node.shutdown(Duration::from_secs(5));
 }
+
+/// Старый файл настроек мог хранить порт маяка: разбор его принимает (файл не становится
+/// `SettingsCorrupt`), а служба поиска при таком порту транспорта не запускается: состояние
+/// `PortBusy`, адресов нет, и режим по-прежнему можно менять без ошибки.
+#[test]
+fn lan_service_not_started_on_lan_port() {
+    use chervo_core::{LanMode, LanStatus};
+    let rig = Rig::new("lan_port_blocked");
+    rig.setup();
+    let cfg = harness::cfg_in(&rig.data, Some(chervo_lan::LAN_PORT));
+    // порт занимает сам узел (без общего доступа): параллельные тесты со службой поиска держат его
+    // недолго, поэтому открытие повторяется
+    let mut opened = None;
+    for _ in 0..200 {
+        match Node::open_with_store_for_tests(cfg.clone(), &hardened(), rig.store.backend()) {
+            Ok(v) => {
+                opened = Some(v);
+                break;
+            }
+            Err(NodeError::PortInUse) => std::thread::sleep(Duration::from_millis(50)),
+            Err(e) => panic!("открытие: {e}"),
+        }
+    }
+    let (node, _ev) = opened.expect("порт маяка не освободился за 10 с");
+    assert_eq!(node.settings().lan_mode, LanMode::Listen);
+    assert_eq!(node.lan_status(), Some(LanStatus::PortBusy));
+    assert!(node.lan_addrs().is_empty());
+    // смена режима не создаёт службу и не падает
+    node.set_lan_mode(LanMode::Announce).unwrap();
+    assert_eq!(node.lan_status(), Some(LanStatus::PortBusy));
+    assert!(node.lan_addrs().is_empty());
+    node.set_lan_mode(LanMode::Off).unwrap();
+    assert_eq!(node.lan_status(), None);
+    node.shutdown(Duration::from_secs(5));
+}

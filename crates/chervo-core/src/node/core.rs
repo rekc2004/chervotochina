@@ -123,6 +123,9 @@ pub(crate) struct Core {
     pub(crate) mapper: Mutex<Option<Arc<UpnpMapper>>>,
     /// Служба поиска друзей в локальной сети; создаётся при первом режиме не `Off`.
     pub(crate) lan: Mutex<Option<Arc<LanBeacon>>>,
+    /// Порт транспорта совпал с портом маяка (старый файл настроек с `port=` порта маяка): служба
+    /// поиска не запускается, состояние `PortBusy`.
+    pub(crate) lan_blocked: bool,
 }
 
 impl Core {

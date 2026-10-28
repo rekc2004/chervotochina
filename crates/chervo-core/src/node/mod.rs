@@ -490,8 +490,11 @@ fn build_core(cfg: &NodeConfig, p: Parts) -> Result<Built, NodeError> {
         Some(m)
     };
 
-    // поиск друзей в локальной сети: служба создаётся, только если режим не «выключено»
-    let lan = if st.lan_mode == LanMode::Off {
+    // поиск друзей в локальной сети: служба создаётся, только если режим не «выключено» и порт
+    // транспорта не равен порту маяка (старый файл настроек мог его хранить: разбор файла такой
+    // порт принимает, чтобы файл не стал `SettingsCorrupt`)
+    let lan_blocked = port == chervo_lan::LAN_PORT;
+    let lan = if st.lan_mode == LanMode::Off || lan_blocked {
         None
     } else {
         Some(network::new_beacon(st.lan_mode, &clock, &engine)?)
@@ -555,6 +558,7 @@ fn build_core(cfg: &NodeConfig, p: Parts) -> Result<Built, NodeError> {
         reg: Mutex::new(Registry::default()),
         mapper: Mutex::new(mapper),
         lan: Mutex::new(lan),
+        lan_blocked,
     });
     Ok((core, events, tevents, warnings))
 }
