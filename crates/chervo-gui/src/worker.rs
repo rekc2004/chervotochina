@@ -7,11 +7,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chervo_core::{HardenReport, Node, NodeConfig, NodeError, NodeEvents, ReceiveLimits};
 
+use chervo_core::update::UpdateError;
+
 use crate::model::{Command, OpenMode, Outcome};
+use crate::update_worker::{UpdateJob, UpdateWorker};
 use crate::worker_ops::{self, Refs};
 
 /// Срок мягкой остановки передач при закрытии окна (экран 10).
@@ -20,6 +23,9 @@ const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(10);
 const UNLOCK_WAIT: Duration = Duration::from_secs(60);
 /// Как часто поток смотрит очередь команд, пока событий нет.
 const POLL: Duration = Duration::from_millis(100);
+/// Как часто поток узла предлагает фоновую проверку новых версий. Сам запрос идёт не чаще раза
+/// в сутки: это решает ядро по записанному времени (SPEC 19г, Р19г-6).
+const UPDATE_TICK: Duration = Duration::from_secs(3600);
 
 /// Связь окна с фоновым потоком.
 pub struct Worker {
@@ -106,6 +112,10 @@ struct State {
     refs: Refs,
     out: Sender<Outcome>,
     wake: Wake,
+    /// Поток сети и сверки файлов обновлений; `None`, если запустить его не удалось.
+    updates: Option<UpdateWorker>,
+    /// Когда в следующий раз предложить фоновую проверку (после открытия узла и затем раз в час).
+    next_update_tick: Option<Instant>,
 }
 
 impl State {
@@ -154,11 +164,48 @@ impl State {
                 self.post(Outcome::Stopped);
                 return false;
             }
+            // кнопка «Проверить сейчас»: окно всегда получает итог
+            Command::CheckUpdateNow => {
+                let out = match (&self.node, &self.updates) {
+                    (Some((node, _)), Some(updates)) => {
+                        worker_ops::update_tick(node, updates, true)
+                    }
+                    _ => None,
+                };
+                self.post(out.unwrap_or(Outcome::UpdateSkipped));
+            }
+            // сверка файлов узлу не нужна: задание уходит в поток обновлений
+            Command::VerifyRelease {
+                manifest,
+                minisig,
+                files,
+                allow_downgrade,
+            } => {
+                let job = UpdateJob::Verify {
+                    manifest,
+                    minisig,
+                    files,
+                    allow_downgrade,
+                };
+                let sent = self.updates.as_ref().is_some_and(|u| u.send(job));
+                if !sent {
+                    let err = UpdateError::Io(std::io::ErrorKind::Other);
+                    self.post(Outcome::ReleaseVerified(Err(err)));
+                }
+            }
             other => {
                 let out = self
                     .node
                     .as_ref()
                     .and_then(|(node, _)| worker_ops::exec(node, &mut self.refs, other));
+                // согласие включено: фоновая проверка предлагается сразу, а не через час
+                if let Some(Outcome::UpdateConsentSet {
+                    enabled: true,
+                    result: Ok(()),
+                }) = &out
+                {
+                    self.next_update_tick = Some(Instant::now());
+                }
                 // узла нет (ещё не открыт или уже остановлен): действие невозможно
                 self.post(out.unwrap_or(Outcome::Done(Err(NodeError::Shutdown))));
             }
@@ -186,10 +233,30 @@ impl State {
                     None => true,
                 };
                 self.node = Some((node, events));
+                self.next_update_tick = Some(Instant::now());
                 self.post(Outcome::Opened { port_saved });
                 self.post_snapshot();
             }
             Err(e) => self.post(Outcome::OpenFailed(e)),
+        }
+    }
+
+    /// Фоновый такт проверки новых версий: сразу после открытия узла и затем раз в час.
+    fn background_update_tick(&mut self) {
+        let Some(due) = self.next_update_tick else {
+            return;
+        };
+        let now = Instant::now();
+        if now < due {
+            return;
+        }
+        self.next_update_tick = Some(now + UPDATE_TICK);
+        let out = match (&self.node, &self.updates) {
+            (Some((node, _)), Some(updates)) => worker_ops::update_tick(node, updates, false),
+            _ => None,
+        };
+        if let Some(o) = out {
+            self.post(o);
         }
     }
 
@@ -229,8 +296,10 @@ fn run(
         hardening,
         node: None,
         refs: Refs::default(),
+        updates: UpdateWorker::spawn(out.clone(), wake.clone()),
         out,
         wake,
+        next_update_tick: None,
     };
     loop {
         match commands.recv_timeout(POLL) {
@@ -255,6 +324,9 @@ fn run(
             }
         }
         st.pump_events();
+        if !stop.load(Ordering::SeqCst) {
+            st.background_update_tick();
+        }
     }
 }
 

@@ -15,6 +15,7 @@ use crate::model::{ClockResult, Command, FriendEventKind, Outcome, Snapshot};
 use crate::rows::{
     DiagRow, FileRow, FriendRow, Id, OfferRow, RetiredRow, RouterRow, SettingsRow, TransferRow,
 };
+use crate::update_worker::{UpdateJob, UpdateWorker};
 
 /// Как долго держится построенное предложение (имена не меняются, место на диске обновляется).
 const OFFER_TTL: std::time::Duration = std::time::Duration::from_secs(5);
@@ -235,6 +236,7 @@ pub fn snapshot(node: &Node, refs: &mut Refs) -> Snapshot {
         ntp_servers: sv.ntp_servers,
         key_store: sv.key_store,
         restart_needed: sv.restart_needed,
+        update_consent: sv.update_consent,
     };
     Snapshot {
         friends,
@@ -315,6 +317,33 @@ pub fn event_outcome(node: Option<&Node>, refs: &mut Refs, ev: NodeEvent) -> Out
         NodeEvent::OfferIncoming { .. } => Outcome::OfferIncoming,
         NodeEvent::OfferAutoAccepted { .. } => Outcome::AutoAccepted,
         other => Outcome::Event(other),
+    }
+}
+
+/// Один такт проверки новых версий (фон раз в час и кнопка «Проверить сейчас»). Время ядро
+/// берёт само; окно и этот код времени не передают и не подставляют. Разрешение на запрос
+/// выдаёт только узел и только при записанном согласии. `manual`: итог нужен окну всегда,
+/// для фона `None` значит «ничего не делаем».
+pub fn update_tick(node: &Node, updates: &UpdateWorker, manual: bool) -> Option<Outcome> {
+    let skipped = || manual.then_some(Outcome::UpdateSkipped);
+    // номер своей версии берём до разрешения: разрешение тратится только на настоящий запрос
+    let Some(running) = chervo_core::update::running_version() else {
+        return skipped();
+    };
+    match node.update_check_permit(manual) {
+        Ok(Some(permit)) => {
+            let job = UpdateJob::Check {
+                permit,
+                running,
+                manual,
+            };
+            if updates.send(job) {
+                Some(Outcome::UpdateCheckStarted { manual })
+            } else {
+                skipped()
+            }
+        }
+        Ok(None) | Err(_) => skipped(),
     }
 }
 
@@ -523,6 +552,11 @@ pub fn exec(node: &Node, refs: &mut Refs, cmd: Command) -> Option<Outcome> {
         Command::ForgetRetired(id) => done(match refs.friends.get(id) {
             Some(f) => node.forget_retired(f),
             None => Err(unknown()),
+        }),
+        // ответ на вопрос о проверке новых версий; сам по себе ничего не отправляет
+        Command::SetUpdateConsent(enabled) => Some(Outcome::UpdateConsentSet {
+            enabled,
+            result: node.set_update_consent(enabled),
         }),
         _ => None,
     }

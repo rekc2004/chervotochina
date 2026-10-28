@@ -4,10 +4,10 @@ use eframe::egui;
 
 use crate::main_model::MainIntent;
 use crate::model::{Intent, Model, Page};
-use crate::screens::{add_friend, diagnosis, friends, offers, send, settings, transfers};
+use crate::screens::{add_friend, diagnosis, friends, offers, send, settings, transfers, update};
 use crate::texts;
 
-const PAGES: [(Page, &str); 7] = [
+const PAGES: [(Page, &str); 8] = [
     (Page::Friends, texts::NAV_FRIENDS),
     (Page::AddFriend, texts::NAV_ADD_FRIEND),
     (Page::Send, texts::NAV_SEND),
@@ -15,6 +15,7 @@ const PAGES: [(Page, &str); 7] = [
     (Page::Transfers, texts::NAV_TRANSFERS),
     (Page::Diagnosis, texts::NAV_DIAGNOSIS),
     (Page::Settings, texts::NAV_SETTINGS),
+    (Page::Updates, texts::NAV_UPDATES),
 ];
 
 pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
@@ -32,6 +33,14 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
         }
     });
     ui.separator();
+    if model.consent_card_visible() {
+        update::consent_card(ui, &mut out);
+        ui.separator();
+    }
+    if model.update.newer.is_some() {
+        update::newer_card(ui, model, &mut out);
+        ui.separator();
+    }
     if !model.notices.is_empty() {
         for notice in &model.notices {
             ui.label(notice);
@@ -52,6 +61,7 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
         Page::Transfers => out.extend(transfers::show(ui, model)),
         Page::Diagnosis => out.extend(diagnosis::show(ui, model)),
         Page::Settings => out.extend(settings::show(ui, model)),
+        Page::Updates => out.extend(update::show(ui, model)),
     }
     out
 }

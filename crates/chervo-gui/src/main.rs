@@ -10,9 +10,12 @@ mod picker;
 mod qr;
 mod redact;
 mod rows;
+mod safe_text;
 mod screens;
 mod settings_model;
 mod texts;
+mod update_model;
+mod update_worker;
 mod worker;
 mod worker_ops;
 

@@ -40,6 +40,7 @@ pub const NAV_OFFERS: &str = "Входящие";
 pub const NAV_TRANSFERS: &str = "Передачи";
 pub const NAV_DIAGNOSIS: &str = "Диагностика";
 pub const NAV_SETTINGS: &str = "Настройки";
+pub const NAV_UPDATES: &str = "Обновления";
 
 // Закрытие (экран 10)
 pub const CLOSE_ASK_TITLE: &str = "Закрыть программу?";
@@ -220,6 +221,73 @@ pub const SET_TITLE_ABOUT: &str = "О программе";
 pub const ABOUT_VERSION: &str = "Версия";
 pub const ABOUT_LICENCES: &str =
     "Список лицензий сторонних библиотек появится вместе с выпуском программы (этап 19).";
+
+// Обновления (этап 19г-2, SPEC 19г разд. 6; дословно)
+pub const UPD_CONSENT_TITLE: &str = "Проверять, не вышла ли новая версия?";
+pub const UPD_CONSENT_TEXT: &str = "Раз в сутки программа может спрашивать у GitHub, вышла ли новая версия. При каждой проверке GitHub видит ваш IP-адрес и то, что на этом адресе стоит Червоточина. Программа ничего не скачивает и сама не обновляется: она только сообщит номер новой версии. Решение можно изменить в разделе «Обновления».";
+pub const BTN_UPD_ENABLE: &str = "Включить проверку";
+pub const BTN_UPD_DISABLE: &str = "Не проверять";
+pub const UPD_RUNNING: &str = "Установлена версия";
+pub const UPD_TOGGLE: &str = "Проверять новые версии раз в сутки (GitHub увидит ваш IP-адрес)";
+pub const BTN_UPD_CHECK_NOW: &str = "Проверить сейчас";
+pub const UPD_CHECK_NEEDS_CONSENT: &str = "Включите проверку, чтобы проверить сейчас.";
+pub const UPD_CHECKING: &str = "Проверяем…";
+pub const BTN_UPD_WHERE: &str = "Где скачать";
+pub const UPD_LINK_TEXT: &str =
+    "Скачайте файлы со страницы выпусков и проверьте их здесь, в разделе «Обновления», до запуска.";
+pub const UPD_NO_NETWORK: &str = "Нет связи с GitHub.";
+pub const UPD_BAD_RESPONSE: &str = "Ответ не прошёл проверку.";
+pub const UPD_NO_KEYS: &str = "Ключи владельца не вшиты: проверка невозможна.";
+pub const UPD_SKIPPED: &str = "Проверка выключена или была меньше минуты назад.";
+pub const UPD_VERIFY_TITLE: &str = "Проверить скачанные файлы";
+pub const UPD_VERIFY_HINT: &str = "Выберите список файлов выпуска (chervo-release.txt), его подпись (chervo-release.txt.minisig) и скачанные файлы. Проверка идёт без сети.";
+pub const BTN_UPD_PICK_MANIFEST: &str = "Список файлов…";
+pub const BTN_UPD_PICK_SIG: &str = "Подпись…";
+pub const BTN_UPD_PICK_FILES: &str = "Файлы…";
+pub const BTN_UPD_VERIFY: &str = "Проверить";
+pub const UPD_ALLOW_DOWNGRADE: &str = "Разрешить старую версию (откат)";
+pub const UPD_FILE_NEWER: &str = "подходит, новее установленной";
+pub const UPD_FILE_SAME: &str = "подходит, та же версия";
+pub const UPD_FILE_OLDER: &str = "подходит, но это СТАРАЯ версия: откат разрешён вами";
+pub const UPD_REPLACE_HINT: &str =
+    "Файл подлинный. Закройте программу и замените её этим файлом вручную.";
+pub const UPD_KEYS_TITLE: &str = "Вшитые ключи владельца (сверьте с README)";
+pub const UPD_KEYS_NONE: &str = "Ключи владельца не вшиты.";
+pub const UPD_ROLE_PRIMARY: &str = "основной";
+pub const UPD_ROLE_BACKUP: &str = "запасной";
+// ошибки сверки по варианту (SPEC 19г разд. 6)
+pub const UPD_ERR_TOO_LARGE: &str = "файл больше допустимого предела";
+pub const UPD_ERR_SIG_FORMAT: &str = "файл подписи повреждён или не того формата";
+pub const UPD_ERR_UNKNOWN_KEY: &str = "подписано не ключом владельца";
+pub const UPD_ERR_BAD_SIG: &str = "подпись не сходится: список файлов изменён или подпись чужая";
+pub const UPD_ERR_MANIFEST_FORMAT: &str = "список файлов повреждён или не того формата";
+pub const UPD_ERR_NOT_IN_MANIFEST: &str = "этого файла нет в подписанном списке";
+pub const UPD_ERR_WRONG_TARGET: &str = "файл для другой системы";
+pub const UPD_ERR_SIZE: &str = "размер файла не совпал";
+pub const UPD_ERR_DOWNGRADE: &str =
+    "это старая версия; чтобы всё же принять её, отметьте «Разрешить старую версию»";
+pub const UPD_ERR_IO: &str = "файл не удалось прочитать";
+pub const UPD_ERR_OTHER: &str = "проверка не прошла";
+
+/// «Вышла версия {new} (у вас {cur}).»; подставляются только два номера версии.
+pub fn upd_newer(new: &chervo_core::update::Version, cur: &str) -> String {
+    format!("Вышла версия {new} (у вас {cur}).")
+}
+
+/// «Установлена последняя версия ({cur}).»
+pub fn upd_up_to_date(cur: &str) -> String {
+    format!("Установлена последняя версия ({cur}).")
+}
+
+/// «Подписано ключом владельца: {role}, key_id {id}. Версия выпуска {ver}.»
+pub fn upd_signed_by(role: &str, key_id: &str, ver: &chervo_core::update::Version) -> String {
+    format!("Подписано ключом владельца: {role}, key_id {key_id}. Версия выпуска {ver}.")
+}
+
+/// «{role}: {id}»
+pub fn upd_key_row(role: &str, key_id: &str) -> String {
+    format!("{role}: {key_id}")
+}
 
 pub fn clock_proposal_text(offset_ms: i64) -> String {
     let secs = offset_ms / 1000;

@@ -376,6 +376,7 @@ mod tests {
             ntp_servers: vec!["pool.example".to_owned()],
             key_store: KeyStoreKind::CredentialManager,
             restart_needed: false,
+            update_consent: chervo_core::update::UpdateConsent::NotAsked,
         }
     }
 
