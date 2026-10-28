@@ -18,6 +18,9 @@
 #    run anything it downloaded; the job `check` (runs the downloaded binary) has `permissions: {}`.
 #    The text check of `fetch` is BEST EFFORT (a regex over the lines, not a shell parser).
 #    Stage 19g: the downloaded CI verifiers (`verifier-files/`) count as downloaded files too.
+# 5. cargo install (stage 19g-4, R19g-12): in every workflow each `cargo install` line is exactly
+#    `cargo install --locked --version =X.Y.Z <one name>`; `cargo binstall` is forbidden; cargo-about is installed
+#    by exactly one line, in release.yml, job `assemble`; `cargo about` is called only by scripts/release/assemble.sh.
 # 6. release.yml (stage 19g, R19g-11): the jobs `assemble` and `draft` never mention `verifier`: the CLI
 #    builds for Windows/macOS must not reach the release files, the manifest or the draft.
 set -euo pipefail
@@ -240,6 +243,50 @@ guard_no_verifier_in_release() { # release.yml
   return "$bad"
 }
 
+# --- 5 --- (stage 19g-4, R19g-12) cargo install is pinned; cargo-about lives in one line of the job assemble.
+cargo_install_re='(^|[^A-Za-z0-9_-])cargo[[:space:]]+install([[:space:]]|$)'
+cargo_install_good_re='^[[:space:]]*(-[[:space:]]+)?(run:[[:space:]]+)?cargo install --locked --version =[0-9]+\.[0-9]+\.[0-9]+ [A-Za-z0-9_-]+[[:space:]]*$'
+cargo_about_re='cargo-about|(^|[^A-Za-z0-9_-])cargo[[:space:]]+about([[:space:]]|$)'
+cargo_binstall_re='cargo[[:space:]-]+binstall'
+
+guard_cargo_install() { # repo-root
+  local root="$1" bad=0 f line t total=0 name wf="$1/.github/workflows"
+  local files=()
+  [[ -d "$wf" ]] || { echo "missing directory: $wf" >&2; return 1; }
+  for f in "$wf"/*.yml "$wf"/*.yaml; do [[ -f "$f" ]] && files+=("$f"); done
+  for f in "${files[@]}"; do
+    name="${f##*/}"
+    while IFS= read -r line; do
+      t="${line#"${line%%[![:space:]]*}"}"
+      if [[ "$line" =~ $cargo_binstall_re ]]; then
+        echo "$f: cargo binstall is forbidden: $t" >&2; bad=1
+      fi
+      if [[ "$line" =~ $cargo_install_re ]] && ! [[ "$line" =~ $cargo_install_good_re ]]; then
+        echo "$f: cargo install must be 'cargo install --locked --version =X.Y.Z <name>' and nothing else: $t" >&2; bad=1
+      fi
+      if [[ "$line" =~ $cargo_about_re ]]; then
+        if [[ "$line" =~ $cargo_install_good_re && "$line" =~ [[:space:]]cargo-about[[:space:]]*$ ]] &&
+           [[ "$name" == release.yml ]] && job_block "$f" assemble | grep -qxF -- "$line"; then
+          total=$((total + 1))
+        else
+          echo "$f: cargo-about may only be installed by one line in release.yml, job assemble: $t" >&2; bad=1
+        fi
+      fi
+    done < <(logical_lines "$f")
+  done
+  if [[ "$total" -ne 1 ]]; then
+    echo "cargo-about must be installed by exactly one line (release.yml, job assemble), found $total" >&2; bad=1
+  fi
+  # `cargo about` is called only by scripts/release/assemble.sh.
+  while IFS= read -r f; do
+    [[ "$f" == "$root/scripts/release/assemble.sh" || "$f" == "$root/scripts/check-release-guards.sh" ]] && continue
+    if logical_lines "$f" | grep -qE "$cargo_about_re"; then
+      echo "$f: cargo about is allowed only in scripts/release/assemble.sh" >&2; bad=1
+    fi
+  done < <(find "$root/scripts" -type f -name '*.sh' 2>/dev/null | LC_ALL=C sort)
+  return "$bad"
+}
+
 run_all() {
   local root="$1" bad=0 wf="$1/.github/workflows"
   guard_build_form "$wf/release.yml" "$root"/scripts/release/*.sh || bad=1
@@ -249,6 +296,7 @@ run_all() {
   guard_common "$wf"/*.yml || bad=1
   guard_release_yml "$wf/release.yml" || bad=1
   guard_no_verifier_in_release "$wf/release.yml" || bad=1
+  guard_cargo_install "$root" || bad=1
   guard_no_secrets "$wf/release-smoke.yml" || bad=1
   # release-smoke may hold write access (draft visibility) in `fetch` only; `fetch` runs nothing
   # downloaded; `check` (runs the downloaded binary) has no permissions at all.
@@ -488,6 +536,60 @@ jobs:
   expect release-secrets-bracket 1 guard_release_yml "$f"
   f="$tmp/r12.yml"; { printf '%s' "$rel"; printf '      - run: echo ${{ toJSON(secrets) }}\n'; } > "$f"
   expect release-secrets-tojson 1 guard_release_yml "$f"
+
+  # 5. cargo install pinned; cargo-about in one line of assemble (R19g-12)
+  local good_ci='cargo install --locked --version =0.20.2 cargo-deny'
+  local good_about='cargo install --locked --version =0.9.2 cargo-about'
+  # mk5 DIR CI-LINE BUILD-LINE ASSEMBLE-LINE SCRIPT-LINE: a minimal repository tree.
+  mk5() {
+    rm -rf "$1"; mkdir -p "$1/.github/workflows" "$1/scripts/release"
+    printf 'jobs:\n  lint:\n    steps:\n      - run: %s\n' "$2" > "$1/.github/workflows/ci.yml"
+    printf 'jobs:\n  build:\n    steps:\n      - run: %s\n  assemble:\n    steps:\n      - run: cargo install --locked --version =0.5.9 cargo-cyclonedx\n      - run: %s\n' "$3" "$4" > "$1/.github/workflows/release.yml"
+    printf 'cargo about generate -c x -m y --locked --fail z\n' > "$1/scripts/release/assemble.sh"
+    printf '%s\n' "$5" > "$1/scripts/other.sh"
+  }
+  local t5="$tmp/t5"
+  mk5 "$t5" "$good_ci" 'cargo build' "$good_about" 'echo ok'
+  expect cargo-install-ok 0 guard_cargo_install "$t5"
+  local ci_bad
+  for ci_bad in 'cargo install --version =0.20.2 cargo-deny' 'cargo install --locked --version 0.20.2 cargo-deny' \
+                'cargo install --locked --version =0.20 cargo-deny' "cargo install --locked --version '^0.20.2' cargo-deny" \
+                'cargo install --locked --version =0.20.2 --git https://example.invalid/x cargo-deny' \
+                'cargo install --locked --version =0.20.2 cargo-deny cargo-audit' 'cargo install cargo-deny' \
+                'cargo install --locked --version =0.20.2 --force cargo-deny' 'cargo install --locked --path x' \
+                'cargo binstall cargo-deny' 'cargo-binstall cargo-deny' 'cargo install --locked --version =0.20.2 cargo-deny && true' \
+                'cargo install --locked --version =0.9.2 cargo-about' 'cargo about generate x'; do
+    mk5 "$t5" "$ci_bad" 'cargo build' "$good_about" 'echo ok'
+    expect "cargo-install-bad-ci[$ci_bad]" 1 guard_cargo_install "$t5"
+  done
+  local rel_bad
+  for rel_bad in 'cargo install --locked cargo-about' 'cargo install --version =0.9.2 cargo-about' \
+                 'cargo install --locked --version 0.9.2 cargo-about' 'cargo install --locked --version =0.9 cargo-about' \
+                 'cargo install --locked --version =0.9.2 --git https://example.invalid/x cargo-about' \
+                 'cargo install cargo-about' 'cargo binstall cargo-about' 'cargo about generate x'; do
+    mk5 "$t5" "$good_ci" 'cargo build' "$rel_bad" 'echo ok'
+    expect "cargo-install-bad-assemble[$rel_bad]" 1 guard_cargo_install "$t5"
+  done
+  mk5 "$t5" "$good_ci" "$good_about" "$good_about" 'echo ok'
+  expect cargo-about-in-build-job 1 guard_cargo_install "$t5"
+  mk5 "$t5" "$good_ci" 'cargo build' 'cargo build' 'echo ok'
+  expect cargo-about-not-installed 1 guard_cargo_install "$t5"
+  mk5 "$t5" "$good_ci" 'cargo build' "$good_about
+      - run: $good_about" 'echo ok'
+  expect cargo-about-twice 1 guard_cargo_install "$t5"
+  mk5 "$t5" "$good_ci" 'cargo build' "$good_about" 'cargo about generate x'
+  expect cargo-about-called-in-other-script 1 guard_cargo_install "$t5"
+  mk5 "$t5" "$good_ci" 'cargo build' "$good_about" 'cargo-about generate x'
+  expect cargo-about-dash-in-other-script 1 guard_cargo_install "$t5"
+  mk5 "$t5" "$good_ci" 'cargo build' "$good_about" 'echo ok'
+  mkdir -p "$t5/scripts/sub"; printf 'cargo about generate x\n' > "$t5/scripts/sub/y.sh"
+  expect cargo-about-called-in-subdir-script 1 guard_cargo_install "$t5"
+  mk5 "$t5" "$good_ci" 'cargo build' "$good_about" 'echo ok'
+  cp "$t5/.github/workflows/release.yml" "$t5/.github/workflows/gui-probe.yml"
+  expect cargo-about-install-in-second-workflow 1 guard_cargo_install "$t5"
+  mk5 "$t5" "$good_ci" 'cargo build' "$good_about" 'echo ok'
+  printf '      - run: cargo about generate x\n' >> "$t5/.github/workflows/release.yml"
+  expect cargo-about-generate-in-release-yml 1 guard_cargo_install "$t5"
 
   if [[ $SELF_FAIL -eq 0 ]]; then
     echo "self-test: ok"

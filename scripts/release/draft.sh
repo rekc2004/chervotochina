@@ -32,6 +32,7 @@ trap 'rm -f "$notes"' EXIT
   echo "- Linux: собрано на образе ubuntu-22.04; минимальная glibc равна версии на этом образе (см. сводку задания build)."
   echo "- macOS: не проверено на машине; приложение подписано ad-hoc, без Apple, запуск по docs/INSTALL.md."
   echo "- SBOM без выбора платформы: один для chervo (CLI), один для chervotochina (окно)."
+  echo "- Тексты лицензий сторонних библиотек: chervo-<версия>-third-party-licenses.txt."
   echo "- Побитовая воспроизводимость не заявляется (результат сравнения двух сборок Linux в сводке задания repro)."
 } > "$notes"
 

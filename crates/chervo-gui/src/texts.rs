@@ -219,8 +219,7 @@ pub const SET_NO_RETIRED: &str = "Таких текстов нет.";
 pub const BTN_FORGET_RETIRED: &str = "Друг получил, убрать";
 pub const SET_TITLE_ABOUT: &str = "О программе";
 pub const ABOUT_VERSION: &str = "Версия";
-pub const ABOUT_LICENCES: &str =
-    "Список лицензий сторонних библиотек появится вместе с выпуском программы (этап 19).";
+pub const ABOUT_LICENCES: &str = "В программе используются свободные библиотеки. Их лицензии и авторы перечислены в файле chervo-{ver}-third-party-licenses.txt на странице выпусков; файл подписан вместе с программой.";
 
 // Обновления (этап 19г-2, SPEC 19г разд. 6; дословно)
 pub const UPD_CONSENT_TITLE: &str = "Проверять, не вышла ли новая версия?";

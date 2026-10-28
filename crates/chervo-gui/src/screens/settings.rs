@@ -4,13 +4,14 @@
 
 use chervo_core::KeyStoreKind;
 use chervo_core::texts as core_texts;
+use chervo_core::update::RELEASES_PAGE;
 use eframe::egui;
 
 use crate::main_model::MainIntent;
 use crate::model::{Intent, Model, Page};
 use crate::picker;
 use crate::rows::SettingsRow;
-use crate::screens::common::warn;
+use crate::screens::common::{copy_box, warn};
 use crate::settings_model::{ClockUi, NumEdit, SettingsIntent as S, SettingsUi, UpnpUi};
 use crate::texts;
 
@@ -315,5 +316,6 @@ fn about(ui: &mut egui::Ui) {
         texts::ABOUT_VERSION,
         chervo_core::VERSION
     ));
-    ui.label(texts::ABOUT_LICENCES);
+    ui.label(texts::ABOUT_LICENCES.replace("{ver}", chervo_core::VERSION));
+    copy_box(ui, RELEASES_PAGE);
 }
