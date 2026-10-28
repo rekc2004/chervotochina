@@ -348,6 +348,36 @@ async fn lan_sighting_dials_first_and_strict() {
     assert!(dials_with(&n, &x, "192.168.1.20:4001").len() >= 2);
 }
 
+/// Повтор находки с того же IP каждые 5 с (запись маяка, которую гонят по кругу): наборов на этот
+/// IP не чаще раза в 32 с, и они не пропадают совсем (проверка не пустая). Свойство, которое
+/// стенд LAN5 проверяет по сети; здесь без сети и без разбора пакетов.
+#[tokio::test(start_paused = true)]
+async fn lan_sighting_replay_every_5s_one_dial_per_32s() {
+    let (n, x, lan) = dial_node();
+    tokio::time::sleep(secs(5)).await;
+    let mut seen = 0usize;
+    let mut at: Vec<u64> = Vec::new();
+    for s in 0..140u64 {
+        if s % 5 == 0 {
+            lan.push(x, "192.168.1.20:4001");
+        }
+        tokio::time::sleep(secs(1)).await;
+        let c = dials_with(&n, &x, "192.168.1.20:4001").len();
+        if c > seen {
+            at.push(s);
+            seen = c;
+        }
+    }
+    assert!(
+        at.len() >= 3,
+        "наборы по находке идут, а не замерли: {at:?}"
+    );
+    for w in at.windows(2) {
+        // шаг опроса 1 с: настоящий промежуток не меньше 32 с, видимый не меньше 31
+        assert!(w[1] - w[0] >= 31, "набор на тот же IP раньше срока: {at:?}");
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn lan_sighting_ignored_live_inactive_keyproblem() {
     let mut pre = Pre::new();
