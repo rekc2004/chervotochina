@@ -19,6 +19,7 @@ mod keys;
 mod kk;
 mod knock;
 mod kx;
+mod lan;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod os;
 #[cfg(target_os = "linux")]
@@ -26,6 +27,8 @@ mod os_linux;
 #[cfg(target_os = "linux")]
 mod secret_service;
 mod store;
+#[cfg(test)]
+mod tests;
 
 pub use error::IdentityError;
 pub use guest::GuestSecret;
@@ -37,6 +40,10 @@ pub use kk::{
 };
 pub use knock::{KNOCK_ID_LABEL, KNOCK_KDF_LABEL, KNOCK_LEN, KNOCK_TAG_LABEL, KnockKeys};
 pub use kx::{KxPublicKey, PairKx};
+pub use lan::{
+    LAN_AEADKEY_LABEL, LAN_HDR, LAN_ID_LABEL, LAN_ID_LEN, LAN_IDKEY_LABEL, LAN_KDF_LABEL,
+    LAN_NONCE_LEN, LAN_SLOT_LEN, LAN_WINDOW_SECS, LanKeys,
+};
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 pub use os::OsKeyStore;
 #[cfg(target_os = "linux")]
