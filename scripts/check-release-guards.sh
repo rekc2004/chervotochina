@@ -246,6 +246,8 @@ guard_no_verifier_in_release() { # release.yml
 # --- 5 --- (stage 19g-4, R19g-12) cargo install is pinned; cargo-about lives in one line of the job assemble.
 cargo_install_re='(^|[^A-Za-z0-9_-])cargo[[:space:]]+install([[:space:]]|$)'
 cargo_install_good_re='^[[:space:]]*(-[[:space:]]+)?(run:[[:space:]]+)?cargo install --locked --version =[0-9]+\.[0-9]+\.[0-9]+ [A-Za-z0-9_-]+[[:space:]]*$'
+# cargo-about 0.9.2 builds its binary only with the feature `cli` (required-features), so that line has it.
+cargo_about_good_re='^[[:space:]]*(-[[:space:]]+)?(run:[[:space:]]+)?cargo install --locked --version =[0-9]+\.[0-9]+\.[0-9]+ --features cli cargo-about[[:space:]]*$'
 cargo_about_re='cargo-about|(^|[^A-Za-z0-9_-])cargo[[:space:]]+about([[:space:]]|$)'
 cargo_binstall_re='cargo[[:space:]-]+binstall'
 
@@ -261,11 +263,11 @@ guard_cargo_install() { # repo-root
       if [[ "$line" =~ $cargo_binstall_re ]]; then
         echo "$f: cargo binstall is forbidden: $t" >&2; bad=1
       fi
-      if [[ "$line" =~ $cargo_install_re ]] && ! [[ "$line" =~ $cargo_install_good_re ]]; then
+      if [[ "$line" =~ $cargo_install_re ]] && ! [[ "$line" =~ $cargo_install_good_re ]] && ! [[ "$line" =~ $cargo_about_good_re ]]; then
         echo "$f: cargo install must be 'cargo install --locked --version =X.Y.Z <name>' and nothing else: $t" >&2; bad=1
       fi
       if [[ "$line" =~ $cargo_about_re ]]; then
-        if [[ "$line" =~ $cargo_install_good_re && "$line" =~ [[:space:]]cargo-about[[:space:]]*$ ]] &&
+        if [[ "$line" =~ $cargo_about_good_re ]] &&
            [[ "$name" == release.yml ]] && job_block "$f" assemble | grep -qxF -- "$line"; then
           total=$((total + 1))
         else
@@ -539,7 +541,7 @@ jobs:
 
   # 5. cargo install pinned; cargo-about in one line of assemble (R19g-12)
   local good_ci='cargo install --locked --version =0.20.2 cargo-deny'
-  local good_about='cargo install --locked --version =0.9.2 cargo-about'
+  local good_about='cargo install --locked --version =0.9.2 --features cli cargo-about'
   # mk5 DIR CI-LINE BUILD-LINE ASSEMBLE-LINE SCRIPT-LINE: a minimal repository tree.
   mk5() {
     rm -rf "$1"; mkdir -p "$1/.github/workflows" "$1/scripts/release"
@@ -566,7 +568,10 @@ jobs:
   for rel_bad in 'cargo install --locked cargo-about' 'cargo install --version =0.9.2 cargo-about' \
                  'cargo install --locked --version 0.9.2 cargo-about' 'cargo install --locked --version =0.9 cargo-about' \
                  'cargo install --locked --version =0.9.2 --git https://example.invalid/x cargo-about' \
-                 'cargo install cargo-about' 'cargo binstall cargo-about' 'cargo about generate x'; do
+                 'cargo install cargo-about' 'cargo binstall cargo-about' 'cargo about generate x' \
+                 'cargo install --locked --version =0.9.2 cargo-about' 'cargo install --locked --version =0.9.2 --features cli,x cargo-about' \
+                 'cargo install --locked --version =0.9.x --features cli cargo-about' \
+                 'cargo install --locked --version =0.9.2 --all-features cargo-about' 'cargo install --locked --version =0.9.2 --features cli --force cargo-about'; do
     mk5 "$t5" "$good_ci" 'cargo build' "$rel_bad" 'echo ok'
     expect "cargo-install-bad-assemble[$rel_bad]" 1 guard_cargo_install "$t5"
   done
