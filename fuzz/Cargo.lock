@@ -183,6 +183,7 @@ dependencies = [
  "chervo-connect",
  "chervo-friends",
  "chervo-identity",
+ "chervo-lan",
  "chervo-receive",
  "chervo-timesync",
  "chervo-token",
@@ -215,6 +216,7 @@ version = "0.0.0"
 dependencies = [
  "chervo-core",
  "chervo-identity",
+ "chervo-lan",
  "chervo-receive",
  "chervo-timesync",
  "chervo-token",
@@ -237,11 +239,23 @@ dependencies = [
  "futures-core",
  "getrandom 0.4.3",
  "keyring-core",
+ "ring",
  "snow",
  "tokio",
  "windows-native-keyring-store",
  "x25519-dalek",
  "zbus",
+ "zeroize",
+]
+
+[[package]]
+name = "chervo-lan"
+version = "0.0.0"
+dependencies = [
+ "chervo-addr",
+ "chervo-identity",
+ "getrandom 0.4.3",
+ "socket2",
  "zeroize",
 ]
 
