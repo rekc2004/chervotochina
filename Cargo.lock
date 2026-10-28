@@ -763,6 +763,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "chervo-lan"
+version = "0.0.0"
+dependencies = [
+ "chervo-addr",
+ "chervo-identity",
+ "getrandom 0.4.3",
+ "zeroize",
+]
+
+[[package]]
 name = "chervo-receive"
 version = "0.0.0"
 dependencies = [

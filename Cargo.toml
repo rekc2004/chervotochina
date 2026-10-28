@@ -10,6 +10,7 @@ members = [
     "crates/chervo-friends",
     "crates/chervo-connect",
     "crates/chervo-upnp",
+    "crates/chervo-lan",
     "crates/chervo-transfer",
     "crates/chervo-receive",
     "crates/chervo-update",
@@ -37,6 +38,7 @@ chervo-token = { path = "crates/chervo-token", version = "0.0.0" }
 chervo-friends = { path = "crates/chervo-friends", version = "0.0.0" }
 chervo-connect = { path = "crates/chervo-connect", version = "0.0.0" }
 chervo-upnp = { path = "crates/chervo-upnp", version = "0.0.0" }
+chervo-lan = { path = "crates/chervo-lan", version = "0.0.0" }
 chervo-transfer = { path = "crates/chervo-transfer", version = "0.0.0" }
 chervo-receive = { path = "crates/chervo-receive", version = "0.0.0" }
 chervo-update = { path = "crates/chervo-update", version = "0.0.0" }
