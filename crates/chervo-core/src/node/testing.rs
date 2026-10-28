@@ -57,4 +57,15 @@ impl Node {
     ) -> Result<ClockSync, NodeError> {
         self.decide_clock(result)
     }
+
+    /// Разрешение на проверку новых версий с заданным временем, секунды UTC (тесты правил
+    /// Р19г-6: настоящие часы подменить нельзя).
+    #[doc(hidden)]
+    pub fn update_check_permit_at_for_tests(
+        &self,
+        now_unix_secs: u64,
+        manual: bool,
+    ) -> Result<Option<crate::update::UpdateCheckPermit>, NodeError> {
+        self.update_check_permit_at(now_unix_secs, manual)
+    }
 }

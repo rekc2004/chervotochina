@@ -1,21 +1,37 @@
 #!/usr/bin/env bash
-# Stage 19b: smoke test of the BUILT release file (not a rebuild, not a test wrapper).
-#   bash scripts/release/smoke.sh <release-dir> <label> <ext>
-#     <release-dir>  directory with chervo-release.txt and chervo-<ver>-<label><ext> (from `assemble`)
+# Stage 19b/19g: smoke test of the CLI (not a rebuild, not a test wrapper). Two modes (Q5 b: the CLI is
+# released for Linux only):
+#   bash scripts/release/smoke.sh <release-dir> <label> <ext>                  release mode, linux-x86_64 only
+#   bash scripts/release/smoke.sh <release-dir> <label> <ext> <verifier-dir>   verifier mode, NOT Linux
+#     <release-dir>  directory with chervo-release.txt and the release files (from `assemble`)
 #     <label>        linux-x86_64 | macos-aarch64 | macos-x86_64 | windows-x86_64
-#     <ext>          "" or ".exe"
+#     <ext>          "" or ".exe" (extension of the CLI file)
+#     <verifier-dir> directory with chervo-verifier-<ver>-<label><ext>: the CLI built by CI for this OS,
+#                    never published and not in the manifest (R19g-11)
 # Environment:
 #   SKIP_KEYS  "true" if the owner keys are knowingly not embedded (trial run, no tag); else keys must be there
 #   REF_TYPE   github.ref_type ("tag" makes missing fixtures a failure); REF_NAME  github.ref_name
 # `chervo check-update` is deliberately not run (the release is a draft; no network from CI).
 # `chervo doctor` is read-only (never unlocks); its result depends on the runner, so only rc 0|1 and a known line are required.
+# The window files are run by smoke-gui.sh.
 set -euo pipefail
 
-if [[ $# -ne 3 ]]; then
-  echo "usage: smoke.sh <release-dir> <label> <ext>" >&2
+if [[ $# -ne 3 && $# -ne 4 ]]; then
+  echo "usage: smoke.sh <release-dir> <label> <ext> [<verifier-dir>]" >&2
   exit 2
 fi
 rel="$1"; label="$2"; ext="$3"
+verifier_mode=no
+vdir=""
+if [[ $# -eq 4 ]]; then verifier_mode=yes; vdir="$4"; fi
+if [[ "$verifier_mode" == no && "$label" != linux-x86_64 ]]; then
+  echo "CLI is released for Linux only (Q5 b); pass the verifier dir" >&2
+  exit 2
+fi
+if [[ "$verifier_mode" == yes && "$label" == linux-x86_64 ]]; then
+  echo "verifier mode is for Windows and macOS only; Linux checks the released CLI" >&2
+  exit 2
+fi
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck source=lib.sh
 . "$root/scripts/release/lib.sh"
@@ -38,24 +54,43 @@ run() { # run command, capture combined output into OUT and exit code into RC
 
 [[ -f "$manifest" ]] || { echo "no manifest: $manifest" >&2; exit 1; }
 ver="$(awk '$1 == "version" { print $2; exit }' "$manifest" | tr -d '\r')"
-name="chervo-$ver-$label$ext"
-bin="$rel/$name"
-[[ -f "$bin" ]] || { echo "no release file: $bin" >&2; exit 1; }
+gext="$(gui_ext "$label")" || { echo "unknown label: $label" >&2; exit 2; }
+gui="$rel/chervotochina-$ver-$label$gext"
+if [[ "$verifier_mode" == no ]]; then
+  name="chervo-$ver-$label$ext"
+  bin="$rel/$name"
+else
+  name="chervo-verifier-$ver-$label$ext"
+  bin="$vdir/$name"
+fi
+[[ -f "$bin" && ! -L "$bin" ]] || { echo "no file to run: $bin" >&2; exit 1; }
 chmod +x "$bin"
 
-summary "### smoke: $label (file \`$name\`)"
+summary "### smoke: $label (file \`$name\`, verifier mode: $verifier_mode)"
 
-# 1. SHA-256 of the file we are about to run equals the manifest line.
-want="$(awk -v n="$name" -v t="$label" '$1 == "artifact" && $2 == t && $5 == n { print $3 }' "$manifest" | tr -d '\r')"
-have="$(sha256_of "$bin")"
-summary "- manifest sha256: \`${want:-<none>}\`" "- file sha256:     \`$have\`"
-if [[ -n "$want" && "$want" == "$have" ]]; then
-  good "SHA-256 of the file equals the manifest line"
+if [[ "$verifier_mode" == no ]]; then
+  # 1. SHA-256 of the file we are about to run equals the manifest line.
+  want="$(awk -v n="$name" -v t="$label" '$1 == "artifact" && $2 == t && $5 == n { print $3 }' "$manifest" | tr -d '\r')"
+  have="$(sha256_of "$bin")"
+  summary "- manifest sha256: \`${want:-<none>}\`" "- file sha256:     \`$have\`"
+  if [[ -n "$want" && "$want" == "$have" ]]; then
+    good "SHA-256 of the file equals the manifest line"
+  else
+    # Review 19b, L4: a file that does not match the manifest is never executed.
+    bad "SHA-256 differs from the manifest line (or the line is missing); the file is NOT run"
+    summary ""
+    exit 1
+  fi
 else
-  # Review 19b, L4: a file that does not match the manifest is never executed.
-  bad "SHA-256 differs from the manifest line (or the line is missing); the file is NOT run"
-  summary ""
-  exit 1
+  # 1. The verifier is not part of the release: no manifest line may carry its name (else it is NOT run).
+  if awk -v n="$name" '$1 == "artifact" && $5 == n { found = 1 } END { exit !found }' "$manifest"; then
+    bad "the manifest lists $name; the verifier must never be published; the file is NOT run"
+    summary ""
+    exit 1
+  fi
+  good "the manifest has no line for $name"
+  summary "- verifier sha256: \`$(sha256_of "$bin")\` (verifier, not published, not in the manifest)"
+  [[ -f "$gui" && ! -L "$gui" ]] || { echo "no window file of this target to verify: $gui" >&2; exit 1; }
 fi
 
 # 2. --version prints the version of the tag (trial run: version of the workspace = manifest version).
@@ -81,12 +116,14 @@ else
 fi
 
 # 4. verify-release with a foreign signature must fail with a known code.
+#    Release mode: the checked file is the CLI itself; verifier mode: the window file of this target.
+if [[ "$verifier_mode" == yes ]]; then target_file="$gui"; else target_file="$bin"; fi
 if [[ "$skip_keys" == "true" ]]; then
   # The key set is empty, the error comes before any file is read.
-  run "$bin" verify-release "$manifest" "$manifest.nonexistent.minisig" "$bin"
+  run "$bin" verify-release "$manifest" "$manifest.nonexistent.minisig" "$target_file"
   want_code="NoTrustedKeys"
 elif [[ -f "$fixture_sig" ]]; then
-  run "$bin" verify-release "$manifest" "$fixture_sig" "$bin"
+  run "$bin" verify-release "$manifest" "$fixture_sig" "$target_file"
   want_code="UnknownKey"
 else
   want_code=""
@@ -103,11 +140,15 @@ else
 fi
 
 # 5. doctor: read-only; a runner may have the key store available, locked or absent.
-run "$bin" doctor
-summary "- \`doctor\` rc=$RC: \`$OUT\`"
-if [[ ( $RC -eq 0 && "$OUT" == "хранилище ключей доступно" ) || ( $RC -eq 1 && ( "$OUT" == "хранилище заблокировано"* || "$OUT" == "хранилище ключей недоступно"* ) ) ]]; then
-  good "doctor: rc $RC and a known result line"
-else bad "doctor: expected rc 0 (available) or rc 1 (locked/unavailable) with a known line"; fi
+if [[ "$verifier_mode" == no ]]; then
+  run "$bin" doctor
+  summary "- \`doctor\` rc=$RC: \`$OUT\`"
+  if [[ ( $RC -eq 0 && "$OUT" == "хранилище ключей доступно" ) || ( $RC -eq 1 && ( "$OUT" == "хранилище заблокировано"* || "$OUT" == "хранилище ключей недоступно"* ) ) ]]; then
+    good "doctor: rc $RC and a known result line"
+  else bad "doctor: expected rc 0 (available) or rc 1 (locked/unavailable) with a known line"; fi
+else
+  summary "- doctor: not applicable, no CLI in the release for this OS (Q5 b)"
+fi
 
 summary ""
 exit "$fail"

@@ -23,14 +23,16 @@ trap 'rm -f "$notes"' EXIT
 {
   echo "Черновик выпуска $tag. Собран в GitHub Actions из тега, файлы НЕ ПОДПИСАНЫ."
   echo
-  echo "Состав: chervo (CLI) для linux-x86_64, macos-aarch64, macos-x86_64, windows-x86_64, SBOM (CycloneDX)"
-  echo "и манифест chervo-release.txt (версия, коммит, SHA-256 и размеры файлов)."
+  echo "Состав: окно chervotochina для linux-x86_64, macos-aarch64 (.zip), macos-x86_64 (.zip), windows-x86_64 (.exe);"
+  echo "консольная chervo только для linux-x86_64; SBOM (CycloneDX) для chervo и для chervotochina;"
+  echo "манифест chervo-release.txt (версия, коммит, SHA-256 и размеры файлов)."
   echo
   echo "- Подпись добавляет владелец вручную (scripts/release/sign.sh): chervo-release.txt.minisig и <файл>.minisig."
   echo "- Не публиковать до подписи, до прогона release-smoke.yml и до ручного чек-листа sign.sh."
   echo "- Linux: собрано на образе ubuntu-22.04; минимальная glibc равна версии на этом образе (см. сводку задания build)."
-  echo "- macOS: на macOS не проверено; программа не подписана Apple, запуск по docs/INSTALL.md."
-  echo "- SBOM один для chervo-cli, без выбора платформы."
+  echo "- macOS: не проверено на машине; приложение подписано ad-hoc, без Apple, запуск по docs/INSTALL.md."
+  echo "- SBOM без выбора платформы: один для chervo (CLI), один для chervotochina (окно)."
+  echo "- Тексты лицензий сторонних библиотек: chervo-<версия>-third-party-licenses.txt."
   echo "- Побитовая воспроизводимость не заявляется (результат сравнения двух сборок Linux в сводке задания repro)."
 } > "$notes"
 

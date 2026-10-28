@@ -48,6 +48,10 @@ pub(crate) struct Settings {
     pub(crate) routers: Vec<AllowedRouter>,
     pub(crate) clock_offset_ms: i64,
     pub(crate) clock_offset_at: u64,
+    /// Согласие на проверку новых версий (`update_check=0|1`); `None`: не спрашивали.
+    pub(crate) update_consent: Option<bool>,
+    /// Когда выдано последнее разрешение на проверку, секунды UTC; 0: не выдавалось.
+    pub(crate) update_checked_at: u64,
     /// Пусто: серверы по умолчанию из `chervo_timesync::SyncConfig`.
     pub(crate) ntp_servers: Vec<String>,
 }
@@ -72,6 +76,8 @@ impl Settings {
             routers: Vec::new(),
             clock_offset_ms: 0,
             clock_offset_at: 0,
+            update_consent: None,
+            update_checked_at: 0,
             ntp_servers: Vec::new(),
         }
     }
@@ -199,6 +205,8 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Settings, NodeError> {
     let mut forward = None;
     let mut offset = None;
     let mut offset_at = None;
+    let mut update_check = None;
+    let mut checked_at = None;
     let mut extra_roots: Vec<PathBuf> = Vec::new();
     let mut routers: Vec<AllowedRouter> = Vec::new();
     let mut ntp: Vec<String> = Vec::new();
@@ -238,6 +246,8 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Settings, NodeError> {
                 set_once(&mut offset, n)?;
             }
             "clock_offset_at" => set_once(&mut offset_at, parse_u64(value)?)?,
+            "update_check" => set_once(&mut update_check, parse_bool(value)?)?,
+            "update_checked_at" => set_once(&mut checked_at, parse_u64(value)?)?,
             "extra_root" => {
                 let p = parse_path(value)?;
                 // повтор той же папки не копится
@@ -282,6 +292,8 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Settings, NodeError> {
         routers,
         clock_offset_ms: offset.unwrap_or(0),
         clock_offset_at: offset_at.unwrap_or(0),
+        update_consent: update_check,
+        update_checked_at: checked_at.unwrap_or(0),
         ntp_servers: ntp,
     })
 }
@@ -330,6 +342,11 @@ pub(crate) fn serialize(s: &Settings) -> Result<String, NodeError> {
     for n in &s.ntp_servers {
         line("ntp_server", n);
     }
+    // строка согласия только после ответа пользователя; время последней проверки всегда
+    if let Some(v) = s.update_consent {
+        line("update_check", if v { "1" } else { "0" });
+    }
+    line("update_checked_at", &s.update_checked_at.to_string());
     // то, что записали, должно читаться обратно тем же разбором
     if parse(out.as_bytes()).as_ref() != Ok(s) {
         return bad();

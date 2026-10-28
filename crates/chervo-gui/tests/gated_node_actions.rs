@@ -18,7 +18,7 @@ struct Gate {
     node_call: &'static str,
 }
 
-const GATED: [Gate; 4] = [
+const GATED: [Gate; 5] = [
     Gate {
         command: "Command::ConnectNow",
         intent_arm: "I::ConnectNow(",
@@ -38,6 +38,14 @@ const GATED: [Gate; 4] = [
         command: "Command::SyncClock",
         intent_arm: "S::ClockSync",
         node_call: "sync_clock(",
+    },
+    // 19г-2: ответ на вопрос о проверке новых версий (карточка и переключатель: одна ветка).
+    // «Проверить сейчас» (`Command::CheckUpdateNow`, `U::CheckNow`) здесь не записана: вызов узла
+    // идёт из `update_tick` из двух мест (такт и кнопка), охраняет её `update_gates.rs`.
+    Gate {
+        command: "Command::SetUpdateConsent",
+        intent_arm: "U::SetConsent",
+        node_call: "set_update_consent(",
     },
 ];
 
@@ -117,16 +125,20 @@ fn files_containing(files: &[(String, String)], needle: &str) -> Vec<String> {
 fn gated_commands_are_built_only_in_their_handlers() {
     let files = common::src_files();
     // модели с обработчиками намерений
-    let handlers: Vec<&str> = ["src/main_model.rs", "src/settings_model.rs"]
-        .iter()
-        .map(|want| {
-            files
-                .iter()
-                .find(|(n, _)| n == want)
-                .map(|(_, t)| product_part(t))
-                .expect("model file")
-        })
-        .collect();
+    let handlers: Vec<&str> = [
+        "src/main_model.rs",
+        "src/settings_model.rs",
+        "src/update_model.rs",
+    ]
+    .iter()
+    .map(|want| {
+        files
+            .iter()
+            .find(|(n, _)| n == want)
+            .map(|(_, t)| product_part(t))
+            .expect("model file")
+    })
+    .collect();
     let bad = model_violations(&handlers.join("\n"));
     assert!(bad.is_empty(), "{bad:#?}");
     // и нигде больше в src/ эти команды не создаются
@@ -137,6 +149,7 @@ fn gated_commands_are_built_only_in_their_handlers() {
                     p.as_str(),
                     "src/main_model.rs"
                         | "src/settings_model.rs"
+                        | "src/update_model.rs"
                         | "src/worker_ops.rs"
                         | "src/model.rs"
                 ),
@@ -162,6 +175,7 @@ fn node_calls_for_gated_actions_are_in_their_worker_arms() {
         "enable_auto_accept(",
         "upnp_identify(",
         "sync_clock(",
+        "set_update_consent(",
         "user_confirmed_trust",
         "TrustConfirmation",
     ] {
@@ -218,6 +232,9 @@ const GOOD_MODEL: &str = "match i {
     S::ClockSync => {
         vec![Command::SyncClock]
     }
+    U::SetConsent(on) => {
+        vec![Command::SetUpdateConsent(on)]
+    }
 }
 ";
 
@@ -234,6 +251,9 @@ const GOOD_WORKER: &str = "match cmd {
         Command::SyncClock => {
             let r = node.sync_clock();
         }
+        Command::SetUpdateConsent(on) => Some(Outcome::UpdateConsentSet {
+            result: node.set_update_consent(on),
+        }),
 }
 ";
 

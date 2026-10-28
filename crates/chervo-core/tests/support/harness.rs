@@ -189,10 +189,21 @@ impl Drop for TestDir {
     }
 }
 
-/// Свободный UDP-порт (на момент вызова).
+/// Свободный UDP-порт (на момент вызова), не выданный раньше в этом процессе: тесты одного
+/// бинаря идут параллельно, и ОС может вернуть тот же номер, пока первый узел ещё не занял его.
 pub fn free_port() -> u16 {
-    let s = UdpSocket::bind("127.0.0.1:0").unwrap();
-    s.local_addr().unwrap().port()
+    static GIVEN: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
+    let mut given = GIVEN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    loop {
+        let s = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = s.local_addr().unwrap().port();
+        if !given.contains(&port) {
+            given.push(port);
+            return port;
+        }
+    }
 }
 
 pub fn hardened() -> HardenReport {

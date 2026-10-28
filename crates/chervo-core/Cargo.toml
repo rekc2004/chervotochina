@@ -19,6 +19,10 @@ chervo-receive.workspace = true
 chervo-transport-quinn.workspace = true
 chervo-upnp.workspace = true
 chervo-timesync.workspace = true
+# Этап 19г-1: офлайн-проверка выпусков и единственный вход в сеть для проверки новых версий
+# (`update.rs`). Без `features` (у `chervo-update-check` есть `fuzzing`). Новых пакетов нет.
+chervo-update.workspace = true
+chervo-update-check.workspace = true
 # `signal`: только для `Node::interrupt_signals` (Ctrl+C и SIGTERM для оболочек, этап 18в).
 tokio = { workspace = true, features = ["signal"] }
 # Нужен только для имени `Zeroizing` в обёртке хранилища ключей (`node/store.rs`); пакет уже в
@@ -32,6 +36,9 @@ zeroize.workspace = true
 rustix = { version = "=1.1.5", default-features = false, features = ["std", "process", "fs"] }
 
 [dev-dependencies]
+# Тестовые подписи для `update_tests.rs` (тестовый ключ из зерна); пакеты уже в `Cargo.lock`.
+ed25519-dalek.workspace = true
+blake2.workspace = true
 # Свои тесты используют точки входа за свойствами `fuzzing` и `test-store` (как в chervo-token): в продуктовой
 # сборке её нет.
 chervo-core = { path = ".", features = ["fuzzing", "test-store"] }

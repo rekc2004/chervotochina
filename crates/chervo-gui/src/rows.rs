@@ -8,6 +8,7 @@ use crate::redact::redacted_debug_struct;
 
 redacted_debug_struct!(PickedPath);
 
+use chervo_core::update::UpdateConsent;
 use chervo_core::{
     FileKind, FriendStatus, KeyStoreKind, PathKind, PauseReason, Side, SpaceView, TransferResult,
     TransferState,
@@ -92,6 +93,8 @@ pub struct SettingsRow {
     pub ntp_servers: Vec<String>,
     pub key_store: KeyStoreKind,
     pub restart_needed: bool,
+    /// Ответ на вопрос о проверке новых версий (карточка согласия, этап 19г-2).
+    pub update_consent: UpdateConsent,
 }
 
 /// Текст отзыва, который ещё не снят с учёта (удалённый или пересозданный друг).

@@ -4,6 +4,10 @@
 
 use std::path::PathBuf;
 
+use chervo_core::update::{
+    CheckError, EmbeddedKey, FileVerdict, Freshness, KeyId, KeyRole, ReleaseCheck, Target,
+    UpdateConsent, UpdateError, UpdateStatus, Version,
+};
 use chervo_core::{
     FailReason, FileKind, FriendStatus, InviteOutcome, KeyStoreKind, MapStatus, NatView, NodeError,
     NodeEvent, NodeWarning, PathKind, PauseReason, RootError, Side, SpaceView, TransferResult,
@@ -20,6 +24,7 @@ use crate::rows::{
     TransferRow,
 };
 use crate::settings_model::{ClockUi, SettingsIntent, UpnpUi};
+use crate::update_model::{KeyRow, UpdateIntent};
 
 fn friend(id: u32, name: &str, status: FriendStatus, online: bool) -> FriendRow {
     FriendRow {
@@ -170,6 +175,7 @@ fn open_model(page: Page) -> Model {
         ntp_servers: vec!["pool.ntp.org".to_owned(), "time.example".to_owned()],
         key_store: KeyStoreKind::CredentialManager,
         restart_needed: true,
+        update_consent: UpdateConsent::Enabled,
     });
     m.snapshot.nat = Some(NatView::BehindCgnat);
     m.snapshot.mapping = Some(MapStatus::Mapped);
@@ -197,6 +203,193 @@ fn open_model(page: Page) -> Model {
 
 fn go(m: &mut Model, i: MainIntent) {
     m.update(Intent::Main(i));
+}
+
+fn upd(m: &mut Model, i: UpdateIntent) {
+    m.update(Intent::Main(MainIntent::Update(i)));
+}
+
+fn updates_page(consent: UpdateConsent) -> Model {
+    let mut m = open_model(Page::Updates);
+    if let Some(s) = m.snapshot.settings.as_mut() {
+        s.update_consent = consent;
+    }
+    m.update.keys = vec![
+        KeyRow {
+            role: crate::texts::UPD_ROLE_PRIMARY,
+            id: "0123456789ABCDEF".to_owned(),
+        },
+        KeyRow {
+            role: crate::texts::UPD_ROLE_BACKUP,
+            id: "FEDCBA9876543210".to_owned(),
+        },
+    ];
+    m
+}
+
+/// Форма сверки с выбранными манифестом, подписью и файлами.
+fn verify_form(files: &[&str]) -> Model {
+    let mut m = updates_page(UpdateConsent::Enabled);
+    upd(
+        &mut m,
+        UpdateIntent::PickManifest(PathBuf::from("D:/Загрузки/chervo-release.txt")),
+    );
+    upd(
+        &mut m,
+        UpdateIntent::PickSignature(PathBuf::from("D:/Загрузки/chervo-release.txt.minisig")),
+    );
+    upd(
+        &mut m,
+        UpdateIntent::AddFiles(
+            files
+                .iter()
+                .map(|f| PathBuf::from(format!("D:/Загрузки/{f}")))
+                .collect(),
+        ),
+    );
+    m
+}
+
+fn verdict(name: &str, freshness: Freshness) -> Result<FileVerdict, UpdateError> {
+    Ok(FileVerdict {
+        name: name.to_owned(),
+        target: Target::WindowsX86_64,
+        freshness,
+    })
+}
+
+fn release(files: Vec<Result<FileVerdict, UpdateError>>) -> ReleaseCheck {
+    ReleaseCheck {
+        version: Version {
+            major: 0,
+            minor: 2,
+            patch: 0,
+        },
+        signer: EmbeddedKey {
+            role: KeyRole::Primary,
+            key_id: KeyId([1, 35, 69, 103, 137, 171, 205, 239]),
+        },
+        files,
+    }
+}
+
+fn verified(m: &mut Model, r: Result<ReleaseCheck, UpdateError>) {
+    upd(m, UpdateIntent::Verify);
+    m.on_outcome(Outcome::ReleaseVerified(r));
+}
+
+/// Экран 11: «Обновления» (этап 19г-2).
+fn update_states(v: &mut Vec<Model>) {
+    let newer = Version {
+        major: 9,
+        minor: 8,
+        patch: 7,
+    };
+    // карточка согласия поверх обычного окна
+    let mut m = open_model(Page::Friends);
+    if let Some(s) = m.snapshot.settings.as_mut() {
+        s.update_consent = UpdateConsent::NotAsked;
+    }
+    v.push(m);
+    // страница при каждом ответе
+    for c in [
+        UpdateConsent::NotAsked,
+        UpdateConsent::Enabled,
+        UpdateConsent::Disabled,
+    ] {
+        v.push(updates_page(c));
+    }
+    // идёт проверка
+    let mut m = updates_page(UpdateConsent::Enabled);
+    upd(&mut m, UpdateIntent::CheckNow);
+    v.push(m);
+    // карточка новой версии, затем с диалогом ссылки
+    let mut m = open_model(Page::Friends);
+    m.on_outcome(Outcome::UpdateChecked {
+        manual: false,
+        result: Ok(UpdateStatus::Newer(newer)),
+    });
+    v.push(m);
+    let mut m = open_model(Page::Updates);
+    m.on_outcome(Outcome::UpdateChecked {
+        manual: true,
+        result: Ok(UpdateStatus::Newer(newer)),
+    });
+    upd(&mut m, UpdateIntent::LinkOpen);
+    v.push(m);
+    // ручные итоги
+    let manual: [Result<UpdateStatus, CheckError>; 4] = [
+        Ok(UpdateStatus::UpToDate),
+        Err(CheckError::Network),
+        Err(CheckError::BadResponse),
+        Err(CheckError::NoTrustedKeys),
+    ];
+    for result in manual {
+        let mut m = updates_page(UpdateConsent::Enabled);
+        upd(&mut m, UpdateIntent::CheckNow);
+        m.on_outcome(Outcome::UpdateChecked {
+            manual: true,
+            result,
+        });
+        v.push(m);
+    }
+    let mut m = updates_page(UpdateConsent::Enabled);
+    upd(&mut m, UpdateIntent::CheckNow);
+    m.on_outcome(Outcome::UpdateSkipped);
+    v.push(m);
+    // форма сверки: заполненная и занятая
+    v.push(verify_form(&["chervotochina-0.2.0-windows-x86_64.exe"]));
+    let mut m = verify_form(&["chervotochina-0.2.0-windows-x86_64.exe"]);
+    upd(&mut m, UpdateIntent::Verify);
+    v.push(m);
+    // успехи: новее, та же версия, откат разрешён (предупреждение)
+    for fresh in [Freshness::Newer, Freshness::Same, Freshness::OlderAllowed] {
+        let mut m = verify_form(&["chervotochina-0.2.0-windows-x86_64.exe"]);
+        if fresh == Freshness::OlderAllowed {
+            upd(&mut m, UpdateIntent::AllowDowngrade(true));
+        }
+        let name = "chervotochina-0.2.0-windows-x86_64.exe";
+        verified(&mut m, Ok(release(vec![verdict(name, fresh)])));
+        v.push(m);
+    }
+    // список не прошёл проверку подписи, нет вшитых ключей
+    for e in [UpdateError::BadSignature, UpdateError::NoTrustedKeys] {
+        let mut m = verify_form(&["chervotochina-0.2.0-windows-x86_64.exe"]);
+        verified(&mut m, Err(e));
+        v.push(m);
+    }
+    // по строке на каждую ошибку файла
+    let mut m = verify_form(&["a.bin", "b.bin", "c.bin", "d.bin", "e.bin", "f.bin"]);
+    let running = Version {
+        major: 2,
+        minor: 0,
+        patch: 0,
+    };
+    let errors = vec![
+        Err(UpdateError::NotInManifest),
+        Err(UpdateError::WrongTarget {
+            expected: Some(Target::WindowsX86_64),
+            found: Target::MacosAarch64,
+        }),
+        Err(UpdateError::SizeMismatch),
+        Err(UpdateError::Downgrade {
+            running,
+            offered: newer,
+        }),
+        Err(UpdateError::TooLarge),
+        Err(UpdateError::Io(std::io::ErrorKind::NotFound)),
+    ];
+    verified(&mut m, Ok(release(errors)));
+    v.push(m);
+    // ключи не вшиты
+    let mut m = updates_page(UpdateConsent::Enabled);
+    m.update.keys.clear();
+    v.push(m);
+    // имена с управляющими символами и символами направления письма
+    let mut m = verify_form(&["evil\u{202E}gpj.exe\u{7}\u{2066}"]);
+    let hostile = "x\u{202E}y\u{2066}z\u{7}.exe";
+    verified(&mut m, Ok(release(vec![verdict(hostile, Freshness::Same)])));
+    v.push(m);
 }
 
 /// Все экраны и их состояния.
@@ -415,6 +608,9 @@ pub fn all() -> Vec<Model> {
     }
     v.push(m);
 
+    // экран 11: обновления
+    update_states(&mut v);
+
     // экран 9: уведомления
     let mut m = open_model(Page::Friends);
     for e in [
@@ -445,4 +641,14 @@ pub fn all() -> Vec<Model> {
     m.on_outcome(Outcome::ClockSynced(Ok(ClockResult::Applied(0))));
     v.push(m);
     v
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn update_states_are_at_least_20() {
+        let mut v = Vec::new();
+        super::update_states(&mut v);
+        assert!(v.len() >= 20, "{}", v.len());
+    }
 }

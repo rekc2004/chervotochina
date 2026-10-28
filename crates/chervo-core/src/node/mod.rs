@@ -24,6 +24,7 @@ mod testing;
 mod tests;
 pub mod texts;
 mod transfers;
+mod updates;
 mod views;
 
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};

@@ -34,6 +34,11 @@ pub fn pick_folder() -> Option<PathBuf> {
     rfd::FileDialog::new().pick_folder()
 }
 
+/// Один файл (список файлов выпуска и его подпись на странице «Обновления»).
+pub fn pick_file() -> Option<PathBuf> {
+    rfd::FileDialog::new().pick_file()
+}
+
 pub fn pick_files() -> Vec<PickedPath> {
     rfd::FileDialog::new()
         .pick_files()

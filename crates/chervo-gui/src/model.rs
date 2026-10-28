@@ -17,6 +17,7 @@ use crate::redact::{redacted_debug_enum, redacted_debug_struct};
 use crate::rows::{DiagRow, FriendRow, Id, OfferRow, RetiredRow, SettingsRow, TransferRow};
 use crate::settings_model::SettingsUi;
 use crate::texts;
+use crate::update_model::UpdateUi;
 
 redacted_debug_enum!(Command, Intent);
 redacted_debug_struct!(FirstRun, Problem);
@@ -110,6 +111,18 @@ pub enum Command {
     ConfirmClock,
     ResetClock,
     ForgetRetired(Id),
+    // обновления (этап 19г-2)
+    /// Только из ветки намерения `U::SetConsent` (охрана `gated_node_actions`).
+    SetUpdateConsent(bool),
+    /// Только из ветки намерения `U::CheckNow` (охрана `update_gates`).
+    CheckUpdateNow,
+    /// Сверка скачанных файлов: узел не нужен, команда пересылается потоку обновлений.
+    VerifyRelease {
+        manifest: PathBuf,
+        minisig: PathBuf,
+        files: Vec<PathBuf>,
+        allow_downgrade: bool,
+    },
 }
 
 /// Снимок состояния узла для окна. Считается в фоновом потоке.
@@ -196,6 +209,23 @@ pub enum Outcome {
     AutoAccepted,
     /// Прочие действия: при ошибке показывается её текст.
     Done(Result<(), NodeError>),
+    // обновления (этап 19г-2)
+    /// Итог записи ответа на вопрос о проверке новых версий.
+    UpdateConsentSet {
+        enabled: bool,
+        result: Result<(), NodeError>,
+    },
+    /// Запрос ушёл в поток обновлений.
+    UpdateCheckStarted {
+        manual: bool,
+    },
+    /// Кнопка «Проверить сейчас», но проверка не началась (выключена, рано, нет времени).
+    UpdateSkipped,
+    UpdateChecked {
+        manual: bool,
+        result: Result<chervo_core::update::UpdateStatus, chervo_core::update::CheckError>,
+    },
+    ReleaseVerified(Result<chervo_core::update::ReleaseCheck, chervo_core::update::UpdateError>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -207,6 +237,7 @@ pub enum Page {
     Transfers,
     Diagnosis,
     Settings,
+    Updates,
 }
 
 /// Что сделал пользователь (кнопки и поля).
@@ -301,6 +332,8 @@ pub struct Model {
     /// Предложить «Сверить часы» рядом с уведомлениями (`ClockSkewSuspected`).
     pub clock_hint: bool,
     pub settings_ui: SettingsUi,
+    /// Состояние страницы «Обновления» и карточек (этап 19г-2).
+    pub update: UpdateUi,
     pub close: Close,
     pub dialog: Dialog,
     pub add: AddFriend,
@@ -322,6 +355,7 @@ impl Model {
             notices: Vec::new(),
             clock_hint: false,
             settings_ui: SettingsUi::default(),
+            update: UpdateUi::default(),
             close: Close::None,
             dialog: Dialog::None,
             add: AddFriend::default(),
@@ -349,6 +383,7 @@ impl Model {
             notices: Vec::new(),
             clock_hint: false,
             settings_ui: SettingsUi::default(),
+            update: UpdateUi::default(),
             close: Close::None,
             dialog: Dialog::None,
             add: AddFriend::default(),
@@ -667,6 +702,14 @@ impl Model {
                 self.node_open = false;
                 self.open_pending = false;
                 self.close = Close::Done;
+                Vec::new()
+            }
+            o @ (Outcome::UpdateConsentSet { .. }
+            | Outcome::UpdateCheckStarted { .. }
+            | Outcome::UpdateSkipped
+            | Outcome::UpdateChecked { .. }
+            | Outcome::ReleaseVerified(_)) => {
+                self.outcome_updates(o);
                 Vec::new()
             }
             other => {

@@ -12,6 +12,7 @@
 
 mod harden;
 mod node;
+pub mod update;
 
 pub use chervo_addr;
 pub use chervo_connect;

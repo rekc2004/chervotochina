@@ -12,6 +12,7 @@ mod send;
 mod settings;
 mod start;
 mod transfers;
+mod update;
 
 use eframe::egui;
 

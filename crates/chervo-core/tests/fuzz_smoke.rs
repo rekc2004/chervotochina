@@ -66,7 +66,7 @@ const ROOT: &str = "C:\\data\\recv";
 #[cfg(not(windows))]
 const ROOT: &str = "/data/recv";
 
-const KEYS: [&str; 11] = [
+const KEYS: [&str; 13] = [
     "port",
     "receive_root",
     "shared_root_confirmed",
@@ -77,6 +77,8 @@ const KEYS: [&str; 11] = [
     "upnp_router",
     "clock_offset_ms",
     "clock_offset_at",
+    "update_check",
+    "update_checked_at",
     "ntp_server",
 ];
 

@@ -15,6 +15,7 @@ use crate::redact::redacted_debug_enum;
 use crate::rows::{Id, PickedPath};
 use crate::settings_model::SettingsIntent;
 use crate::texts;
+use crate::update_model::UpdateIntent;
 
 redacted_debug_enum!(MainIntent);
 
@@ -95,6 +96,7 @@ pub enum MainIntent {
     TransferCancel(Id),
     TransferRetry(Id),
     Settings(SettingsIntent),
+    Update(UpdateIntent),
 }
 
 /// Один диалог за раз; пока он открыт, он занимает место списка друзей.
@@ -432,6 +434,7 @@ impl Model {
                 Vec::new()
             }
             I::Settings(s) => self.update_settings(s),
+            I::Update(u) => self.update_updates(u),
             other => self.update_add_send(other),
         }
     }
