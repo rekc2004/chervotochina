@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-use chervo_core::update::{self, UpdateCheckPermit, Version};
+use chervo_core::update::{self, CheckError, UpdateCheckPermit, UpdateError, Version};
 
 use crate::model::Outcome;
 
@@ -50,6 +50,12 @@ impl UpdateWorker {
     }
 }
 
+/// Паника в задании не должна оставить окно ждать вечно («Проверяем…» залипло бы): итог тогда
+/// заменяется фиксированным сбоем, а поток продолжает работать.
+fn guarded(fallback: Outcome, job: impl FnOnce() -> Outcome) -> Outcome {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).unwrap_or(fallback)
+}
+
 fn run(rx: Receiver<UpdateJob>, out: Sender<Outcome>, wake: Arc<dyn Fn() + Send + Sync>) {
     // задания идут по одному, по порядку
     while let Ok(job) = rx.recv() {
@@ -59,8 +65,14 @@ fn run(rx: Receiver<UpdateJob>, out: Sender<Outcome>, wake: Arc<dyn Fn() + Send 
                 running,
                 manual,
             } => {
-                let result = update::check_latest(permit, running);
-                Outcome::UpdateChecked { manual, result }
+                let fallback = Outcome::UpdateChecked {
+                    manual,
+                    result: Err(CheckError::BadResponse),
+                };
+                guarded(fallback, || {
+                    let result = update::check_latest(permit, running);
+                    Outcome::UpdateChecked { manual, result }
+                })
             }
             UpdateJob::Verify {
                 manifest,
@@ -68,12 +80,42 @@ fn run(rx: Receiver<UpdateJob>, out: Sender<Outcome>, wake: Arc<dyn Fn() + Send 
                 files,
                 allow_downgrade,
             } => {
-                let result =
-                    update::verify_release_files(&manifest, &minisig, &files, allow_downgrade);
-                Outcome::ReleaseVerified(result)
+                let fallback =
+                    Outcome::ReleaseVerified(Err(UpdateError::Io(std::io::ErrorKind::Other)));
+                guarded(fallback, || {
+                    let result =
+                        update::verify_release_files(&manifest, &minisig, &files, allow_downgrade);
+                    Outcome::ReleaseVerified(result)
+                })
             }
         };
         let _ = out.send(outcome);
         wake();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn panicking_job_yields_the_fixed_failure_outcome() {
+        let fallback = Outcome::UpdateChecked {
+            manual: true,
+            result: Err(CheckError::BadResponse),
+        };
+        let out = guarded(fallback, || panic!("test panic"));
+        assert!(matches!(
+            out,
+            Outcome::UpdateChecked {
+                manual: true,
+                result: Err(CheckError::BadResponse)
+            }
+        ));
+        // обычный итог проходит без замены
+        let ok = guarded(Outcome::UpdateSkipped, || Outcome::UpdateCheckStarted {
+            manual: false,
+        });
+        assert!(matches!(ok, Outcome::UpdateCheckStarted { manual: false }));
     }
 }

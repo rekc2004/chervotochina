@@ -538,6 +538,43 @@ mod tests {
     }
 
     #[test]
+    fn worker_failure_resets_checking_and_busy() {
+        // поток обновлений упал: итог-сбой снимает «Проверяем…» и показывает строку из таблицы
+        let mut m = model(UpdateConsent::Enabled);
+        ask(&mut m, UpdateIntent::CheckNow);
+        assert!(m.update.checking);
+        m.on_outcome(Outcome::UpdateChecked {
+            manual: true,
+            result: Err(CheckError::BadResponse),
+        });
+        assert!(!m.update.checking);
+        assert_eq!(m.update.manual_status, Some(ManualStatus::BadResponse));
+        // кнопка снова работает
+        assert_eq!(ask(&mut m, UpdateIntent::CheckNow).len(), 1);
+        // фоновый сбой молчит, но тоже снимает флаг
+        let mut m = model(UpdateConsent::Enabled);
+        m.on_outcome(Outcome::UpdateCheckStarted { manual: false });
+        m.on_outcome(Outcome::UpdateChecked {
+            manual: false,
+            result: Err(CheckError::BadResponse),
+        });
+        assert!(!m.update.checking && m.update.manual_status.is_none());
+        // сверка: сбой снимает «занято»
+        let mut m = model(UpdateConsent::Enabled);
+        pick_all(&mut m, 1);
+        ask(&mut m, UpdateIntent::Verify);
+        assert!(m.update.busy);
+        m.on_outcome(Outcome::ReleaseVerified(Err(UpdateError::Io(
+            std::io::ErrorKind::Other,
+        ))));
+        assert!(!m.update.busy);
+        assert!(matches!(
+            m.update.result,
+            Some(VerifyResult::Rejected(t)) if t == texts::UPD_ERR_IO
+        ));
+    }
+
+    #[test]
     fn manual_results_fixed_texts() {
         let cases = [
             (Ok(UpdateStatus::UpToDate), ManualStatus::UpToDate),

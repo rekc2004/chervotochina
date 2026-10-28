@@ -12,8 +12,16 @@ fn is_hostile(c: char) -> bool {
     c.is_control()
         || matches!(
             c,
-            '\u{061C}'
+            '\u{00AD}'
+                | '\u{034F}'
+                | '\u{061C}'
+                | '\u{115F}'
+                | '\u{1160}'
                 | '\u{180E}'
+                | '\u{3164}'
+                | '\u{FFA0}'
+                | '\u{FE00}'..='\u{FE0F}'
+                | '\u{E0000}'..='\u{E007F}'
                 | '\u{200B}'..='\u{200F}'
                 | '\u{2028}'
                 | '\u{2029}'
@@ -48,7 +56,7 @@ mod tests {
     #[test]
     fn safe_label_table() {
         let f = '\u{FFFD}';
-        let cases: [(&str, String); 16] = [
+        let cases: [(&str, String); 24] = [
             ("plain.txt", "plain.txt".to_owned()),
             ("файл-отчёт.pdf", "файл-отчёт.pdf".to_owned()),
             ("a\u{7}b", format!("a{f}b")),
@@ -69,6 +77,19 @@ mod tests {
                 "a\u{2010}\u{2057}\u{2070}b".to_owned(),
             ),
             ("", NO_NAME.to_owned()),
+            // невидимые символы (круг 1 ревью)
+            ("a\u{AD}b\u{34F}c", format!("a{f}b{f}c")),
+            ("a\u{115F}\u{1160}b", format!("a{f}{f}b")),
+            ("a\u{3164}\u{FFA0}b", format!("a{f}{f}b")),
+            ("a\u{FE00}\u{FE0F}b", format!("a{f}{f}b")),
+            ("a\u{E0000}\u{E0041}\u{E007F}b", format!("a{f}{f}{f}b")),
+            ("a\u{200B}\u{200C}\u{200D}b", format!("a{f}{f}{f}b")),
+            ("a\u{2060}\u{2064}\u{FEFF}b", format!("a{f}{f}{f}b")),
+            // соседи диапазонов не трогаются
+            (
+                "a\u{FDFF}\u{FE10}\u{E0080}b",
+                "a\u{FDFF}\u{FE10}\u{E0080}b".to_owned(),
+            ),
         ];
         for (input, want) in cases {
             assert_eq!(safe_label(input, 64), want, "{input:?}");

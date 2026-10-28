@@ -126,20 +126,30 @@ fn violations(files: &Files) -> Vec<String> {
 fn check_now_violations(files: &Files) -> Vec<String> {
     let mut bad = Vec::new();
     let at = places(files, "Command::CheckUpdateNow");
-    let creators: Vec<_> = at
+    // код модели без тестов (тесты сравнивают команду): создание ровно одно и в своей ветке
+    let model: Files = files
         .iter()
         .filter(|(n, _)| n == "src/update_model.rs")
+        .map(|(n, t)| {
+            let product = t.split("\n#[cfg(test)]").next().unwrap_or(t);
+            (n.clone(), product.to_owned())
+        })
         .collect();
-    // тесты модели тоже сравнивают команду; создаёт её первое вхождение до тестов
-    let Some((_, line)) = creators.first() else {
-        return vec!["Command::CheckUpdateNow не создаётся в update_model.rs".to_owned()];
-    };
-    let lines = code_of(files, "src/update_model.rs");
-    match common::enclosing_arm(&lines.iter().map(String::as_str).collect::<Vec<_>>(), *line) {
-        Some(arm) if arm.contains("U::CheckNow") => {}
-        other => bad.push(format!(
-            "Command::CheckUpdateNow не в U::CheckNow, а в {other:?}"
-        )),
+    let made = places(&model, "Command::CheckUpdateNow");
+    if made.len() == 1 {
+        let lines = code_of(&model, "src/update_model.rs");
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        match common::enclosing_arm(&refs, made[0].1) {
+            Some(arm) if arm.contains("U::CheckNow") => {}
+            other => bad.push(format!(
+                "Command::CheckUpdateNow не в U::CheckNow, а в {other:?}"
+            )),
+        }
+    } else {
+        bad.push(format!(
+            "Command::CheckUpdateNow в update_model.rs: мест создания {}, нужно ровно одно",
+            made.len()
+        ));
     }
     for (name, _) in &at {
         if !matches!(
@@ -308,6 +318,33 @@ fn control_update_guard_can_fail() {
         })
         .collect();
     assert!(!check_now_violations(&other_arm).is_empty());
+    // второе место создания в модели (до тестов)
+    let twice = with(
+        &good(),
+        "src/update_model.rs",
+        "fn again() {\n    let c = Command::CheckUpdateNow;\n}",
+    );
+    assert!(!check_now_violations(&twice).is_empty());
+    // создание вне ветки U::CheckNow
+    let outside = good()
+        .into_iter()
+        .map(|(n, t)| {
+            if n == "src/update_model.rs" {
+                let text = "match intent {\n    U::Verify => {\n        Vec::new()\n    }\n}\nfn f() {\n    let c = Command::CheckUpdateNow;\n}\n";
+                (n, text.to_owned())
+            } else {
+                (n, t)
+            }
+        })
+        .collect();
+    assert!(!check_now_violations(&outside).is_empty());
+    // вхождение в тестах модели созданием не считается
+    let in_tests = with(
+        &good(),
+        "src/update_model.rs",
+        "#[cfg(test)]\nmod tests {\n    fn t() {\n        let c = Command::CheckUpdateNow;\n    }\n}",
+    );
+    assert!(check_now_violations(&in_tests).is_empty());
     let screen = with(
         &good(),
         "src/screens/update.rs",
