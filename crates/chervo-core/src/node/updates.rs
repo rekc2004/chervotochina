@@ -4,6 +4,7 @@
 use super::Node;
 use super::core::lock;
 use super::error::NodeError;
+use super::profile;
 use super::settings;
 use crate::update::{Decision, UpdateCheckPermit, UpdateConsent, decide};
 
@@ -17,11 +18,20 @@ impl Node {
         })
     }
 
-    /// Разрешение на один сетевой запрос по правилам Р19г-6. `Ok(None)`: нельзя сейчас (согласия
-    /// нет, рано, часы ушли назад). Время проверки записывается ДО запроса, при выдаче разрешения,
-    /// поэтому сбой запроса не вызывает повтора; ошибка записи это `Err` и разрешения нет.
-    /// При отказе файл настроек не трогается.
+    /// Разрешение на один сетевой запрос по правилам Р19г-6. Время берёт само ядро (часы
+    /// системы), оболочка его не передаёт. `Ok(None)`: нельзя сейчас (согласия нет, рано, часы
+    /// ушли назад или не читаются). Время проверки записывается ДО запроса, при выдаче
+    /// разрешения, поэтому сбой запроса не вызывает повтора; ошибка записи это `Err` и
+    /// разрешения нет. При отказе файл настроек не трогается.
     pub fn update_check_permit(
+        &self,
+        manual: bool,
+    ) -> Result<Option<UpdateCheckPermit>, NodeError> {
+        self.update_check_permit_at(profile::now_unix(), manual)
+    }
+
+    /// То же с заданным временем (секунды UTC); снаружи ядра только через `testing.rs`.
+    pub(crate) fn update_check_permit_at(
         &self,
         now_unix_secs: u64,
         manual: bool,

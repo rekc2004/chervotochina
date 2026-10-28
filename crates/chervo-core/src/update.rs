@@ -67,14 +67,41 @@ pub struct ReleaseCheck {
     pub files: Vec<Result<FileVerdict, UpdateError>>,
 }
 
-/// Читает файл не больше `max` байт; больше значит `TooLarge`. Только обычный файл (проверка до
-/// открытия: открытие FIFO на Unix блокируется до появления писателя).
+/// Открывает обычный файл. Путь проверяется до открытия (открытие FIFO на Unix блокируется до
+/// появления писателя), а дескриптор после открытия: между проверкой и открытием путь могли
+/// подменить. Unix: открытие с `O_NONBLOCK` (подставленный FIFO не повесит открытие), после
+/// проверки открытого дескриптора флаг снимается. Как в `chervo_update::check_artifact_path`.
+// тип `bits()` зависит от ОС (u32 или i32): приведение нужно не везде
+#[allow(clippy::unnecessary_cast, clippy::cast_possible_wrap)]
+fn open_regular(path: &Path) -> std::io::Result<std::fs::File> {
+    let not_regular = || std::io::Error::from(std::io::ErrorKind::InvalidInput);
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(not_regular());
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(
+        &mut opts,
+        rustix::fs::OFlags::NONBLOCK.bits() as i32,
+    );
+    let file = opts.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(not_regular());
+    }
+    #[cfg(unix)]
+    {
+        let flags = rustix::fs::fcntl_getfl(&file).map_err(std::io::Error::from)?;
+        rustix::fs::fcntl_setfl(&file, flags - rustix::fs::OFlags::NONBLOCK)
+            .map_err(std::io::Error::from)?;
+    }
+    Ok(file)
+}
+
+/// Читает файл не больше `max` байт; больше значит `TooLarge`. Только обычный файл.
 fn read_capped(path: &Path, max: usize) -> Result<Vec<u8>, UpdateError> {
     let io = |e: std::io::Error| UpdateError::Io(e.kind());
-    if !std::fs::metadata(path).map_err(io)?.is_file() {
-        return Err(UpdateError::Io(std::io::ErrorKind::InvalidInput));
-    }
-    let file = std::fs::File::open(path).map_err(io)?;
+    let file = open_regular(path).map_err(io)?;
     let mut buf = Vec::new();
     file.take(max as u64 + 1)
         .read_to_end(&mut buf)
@@ -212,6 +239,11 @@ pub(crate) enum Decision {
 /// нажата кнопка. Без ввода-вывода.
 pub(crate) fn decide(consent: UpdateConsent, last: u64, now: u64, manual: bool) -> Decision {
     if consent != UpdateConsent::Enabled {
+        return Decision::Deny;
+    }
+    // время 0 (часы до 1970 или ошибка чтения часов): пределов не проверить, запроса и записи нет;
+    // иначе `last == 0` («не проверяли») и `now == 0` обходили бы и сутки, и минуту
+    if now == 0 {
         return Decision::Deny;
     }
     if manual {

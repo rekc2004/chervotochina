@@ -35,6 +35,11 @@ fn mentions_word(s: &str, word: &str) -> bool {
 fn reexport_violations(src: &str) -> Vec<String> {
     let mut out = Vec::new();
     for st in pub_statements(src) {
+        // `pub use` чего угодно под именем `check_latest` (в том числе через переименование)
+        if mentions_word(&st, "check_latest") {
+            out.push(st.clone());
+            continue;
+        }
         let Some(at) = st.find("chervo_update") else {
             continue;
         };
@@ -83,6 +88,74 @@ fn manifest_violations(manifest: &str) -> Vec<String> {
     out
 }
 
+/// Код без комментариев, пробелы схлопнуты.
+fn code_text(src: &str) -> String {
+    src.replace("\r\n", "\n")
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+const RAW_CALL: &str = "chervo_update_check::check_latest(";
+const PERMIT_FN_HEAD: &str = "pub fn check_latest( permit: UpdateCheckPermit,";
+
+/// Правило «сеть только в `update.rs`». Другие файлы `src/` вообще не называют
+/// `chervo_update_check` (это закрывает и переименование `use chervo_update_check as u;`).
+fn other_file_violations(src: &str) -> Vec<String> {
+    let code = code_text(src);
+    if mentions_word(&code, "chervo_update_check") {
+        vec!["упоминание chervo_update_check вне update.rs".to_owned()]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Правило для самого `update.rs`: сырой вызов ровно один и внутри `pub fn check_latest(permit: ..`;
+/// слово `check_latest` встречается только в её заголовке и в этом вызове (нет импорта, второй
+/// публичной обёртки); нет глобов и переименований в `use`.
+fn update_rs_violations(src: &str) -> Vec<String> {
+    let code = code_text(src);
+    let mut out = Vec::new();
+    let raw = code.matches(RAW_CALL).count();
+    if raw != 1 {
+        out.push(format!("сырых вызовов check_latest: {raw}, нужен один"));
+    }
+    let words = code
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .filter(|w| *w == "check_latest")
+        .count();
+    if words != 2 {
+        out.push(format!(
+            "слово check_latest встречается {words} раз, нужно 2"
+        ));
+    }
+    match code.find(PERMIT_FN_HEAD) {
+        None => out.push("нет pub fn check_latest(permit: UpdateCheckPermit, ..)".to_owned()),
+        Some(head) => {
+            let body = &code[head + PERMIT_FN_HEAD.len()..];
+            let end = body.find(" fn ").unwrap_or(body.len());
+            if !body[..end].contains(RAW_CALL) {
+                out.push("сырой вызов не внутри функции с разрешением".to_owned());
+            }
+        }
+    }
+    for st in code.split(';') {
+        let st = st.trim();
+        let is_use = st.contains("use ");
+        if is_use && st.contains("pub use ") && st.contains('*') {
+            out.push(format!("глоб в pub use: {st}"));
+        }
+        if is_use && mentions_word(st, "chervo_update_check") && st.contains(" as ") {
+            out.push(format!("переименование chervo_update_check: {st}"));
+        }
+    }
+    out
+}
+
 fn core_src_files() -> Vec<PathBuf> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         for e in fs::read_dir(dir).unwrap() {
@@ -116,6 +189,11 @@ fn reexport_guard_self_check() {
         "pub use  chervo_update_check ;",
         "mod a {} pub use chervo_update_check::check_latest;",
         "pub use chervo_update_check::{CheckError};\r\npub use chervo_update::*;\r\n",
+        // обход через переименование: имя check_latest в pub use
+        "use chervo_update_check as u;
+pub use u::check_latest;",
+        "pub use some::path::check_latest;",
+        "pub use some::check_latest as free;",
     ];
     for (i, s) in bad.iter().enumerate() {
         assert!(
@@ -169,6 +247,14 @@ fn core_has_no_bypass_reexport() {
         let src = fs::read_to_string(f).unwrap();
         let bad = reexport_violations(&src);
         assert!(bad.is_empty(), "{}: {bad:?}", f.display());
+        // сеть только в update.rs (и там ровно один вызов, внутри функции с разрешением)
+        let is_update = f.file_name().is_some_and(|n| n == "update.rs");
+        let bad = if is_update {
+            update_rs_violations(&src)
+        } else {
+            other_file_violations(&src)
+        };
+        assert!(bad.is_empty(), "{}: {bad:?}", f.display());
     }
     // положительный контроль: поимённый реэкспорт на месте, а разбор его не пропускает
     let lib = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs")).unwrap();
@@ -179,6 +265,61 @@ fn core_has_no_bypass_reexport() {
         pub_statements(&upd).len() >= 2,
         "реэкспорт update.rs не виден охране"
     );
+}
+
+#[test]
+fn network_only_in_update_rs_self_check() {
+    // другие файлы: любое упоминание chervo_update_check, в том числе переименование
+    let bad_other = [
+        "use chervo_update_check::check_latest;\nfn f() { check_latest(v) }",
+        "use chervo_update_check as u;\npub use u::check_latest;",
+        "fn f() { ::chervo_update_check::check_latest(v) }",
+        "pub fn wrap(v: Version) { chervo_update_check::check_latest(v) }",
+    ];
+    for (i, s) in bad_other.iter().enumerate() {
+        assert!(!other_file_violations(s).is_empty(), "обход {i} не пойман");
+    }
+    let good_other = "// chervo_update_check в комментарии\nuse chervo_update::Version;\nfn f() {}";
+    assert!(other_file_violations(good_other).is_empty());
+
+    // update.rs: образец правильного вида
+    let good = "pub use chervo_update_check::{CheckError, UpdateStatus};\n\
+        pub fn check_latest(\n    permit: UpdateCheckPermit,\n    running: Version,\n) -> R {\n\
+        let UpdateCheckPermit { _sealed } = permit;\n    chervo_update_check::check_latest(running)\n}\n\
+        fn other() {}\n";
+    assert!(
+        update_rs_violations(good).is_empty(),
+        "{:?}",
+        update_rs_violations(good)
+    );
+    let bad = [
+        // публичная обёртка без разрешения (вторая, рядом с настоящей)
+        format!(
+            "{good}pub fn check_now(v: Version) -> R {{ chervo_update_check::check_latest(v) }}\n"
+        ),
+        // обёртка вместо настоящей функции
+        "pub fn check_now(v: Version) -> R { chervo_update_check::check_latest(v) }\n\
+         pub fn check_latest(permit: UpdateCheckPermit, running: Version) -> R { todo() }\n"
+            .to_owned(),
+        // вызов вне функции с разрешением
+        format!(
+            "{good}fn sneaky(v: Version) {{ let _ = chervo_update_check::check_latest(v); }}\n"
+        ),
+        // импорт имени
+        format!("use chervo_update_check::check_latest as raw;\n{good}"),
+        // переименование крейта и его глоб
+        format!("use chervo_update_check as u;\npub use u::*;\n{good}"),
+        // глоб в pub use
+        format!("pub use chervo_update_check::*;\n{good}"),
+        // нет настоящей функции
+        "pub fn other() {}\n".to_owned(),
+    ];
+    for (i, s) in bad.iter().enumerate() {
+        assert!(
+            !update_rs_violations(s).is_empty(),
+            "обход {i} update.rs не пойман: {s}"
+        );
+    }
 }
 
 #[test]
