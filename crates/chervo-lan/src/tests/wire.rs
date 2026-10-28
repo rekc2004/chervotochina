@@ -336,6 +336,20 @@ fn beacon_contains_no_identifiers() {
         .filter(|b| b.len() >= 4)
         .collect();
     let contains = |hay: &[u8], needle: &[u8]| hay.windows(needle.len()).any(|w| w == needle);
+    // Короткая последовательность (адрес, короткое имя) может случайно оказаться среди
+    // псевдослучайных байт датаграммы (около 1e-7 на датаграмму). Утечка воспроизводима: она
+    // есть в каждой сборке. Поэтому находка засчитывается, только если повторяется в трёх
+    // сборках подряд (случайность этого не даёт: порядка 1e-21).
+    let leaks = |w: u64, round: u64, needle: &[u8]| -> bool {
+        (0..3).all(|_| {
+            build(&fx.refs(), w, SRC, PORT, round)
+                .unwrap()
+                .iter()
+                .any(|d| contains(d, needle))
+        })
+    };
+    // сам детектор находит подложенную последовательность
+    assert!(contains(&[1, 2, 3, 4, 5], &[3, 4]) && !contains(&[1, 2, 3], &[3, 4]));
     for i in 0..1000u64 {
         for d in build(&fx.refs(), W + i, SRC, PORT, i).unwrap() {
             for k in &fx.pubs {
@@ -344,9 +358,16 @@ fn beacon_contains_no_identifiers() {
             for p in &ids {
                 assert!(!contains(&d, p.as_bytes()), "идентификатор пары в маяке");
             }
-            assert!(!contains(&d, &SRC.octets()), "свой адрес в открытом виде");
+            if contains(&d, &SRC.octets()) {
+                assert!(
+                    !leaks(W + i, i, &SRC.octets()),
+                    "свой адрес в открытом виде"
+                );
+            }
             for h in &host {
-                assert!(!contains(&d, h), "имя компьютера в маяке");
+                if contains(&d, h) {
+                    assert!(!leaks(W + i, i, h), "имя компьютера в маяке");
+                }
             }
         }
     }
