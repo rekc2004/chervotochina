@@ -26,6 +26,7 @@ impl SrcPolicy {
     pub(crate) const PRODUCT: Self = Self {
         allow_loopback: false,
     };
+    #[cfg(any(test, feature = "test-net"))]
     pub(crate) const LOOPBACK_OK: Self = Self {
         allow_loopback: true,
     };

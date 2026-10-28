@@ -50,6 +50,7 @@ impl IdTable {
         }
     }
 
+    #[cfg(any(test, feature = "fuzzing"))]
     pub(crate) fn from_peers(peers: Vec<(PairId, LanKeys)>, window: u64) -> Self {
         let mut t = Self::empty();
         t.set_peers(peers, window);
@@ -156,11 +157,13 @@ impl IdTable {
     }
 
     /// Число меток, убранных из-за столкновения.
+    #[cfg(test)]
     pub(crate) fn collisions(&self) -> usize {
         self.collisions
     }
 
     /// Число меток в таблице.
+    #[cfg(test)]
     pub(crate) fn id_count(&self) -> usize {
         self.map.len()
     }
@@ -170,6 +173,7 @@ impl IdTable {
         self.peers.iter().map(|(p, k)| (*p, k))
     }
 
+    #[cfg(test)]
     pub(crate) fn contains_id(&self, id: &Id) -> bool {
         self.map.contains_key(id)
     }

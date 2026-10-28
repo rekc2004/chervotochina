@@ -1,10 +1,10 @@
 //! Поиск друзей в локальной сети: свой маяк (этап 13в, не mDNS).
 //! Спецификация: `docs/specs/stage-13v-lan.md`.
 //!
-//! Часть L2 (этот вызов): чистые модули без сокетов и потоков. `limits` (пределы), `wire`
-//! (формат датаграммы 430 байт: сборка и разбор), `table` (таблица меток `id -> пара, окно`),
-//! `rate` (ограничение приёма до разбора), `texts` (тексты), `error`. Всё, что приходит из
-//! сети, считается враждебным. Части L3 (`net`, `service`) добавит следующий вызов.
+//! Чистые модули без сокетов и потоков (L2): `limits` (пределы), `wire` (формат датаграммы
+//! 430 байт: сборка и разбор), `table` (таблица меток `id -> пара, окно`), `rate` (ограничение
+//! приёма до разбора), `texts` (тексты), `error`. Сокетный код (L3) только в `net`, служба
+//! (один поток std, `LanBeacon`) в `service`. Всё, что приходит из сети, считается враждебным.
 #![deny(clippy::unwrap_used)]
 #![deny(clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
 #![deny(
@@ -14,27 +14,26 @@
     clippy::todo
 )]
 
-// Модули `error`, `limits`, `rate`, `table`, `wire` пока не используются кодом продукта: их
-// подключает служба (L3). После этого `allow(dead_code)` убрать.
-#[allow(dead_code)]
 mod error;
-#[allow(dead_code)]
 mod limits;
-#[allow(dead_code)]
+mod net;
 mod rate;
-#[allow(dead_code)]
+mod service;
 mod table;
+// Тестовая оснастка, не код продукта: часть её полей нужна не каждой сборке.
 #[cfg(any(test, feature = "fuzzing"))]
 #[allow(dead_code)]
 mod testkit;
 mod texts;
-#[allow(dead_code)]
 mod wire;
 
 #[cfg(test)]
 mod tests;
 
 pub use limits::LAN_PORT;
+pub use service::LanBeacon;
+#[cfg(any(test, feature = "test-net"))]
+pub use service::TestNet;
 pub use texts::{
     MODE_ANNOUNCE_TEXT, MODE_LISTEN_TEXT, MODE_OFF_TEXT, STATUS_ANNOUNCING_TEXT,
     STATUS_FAILED_TEXT, STATUS_LISTENING_TEXT, STATUS_NO_PRIVATE_ROUTE_TEXT, STATUS_OFF_TEXT,

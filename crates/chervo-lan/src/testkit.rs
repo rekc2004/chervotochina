@@ -52,20 +52,31 @@ pub(crate) struct Duo {
     pub(crate) pubs: [[u8; 32]; 2],
 }
 
-/// Пара `i` (идентификатор случайный, ключи настоящие и случайные).
-pub(crate) fn duo() -> Option<Duo> {
+/// Пара с настоящими случайными ключами: (идентификатор, участник A, участник B).
+pub(crate) fn peer_duo() -> Option<(PairId, KxPeer, KxPeer)> {
     let pair = PairId::generate().ok()?;
     let (sa, sb) = (MemStore::default(), MemStore::default());
     let ka = create(&sa, &pair).ok()?;
     let kb = create(&sb, &pair).ok()?;
     let (pa, pb) = (ka.kx_public(), kb.kx_public());
-    let a = KxPeer::new(pair, ka.into_kx(), pb).lan_keys().ok()?;
-    let b = KxPeer::new(pair, kb.into_kx(), pa).lan_keys().ok()?;
+    Some((
+        pair,
+        KxPeer::new(pair, ka.into_kx(), pb),
+        KxPeer::new(pair, kb.into_kx(), pa),
+    ))
+}
+
+/// Одна пара с двух сторон в виде ключей маяка и открытые ключи обмена.
+pub(crate) fn duo() -> Option<Duo> {
+    let (pair, pa_peer, pb_peer) = peer_duo()?;
     Some(Duo {
         pair,
-        a,
-        b,
-        pubs: [pa.to_bytes(), pb.to_bytes()],
+        pubs: [
+            pa_peer.ours_public().to_bytes(),
+            pb_peer.ours_public().to_bytes(),
+        ],
+        a: pa_peer.lan_keys().ok()?,
+        b: pb_peer.lan_keys().ok()?,
     })
 }
 

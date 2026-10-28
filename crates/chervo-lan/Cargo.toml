@@ -9,6 +9,8 @@ publish.workspace = true
 chervo-identity.workspace = true
 chervo-addr.workspace = true
 getrandom.workspace = true
+# Без `all` (нужен только для SO_REUSEPORT, он запрещён с этапа 13а), как в chervo-upnp.
+socket2 = { version = "=0.6.5", default-features = false }
 # Для тестовой оснастки (хранилище ключей в памяти, тип `SecretStore` требует `Zeroizing`);
 # уже в дереве продукта через chervo-identity.
 zeroize.workspace = true
@@ -16,6 +18,8 @@ zeroize.workspace = true
 [features]
 # Точки входа для libFuzzer (`fuzz/`, вне рабочего пространства), не для продукта (S1 L6).
 fuzzing = []
+# Юникаст на петле вместо группы: только для тестов других крейтов (dev-зависимость).
+test-net = []
 
 [lints]
 workspace = true

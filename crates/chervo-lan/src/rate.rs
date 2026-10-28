@@ -162,14 +162,17 @@ impl RxLimiter {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn dropped_global(&self) -> u64 {
         self.dropped_global
     }
 
+    #[cfg(test)]
     pub(crate) fn dropped_ip(&self) -> u64 {
         self.dropped_ip
     }
 
+    #[cfg(test)]
     pub(crate) fn tracked_ips(&self) -> usize {
         self.per_ip.len()
     }

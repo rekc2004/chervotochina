@@ -769,6 +769,7 @@ dependencies = [
  "chervo-addr",
  "chervo-identity",
  "getrandom 0.4.3",
+ "socket2",
  "zeroize",
 ]
 

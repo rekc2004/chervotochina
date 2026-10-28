@@ -12,6 +12,8 @@
 mod fuzz;
 mod misc;
 mod rate;
+mod src_guard;
+mod svc;
 mod table;
 mod wire;
 
