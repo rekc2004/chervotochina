@@ -13,7 +13,8 @@ use chervo_core::{
 
 use crate::model::{ClockResult, Command, FriendEventKind, Outcome, Snapshot};
 use crate::rows::{
-    DiagRow, FileRow, FriendRow, Id, OfferRow, RetiredRow, RouterRow, SettingsRow, TransferRow,
+    DiagRow, FileRow, FriendRow, Id, LanRow, OfferRow, RetiredRow, RouterRow, SettingsRow,
+    TransferRow,
 };
 use crate::update_worker::{UpdateJob, UpdateWorker};
 
@@ -237,6 +238,11 @@ pub fn snapshot(node: &Node, refs: &mut Refs) -> Snapshot {
         key_store: sv.key_store,
         restart_needed: sv.restart_needed,
         update_consent: sv.update_consent,
+        lan: LanRow {
+            mode: sv.lan_mode,
+            status: node.lan_status(),
+            addrs: node.lan_addrs(),
+        },
     };
     Snapshot {
         friends,
@@ -531,6 +537,13 @@ pub fn exec(node: &Node, refs: &mut Refs, cmd: Command) -> Option<Outcome> {
             node.refresh_mapping();
             done(Ok(()))
         }
+        // выбор режима поиска в локальной сети человеком
+        Command::SetLanMode(mode) => {
+            let r = node.set_lan_mode(mode);
+            done(r)
+        }
+        // только новый снимок (его присылает цикл после любой команды)
+        Command::RefreshSnapshot => None,
         // кнопка «Сверить часы»: автоматической сверки нет
         Command::SyncClock => {
             let r = node.sync_clock().map(|s| match s {

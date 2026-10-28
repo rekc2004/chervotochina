@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use chervo_core::RootError;
+use chervo_core::{LanMode, RootError};
 
 use crate::main_model::cap_paste;
 use crate::model::{ClockResult, Command, FriendEventKind, Model, Outcome};
@@ -80,6 +80,8 @@ pub enum SettingsIntent {
     UpnpPermanentYes(crate::rows::Id),
     UpnpForget(crate::rows::Id),
     MappingRefresh,
+    /// Выбор режима поиска друзей в локальной сети.
+    LanChoose(LanMode),
     ClockSync,
     ClockConfirm,
     ClockDismiss,
@@ -248,6 +250,16 @@ impl Model {
                 }
             }
             S::MappingRefresh => vec![Command::RefreshMapping],
+            // выбор режима поиска в локальной сети: единственное место, где появляется
+            // `Command::SetLanMode`; тот же режим команды не даёт
+            S::LanChoose(mode) => {
+                let current = self.snapshot.settings.as_ref().map(|s| s.lan.mode);
+                if current.is_some_and(|c| c != mode) {
+                    vec![Command::SetLanMode(mode)]
+                } else {
+                    Vec::new()
+                }
+            }
             // «Сверить часы»: единственное место, где появляется `Command::SyncClock`
             S::ClockSync => {
                 if matches!(
@@ -377,7 +389,51 @@ mod tests {
             key_store: KeyStoreKind::CredentialManager,
             restart_needed: false,
             update_consent: chervo_core::update::UpdateConsent::NotAsked,
+            lan: crate::rows::LanRow::default(),
         }
+    }
+
+    /// Выбор режима поиска в локальной сети: команда только при смене, режим берётся из снимка
+    /// узла (после записи настройки), без снимка выбор ничего не делает.
+    #[test]
+    fn lan_mode_choice_persists() {
+        use chervo_core::LanMode;
+        let mut m = model();
+        // снимка настроек ещё нет
+        assert!(ask(&mut m, SettingsIntent::LanChoose(LanMode::Announce)).is_empty());
+        m.on_outcome(Outcome::Snapshot(Box::new(Snapshot {
+            settings: Some(settings_row(0)),
+            ..Snapshot::default()
+        })));
+        // по умолчанию «только слушать»: тот же выбор команды не даёт
+        assert_eq!(
+            m.snapshot.settings.as_ref().map(|s| s.lan.mode),
+            Some(LanMode::Listen)
+        );
+        assert!(ask(&mut m, SettingsIntent::LanChoose(LanMode::Listen)).is_empty());
+        // смена режима: ровно одна команда
+        assert_eq!(
+            ask(&mut m, SettingsIntent::LanChoose(LanMode::Announce)),
+            vec![Command::SetLanMode(LanMode::Announce)]
+        );
+        // узел записал настройку, новый снимок несёт новый режим: повторный выбор команды не даёт
+        let mut row = settings_row(0);
+        row.lan.mode = LanMode::Announce;
+        m.on_outcome(Outcome::Snapshot(Box::new(Snapshot {
+            settings: Some(row),
+            ..Snapshot::default()
+        })));
+        assert!(ask(&mut m, SettingsIntent::LanChoose(LanMode::Announce)).is_empty());
+        assert_eq!(
+            ask(&mut m, SettingsIntent::LanChoose(LanMode::Off)),
+            vec![Command::SetLanMode(LanMode::Off)]
+        );
+        // открытие настроек только просит свежий снимок, режима не меняет
+        assert_eq!(
+            m.update(Intent::Go(crate::model::Page::Settings)),
+            vec![Command::RefreshSnapshot]
+        );
+        assert!(m.update(Intent::Go(crate::model::Page::Friends)).is_empty());
     }
 
     #[test]

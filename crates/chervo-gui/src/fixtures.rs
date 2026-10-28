@@ -9,9 +9,9 @@ use chervo_core::update::{
     UpdateConsent, UpdateError, UpdateStatus, Version,
 };
 use chervo_core::{
-    FailReason, FileKind, FriendStatus, InviteOutcome, KeyStoreKind, MapStatus, NatView, NodeError,
-    NodeEvent, NodeWarning, PathKind, PauseReason, RootError, Side, SpaceView, TransferResult,
-    TransferState,
+    FailReason, FileKind, FriendStatus, InviteOutcome, KeyStoreKind, LanMode, LanStatus, MapStatus,
+    NatView, NodeError, NodeEvent, NodeWarning, PathKind, PauseReason, RootError, Side, SpaceView,
+    TransferResult, TransferState,
 };
 
 use crate::main_model::{
@@ -20,8 +20,8 @@ use crate::main_model::{
 };
 use crate::model::{ClockResult, Close, FriendEventKind, Intent, Model, Outcome, Page};
 use crate::rows::{
-    DiagRow, FileRow, FriendRow, Id, OfferRow, PickedPath, RetiredRow, RouterRow, SettingsRow,
-    TransferRow,
+    DiagRow, FileRow, FriendRow, Id, LanRow, OfferRow, PickedPath, RetiredRow, RouterRow,
+    SettingsRow, TransferRow,
 };
 use crate::settings_model::{ClockUi, SettingsIntent, UpnpUi};
 use crate::update_model::{KeyRow, UpdateIntent};
@@ -176,6 +176,14 @@ fn open_model(page: Page) -> Model {
         key_store: KeyStoreKind::CredentialManager,
         restart_needed: true,
         update_consent: UpdateConsent::Enabled,
+        lan: LanRow {
+            mode: LanMode::Listen,
+            status: Some(LanStatus::Listening),
+            addrs: vec![
+                std::net::Ipv4Addr::new(172, 18, 0, 1),
+                std::net::Ipv4Addr::new(192, 168, 1, 10),
+            ],
+        },
     });
     m.snapshot.nat = Some(NatView::BehindCgnat);
     m.snapshot.mapping = Some(MapStatus::Mapped);
@@ -608,6 +616,9 @@ pub fn all() -> Vec<Model> {
     }
     v.push(m);
 
+    // экран 8, раздел «Локальная сеть»: режимы и все состояния службы поиска (13в)
+    lan_states(&mut v);
+
     // экран 11: обновления
     update_states(&mut v);
 
@@ -643,8 +654,87 @@ pub fn all() -> Vec<Model> {
     v
 }
 
+/// Раздел «Локальная сеть»: каждое состояние службы, каждый режим, адреса и их отсутствие.
+fn lan_states(v: &mut Vec<Model>) {
+    let a = std::net::Ipv4Addr::new;
+    let cases: [(LanMode, Option<LanStatus>, Vec<std::net::Ipv4Addr>); 9] = [
+        (LanMode::Off, None, Vec::new()),
+        (LanMode::Off, Some(LanStatus::Off), Vec::new()),
+        (
+            LanMode::Listen,
+            Some(LanStatus::Listening),
+            vec![a(192, 168, 1, 10)],
+        ),
+        (
+            LanMode::Announce,
+            Some(LanStatus::Announcing),
+            vec![
+                a(172, 18, 0, 1),
+                a(192, 168, 1, 10),
+                a(10, 0, 0, 5),
+                a(192, 168, 56, 1),
+            ],
+        ),
+        (LanMode::Listen, Some(LanStatus::NoPrivateRoute), Vec::new()),
+        (LanMode::Announce, Some(LanStatus::PortBusy), Vec::new()),
+        (LanMode::Listen, Some(LanStatus::Failed), Vec::new()),
+        // VPN: адрес по умолчанию в туннеле, домашний интерфейс найден опросом маршрутов
+        (
+            LanMode::Listen,
+            Some(LanStatus::Listening),
+            vec![a(172, 18, 0, 1), a(192, 168, 31, 10)],
+        ),
+        (
+            LanMode::Announce,
+            Some(LanStatus::Announcing),
+            vec![a(10, 1, 2, 3)],
+        ),
+    ];
+    for (mode, status, addrs) in cases {
+        let mut m = open_model(Page::Settings);
+        if let Some(set) = m.snapshot.settings.as_mut() {
+            set.lan = LanRow {
+                mode,
+                status,
+                addrs,
+            };
+        }
+        v.push(m);
+    }
+    // перед открытием настроек узел ещё не отдал снимок
+    let mut m = open_model(Page::Settings);
+    m.snapshot.settings = None;
+    v.push(m);
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lan_states_cover_every_status_and_mode() {
+        use chervo_core::{LanMode, LanStatus};
+        let mut v = Vec::new();
+        super::lan_states(&mut v);
+        let rows: Vec<_> = v
+            .iter()
+            .filter_map(|m| m.snapshot.settings.as_ref().map(|s| s.lan.clone()))
+            .collect();
+        for st in [
+            LanStatus::Off,
+            LanStatus::NoPrivateRoute,
+            LanStatus::PortBusy,
+            LanStatus::Listening,
+            LanStatus::Announcing,
+            LanStatus::Failed,
+        ] {
+            assert!(rows.iter().any(|r| r.status == Some(st)), "{st:?}");
+        }
+        for mode in [LanMode::Off, LanMode::Listen, LanMode::Announce] {
+            assert!(rows.iter().any(|r| r.mode == mode), "{mode:?}");
+        }
+        assert!(rows.iter().any(|r| r.status.is_none()));
+        assert!(rows.iter().any(|r| r.addrs.len() >= 4));
+    }
+
     #[test]
     fn update_states_are_at_least_20() {
         let mut v = Vec::new();

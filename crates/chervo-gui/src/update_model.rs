@@ -409,6 +409,7 @@ mod tests {
             key_store: KeyStoreKind::CredentialManager,
             restart_needed: false,
             update_consent: consent,
+            lan: crate::rows::LanRow::default(),
         }
     }
 

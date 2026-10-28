@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use chervo_core::{InviteOutcome, MapStatus, NatView, NodeError, NodeEvent, RootError};
+use chervo_core::{InviteOutcome, LanMode, MapStatus, NatView, NodeError, NodeEvent, RootError};
 
 use crate::main_model::{AddFriend, Dialog, MainIntent, OfferUi, SendUi};
 use crate::redact::{redacted_debug_enum, redacted_debug_struct};
@@ -106,6 +106,11 @@ pub enum Command {
     },
     UpnpForget(Id),
     RefreshMapping,
+    /// Только из ветки выбора режима поиска в локальной сети (охрана `gated_node_actions`):
+    /// «Сообщать о себе» включает рассылку в сеть, поэтому только по явному выбору человека.
+    SetLanMode(LanMode),
+    /// Перечитать состояние узла без действий (например, при открытии раздела настроек).
+    RefreshSnapshot,
     /// Только из обработчика кнопки «Сверить часы» (охрана `gated_node_actions`).
     SyncClock,
     ConfirmClock,
@@ -459,6 +464,11 @@ impl Model {
             Intent::Go(page) => {
                 if self.node_open {
                     self.page = page;
+                    // адреса поиска в локальной сети меняются без событий: при открытии
+                    // настроек состояние перечитывается
+                    if page == Page::Settings {
+                        return vec![Command::RefreshSnapshot];
+                    }
                 }
                 Vec::new()
             }

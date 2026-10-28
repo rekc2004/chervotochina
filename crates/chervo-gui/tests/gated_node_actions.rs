@@ -4,7 +4,7 @@
 //!   своего намерения (кнопка «Соединить», ответ «да» на вопрос о доверии, «Найти роутер»,
 //!   «Сверить часы»); границы ветки берутся по отступам (`common::enclosing_arm`);
 //! - вызов узла для такой команды (`connect_now`, `enable_auto_accept`, `upnp_identify`,
-//!   `sync_clock`) стоит только в `worker_ops.rs` и именно внутри ветки своей команды;
+//!   `sync_clock`, `set_lan_mode`) стоит только в `worker_ops.rs` и именно внутри ветки своей команды;
 //! - `TrustConfirmation` создаётся только в ветке `EnableAutoAccept`.
 
 mod common;
@@ -18,7 +18,7 @@ struct Gate {
     node_call: &'static str,
 }
 
-const GATED: [Gate; 5] = [
+const GATED: [Gate; 6] = [
     Gate {
         command: "Command::ConnectNow",
         intent_arm: "I::ConnectNow(",
@@ -38,6 +38,13 @@ const GATED: [Gate; 5] = [
         command: "Command::SyncClock",
         intent_arm: "S::ClockSync",
         node_call: "sync_clock(",
+    },
+    // 13в: выбор режима поиска в локальной сети. «Сообщать о себе» рассылает маяк в сеть, поэтому
+    // команда появляется только из ветки выбора человека (не из открытия экрана или события).
+    Gate {
+        command: "Command::SetLanMode",
+        intent_arm: "S::LanChoose",
+        node_call: "set_lan_mode(",
     },
     // 19г-2: ответ на вопрос о проверке новых версий (карточка и переключатель: одна ветка).
     // «Проверить сейчас» (`Command::CheckUpdateNow`, `U::CheckNow`) здесь не записана: вызов узла
@@ -175,6 +182,7 @@ fn node_calls_for_gated_actions_are_in_their_worker_arms() {
         "enable_auto_accept(",
         "upnp_identify(",
         "sync_clock(",
+        "set_lan_mode(",
         "set_update_consent(",
         "user_confirmed_trust",
         "TrustConfirmation",
@@ -232,6 +240,9 @@ const GOOD_MODEL: &str = "match i {
     S::ClockSync => {
         vec![Command::SyncClock]
     }
+    S::LanChoose(mode) => {
+        vec![Command::SetLanMode(mode)]
+    }
     U::SetConsent(on) => {
         vec![Command::SetUpdateConsent(on)]
     }
@@ -251,6 +262,10 @@ const GOOD_WORKER: &str = "match cmd {
         Command::SyncClock => {
             let r = node.sync_clock();
         }
+        Command::SetLanMode(mode) => {
+            let r = node.set_lan_mode(mode);
+            done(r)
+        }
         Command::SetUpdateConsent(on) => Some(Outcome::UpdateConsentSet {
             result: node.set_update_consent(on),
         }),
@@ -265,6 +280,11 @@ fn control_model_guard_can_fail() {
     assert!(!model_violations(&wrong).is_empty());
     let clock_wrong = GOOD_MODEL.replace("S::ClockSync", "S::ClockReset");
     assert!(!model_violations(&clock_wrong).is_empty());
+    // 13в: выбор режима поиска в сети только из ветки выбора, не из соседней
+    let lan_wrong = GOOD_MODEL.replace("S::LanChoose(mode)", "S::MappingRefresh");
+    assert!(!model_violations(&lan_wrong).is_empty());
+    let lan_twice = format!("{GOOD_MODEL}fn other() {{\n    Command::SetLanMode(m);\n}}\n");
+    assert!(!model_violations(&lan_twice).is_empty());
     // команда далеко от заголовка ветки (больше 10 строк) всё равно в своей ветке: допустимо,
     // а в чужой ветке даже рядом с заголовком своей: нет
     let hijack = GOOD_MODEL.replace(
@@ -322,6 +342,15 @@ fn control_worker_guard_can_fail() {
         files_containing(&other, "upnp_identify("),
         vec!["src/screens/x.rs"]
     );
+    // 13в: вызов смены режима поиска в сети в чужой ветке или второй раз
+    let lan_wrong =
+        GOOD_WORKER.replace("Command::SetLanMode(mode) => {", "Command::ResetClock => {");
+    assert!(!worker_violations(&lan_wrong).is_empty());
+    let lan_twice = GOOD_WORKER.replace(
+        "Command::SyncClock => {",
+        "Command::SyncClock => {\n            node.set_lan_mode(m);",
+    );
+    assert!(!worker_violations(&lan_twice).is_empty());
     // доверие создаётся вне ветки автоприёма
     let trust = GOOD_WORKER.replace(
         "Some(f) => node.connect_now(f),",
