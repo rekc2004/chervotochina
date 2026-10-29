@@ -15,13 +15,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use chervo_addr::{AddrSource, KnownAddr, RouteSources};
+use chervo_addr::{AddrSource, KnownAddr, LanMode, RouteSources};
 use chervo_connect::{
     AllowSet, Clock, ConnectConfig, Engine, EngineEvent, EngineEvents, InviteAddrs, InviteOutcome,
-    RouteProbe, SystemClock,
+    PathKind, RouteProbe, SystemClock,
 };
 use chervo_friends::{FriendBook, NewFriend, PendingRole};
 use chervo_identity::{IdentityError, KxPeer, ListKeyStore, PairId, PairKey, SecretStore};
+use chervo_lan::{LanBeacon, TestNet};
 use chervo_token::addr_flow::exchange_addr_info;
 use chervo_token::{Token, decode};
 use chervo_transport::{Connection, PeerAddr, PeerFilter, Transport};
@@ -766,4 +767,85 @@ async fn engine_silent_token_holder_dropped_then_real_invitee_succeeds() {
         outcome(wait_for(&mut b.events, 15, is_finished).await),
         Some(InviteOutcome::Added)
     );
+}
+
+// ------------------------------------------------------------- поиск в локальной сети
+
+/// Свободный порт UDP на петле (занимается и сразу освобождается).
+fn free_udp_port() -> u16 {
+    std::net::UdpSocket::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+fn lan_service(mode: LanMode, port: u16, target_port: u16) -> Arc<LanBeacon> {
+    let clock = SystemClock::new();
+    Arc::new(LanBeacon::new_on_loopback(
+        mode,
+        Arc::new(move || clock.now_unix()),
+        TestNet {
+            target: std::net::SocketAddrV4::new(Ipv4Addr::LOCALHOST, target_port),
+            bind: Ipv4Addr::LOCALHOST,
+            listen_port: port,
+            allow_loopback: true,
+            interval: Duration::from_millis(200),
+            oracle: TestNet::no_oracle(),
+        },
+    ))
+}
+
+/// Два настоящих движка на петле. Друг A (`x`) не знает адреса B вовсе (адрес сменился вместе с
+/// портом), B про адрес A тоже ничего не знает. A слушает маяк, B сообщает о себе: A находит B
+/// по маяку и соединяется, путь `Lan`. Маршрут у обоих выдуманный частный (адрес в маяке берётся
+/// из запечатывающего сокета, а порт из транспорта).
+///
+/// Решение дирижёра: находка из маяка идущий набор НЕ прерывает, правило «один набор на пару
+/// за раз» остаётся. Поэтому устаревший адрес в книге A задержал бы находку на время уже идущего
+/// набора по нему (проверено вручную: около 30 с, тест в 15 с не укладывается). Здесь книга A
+/// адресов B не содержит, и тест проверяет сам путь: маяк, находка, набор, путь `Lan`.
+#[tokio::test]
+async fn engine_lan_finds_peer_after_port_change() {
+    let (mut x, mut y) = (pre(), pre());
+    let (bx, by) = (bind(0), bind(0));
+    let m = befriend(&mut x, &mut y, None, None);
+    let mut nx = run(x, bx);
+    let mut ny = run(y, by);
+    let (lan_x, lan_y) = (free_udp_port(), free_udp_port());
+    let sx = lan_service(LanMode::Listen, lan_x, lan_y);
+    let sy = lan_service(LanMode::Announce, lan_y, lan_x);
+    nx.engine.attach_lan(sx.clone()).unwrap();
+    ny.engine.attach_lan(sy.clone()).unwrap();
+    // частный маршрут: адрес и порт уходят службам
+    nx.probe.set_v4("192.168.1.5");
+    ny.probe.set_v4("192.168.1.6");
+    let started = tokio::time::Instant::now();
+    let ev = wait_for(&mut nx.events, 15, is_connected).await;
+    assert!(ev.is_some(), "A не нашёл B по маяку");
+    let Some(EngineEvent::Connected { pair, path }) = ev else {
+        panic!("ожидалось Connected")
+    };
+    assert_eq!(pair, m.pair_x);
+    assert_eq!(path, PathKind::Lan);
+    assert!(
+        started.elapsed() < Duration::from_secs(15),
+        "нашёл за {:?}",
+        started.elapsed()
+    );
+    assert!(wait_for(&mut ny.events, 15, is_connected).await.is_some());
+    assert!(round_trip(&nx.engine, &m.pair_x).await);
+    // после соединения адрес B записан обычным `Contact`
+    let known = nx
+        .engine
+        .read_book(|bk| bk.get(&m.pair_x).unwrap().known_addrs.clone());
+    assert!(
+        known
+            .iter()
+            .any(|k| k.source == AddrSource::Contact && k.addr == ny.addr),
+        "Contact после соединения"
+    );
+    nx.engine.shutdown();
+    ny.engine.shutdown();
+    let _ = (m.pair_y, sx, sy);
 }

@@ -14,6 +14,7 @@
 
 mod book;
 mod class;
+mod lan;
 mod mapper;
 mod own;
 mod probe;
@@ -27,6 +28,7 @@ pub use book::{
     prune, usable, usable_entries,
 };
 pub use class::{AddrClass, classify, is_eui64, normalize, update_allowed};
+pub use lan::{LanDiscovery, LanLocal, LanMode, LanSighting, LanStatus};
 pub use mapper::{MapReport, MapRequest, MapStatus, PortMapper};
 pub use own::{
     GatewayInfo, LocalSnapshot, MAX_OBSERVATIONS, MAX_REPORTERS_UP, MAX_UPDATE_ADDRS, NatView,

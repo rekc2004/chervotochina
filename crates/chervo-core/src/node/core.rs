@@ -10,6 +10,7 @@ use std::time::Duration;
 use chervo_connect::{Diagnosis, Engine, EngineEvent, EngineEvents, InviteOutcome, PathKind};
 use chervo_connect::{SystemClock, SystemProbe, user_text};
 use chervo_identity::{EpochStore, PairId};
+use chervo_lan::LanBeacon;
 use chervo_receive::{ReceiveConfig, ReceivePlacement, ReceivePolicy, ReceiveRoot};
 use chervo_transfer::{
     FailReason, PauseReason, Side, TransferEvent, TransferEvents, TransferKey, Transfers,
@@ -120,6 +121,11 @@ pub(crate) struct Core {
     pub(crate) live: LiveConfig,
     pub(crate) reg: Mutex<Registry>,
     pub(crate) mapper: Mutex<Option<Arc<UpnpMapper>>>,
+    /// Служба поиска друзей в локальной сети; создаётся при первом режиме не `Off`.
+    pub(crate) lan: Mutex<Option<Arc<LanBeacon>>>,
+    /// Порт транспорта совпал с портом маяка (старый файл настроек с `port=` порта маяка): служба
+    /// поиска не запускается, состояние `PortBusy`.
+    pub(crate) lan_blocked: bool,
 }
 
 impl Core {
@@ -287,6 +293,9 @@ impl Core {
                     friend: FriendRef::new(pair),
                     diagnosis: diagnosis_view(diagnosis),
                 });
+            }
+            EngineEvent::LanStatusChanged { status } => {
+                self.sink.emit(NodeEvent::LanStatusChanged { status });
             }
             EngineEvent::Internal => self.sink.emit(NodeEvent::Internal),
             _ => {}

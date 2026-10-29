@@ -24,6 +24,7 @@ mod engine;
 mod gateway;
 mod inbox;
 mod invite;
+mod lan;
 mod limiter;
 mod plan;
 mod texts;

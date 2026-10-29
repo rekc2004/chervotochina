@@ -2,9 +2,9 @@
 //! проброс, роутеры (UPnP), часы, ключи, о программе. Сеть только по кнопкам «Найти роутер» и
 //! «Сверить часы».
 
-use chervo_core::KeyStoreKind;
 use chervo_core::texts as core_texts;
 use chervo_core::update::RELEASES_PAGE;
+use chervo_core::{KeyStoreKind, LanMode, LanStatus};
 use eframe::egui;
 
 use crate::main_model::MainIntent;
@@ -29,6 +29,8 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
             folders(ui, set, &model.settings_ui, &mut out);
             ui.separator();
             numbers(ui, set, &model.settings_ui, &mut out);
+            ui.separator();
+            lan(ui, set, &mut out);
             ui.separator();
             upnp(ui, model, set, &mut out);
             ui.separator();
@@ -152,6 +154,32 @@ fn numbers(ui: &mut egui::Ui, set: &SettingsRow, st: &SettingsUi, out: &mut Vec<
         S::ForwardSubmit,
         out,
     );
+}
+
+/// Поиск друзей в локальной сети: три выбора, состояние, адреса поиска и подсказка про VPN.
+/// Режим «Сообщать о себе» рассылает в сеть короткий маяк, поэтому выбирается только вручную.
+fn lan(ui: &mut egui::Ui, set: &SettingsRow, out: &mut Vec<Intent>) {
+    ui.heading(texts::SET_TITLE_LAN);
+    for mode in [LanMode::Off, LanMode::Listen, LanMode::Announce] {
+        if ui
+            .radio(set.lan.mode == mode, core_texts::lan_mode_text(mode))
+            .clicked()
+        {
+            out.push(s(S::LanChoose(mode)));
+        }
+    }
+    ui.label(core_texts::lan_status_text(
+        set.lan.status.unwrap_or(LanStatus::Off),
+    ));
+    if !set.lan.addrs.is_empty() {
+        let list: Vec<String> = set.lan.addrs.iter().map(ToString::to_string).collect();
+        ui.label(format!(
+            "{}{}",
+            core_texts::ADDRS_PREFIX_TEXT,
+            list.join(", ")
+        ));
+    }
+    ui.label(core_texts::VPN_HINT_TEXT);
 }
 
 fn upnp(ui: &mut egui::Ui, model: &Model, set: &SettingsRow, out: &mut Vec<Intent>) {

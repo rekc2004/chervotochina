@@ -13,6 +13,7 @@ snow.workspace = true
 blake2.workspace = true
 x25519-dalek.workspace = true
 curve25519-dalek.workspace = true
+ring.workspace = true
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 keyring-core.workspace = true

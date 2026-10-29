@@ -9,6 +9,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use chervo_addr::LanMode;
 use chervo_upnp::{AllowedRouter, RouterId};
 
 use super::error::NodeError;
@@ -54,6 +55,9 @@ pub(crate) struct Settings {
     pub(crate) update_checked_at: u64,
     /// Пусто: серверы по умолчанию из `chervo_timesync::SyncConfig`.
     pub(crate) ntp_servers: Vec<String>,
+    /// Поиск друзей в локальной сети (`lan=off|listen|announce`). По умолчанию «только слушать»
+    /// (решение владельца В1): ничего не рассылается, пока человек сам не включил «сообщать».
+    pub(crate) lan_mode: LanMode,
 }
 
 impl std::fmt::Debug for Settings {
@@ -79,7 +83,28 @@ impl Settings {
             update_consent: None,
             update_checked_at: 0,
             ntp_servers: Vec::new(),
+            lan_mode: DEFAULT_LAN_MODE,
         }
+    }
+}
+
+/// Режим поиска в локальной сети, пока человек его не менял.
+pub(crate) const DEFAULT_LAN_MODE: LanMode = LanMode::Listen;
+
+fn parse_lan_mode(s: &str) -> Result<LanMode, NodeError> {
+    match s {
+        "off" => Ok(LanMode::Off),
+        "listen" => Ok(LanMode::Listen),
+        "announce" => Ok(LanMode::Announce),
+        _ => bad(),
+    }
+}
+
+fn lan_mode_text(m: LanMode) -> &'static str {
+    match m {
+        LanMode::Off => "off",
+        LanMode::Listen => "listen",
+        LanMode::Announce => "announce",
     }
 }
 
@@ -207,6 +232,7 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Settings, NodeError> {
     let mut offset_at = None;
     let mut update_check = None;
     let mut checked_at = None;
+    let mut lan = None;
     let mut extra_roots: Vec<PathBuf> = Vec::new();
     let mut routers: Vec<AllowedRouter> = Vec::new();
     let mut ntp: Vec<String> = Vec::new();
@@ -248,6 +274,7 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Settings, NodeError> {
             "clock_offset_at" => set_once(&mut offset_at, parse_u64(value)?)?,
             "update_check" => set_once(&mut update_check, parse_bool(value)?)?,
             "update_checked_at" => set_once(&mut checked_at, parse_u64(value)?)?,
+            "lan" => set_once(&mut lan, parse_lan_mode(value)?)?,
             "extra_root" => {
                 let p = parse_path(value)?;
                 // повтор той же папки не копится
@@ -295,6 +322,7 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Settings, NodeError> {
         update_consent: update_check,
         update_checked_at: checked_at.unwrap_or(0),
         ntp_servers: ntp,
+        lan_mode: lan.unwrap_or(DEFAULT_LAN_MODE),
     })
 }
 
@@ -347,6 +375,7 @@ pub(crate) fn serialize(s: &Settings) -> Result<String, NodeError> {
         line("update_check", if v { "1" } else { "0" });
     }
     line("update_checked_at", &s.update_checked_at.to_string());
+    line("lan", lan_mode_text(s.lan_mode));
     // то, что записали, должно читаться обратно тем же разбором
     if parse(out.as_bytes()).as_ref() != Ok(s) {
         return bad();

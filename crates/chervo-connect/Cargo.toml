@@ -17,6 +17,9 @@ tokio.workspace = true
 chervo-transport-quinn.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 zeroize.workspace = true
+# Только для сквозного теста поиска в локальной сети (юникаст на петле); в обычных зависимостях
+# крейта маяка нет (охрана `src_guard`).
+chervo-lan = { workspace = true, features = ["test-net"] }
 
 [lints]
 workspace = true

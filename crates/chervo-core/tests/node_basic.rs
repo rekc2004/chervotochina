@@ -449,3 +449,102 @@ fn auto_accept_needs_the_confirmation_value_and_persists() {
     assert!(!node.friends()[0].auto_accept);
     node.shutdown(Duration::from_secs(5));
 }
+
+// ---------------------------------------------------------------- этап 13в: поиск в локальной сети
+
+#[test]
+fn lan_default_is_listen_and_mode_persists() {
+    use chervo_core::LanMode;
+    let rig = Rig::new("lan_mode");
+    let (node, _ev) = rig.start();
+    // решение В1: по умолчанию «только слушать», служба создана
+    assert_eq!(node.settings().lan_mode, LanMode::Listen);
+    assert!(node.lan_status().is_some());
+    // выключили: настройка записана, служба остановлена, адресов нет
+    node.set_lan_mode(LanMode::Off).unwrap();
+    assert_eq!(node.settings().lan_mode, LanMode::Off);
+    // состояние обновляет поток службы: в пределах нескольких сотен миллисекунд
+    let end = std::time::Instant::now() + Duration::from_secs(3);
+    while node.lan_status() != Some(chervo_core::LanStatus::Off) && std::time::Instant::now() < end
+    {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(node.lan_status(), Some(chervo_core::LanStatus::Off));
+    assert!(node.lan_addrs().is_empty());
+    node.shutdown(Duration::from_secs(5));
+    // и после перезапуска остаётся выключенным: службы нет вовсе (ни потока, ни сокетов)
+    let (node, _ev) = rig.open().unwrap();
+    assert_eq!(node.settings().lan_mode, LanMode::Off);
+    assert_eq!(node.lan_status(), None);
+    assert!(node.lan_addrs().is_empty());
+    // включили снова: служба создаётся и подключается к движку
+    node.set_lan_mode(LanMode::Listen).unwrap();
+    assert_eq!(node.settings().lan_mode, LanMode::Listen);
+    assert!(node.lan_status().is_some());
+    node.shutdown(Duration::from_secs(5));
+    let (node, _ev) = rig.open().unwrap();
+    assert_eq!(node.settings().lan_mode, LanMode::Listen);
+    node.shutdown(Duration::from_secs(5));
+}
+
+#[test]
+fn lan_off_no_socket() {
+    use chervo_core::LanMode;
+    let rig = Rig::new("lan_off");
+    let (node, _ev) = rig.start();
+    node.set_lan_mode(LanMode::Off).unwrap();
+    node.shutdown(Duration::from_secs(5));
+    let (node, _ev) = rig.open().unwrap();
+    // режим «выключено» с самого запуска: служба не создана, значит нет ни потока, ни сокета
+    assert_eq!(node.lan_status(), None);
+    assert!(node.lan_addrs().is_empty());
+    node.shutdown(Duration::from_secs(5));
+}
+
+#[test]
+fn set_port_rejects_lan_port() {
+    let rig = Rig::new("lan_port");
+    let (node, _ev) = rig.start();
+    let before = node.settings().port;
+    assert_eq!(
+        node.set_port(chervo_lan::LAN_PORT),
+        Err(NodeError::PortInUse)
+    );
+    assert_eq!(node.settings().port, before, "порт не изменился");
+    node.shutdown(Duration::from_secs(5));
+}
+
+/// Старый файл настроек мог хранить порт маяка: разбор его принимает (файл не становится
+/// `SettingsCorrupt`), а служба поиска при таком порту транспорта не запускается: состояние
+/// `PortBusy`, адресов нет, и режим по-прежнему можно менять без ошибки.
+#[test]
+fn lan_service_not_started_on_lan_port() {
+    use chervo_core::{LanMode, LanStatus};
+    let rig = Rig::new("lan_port_blocked");
+    rig.setup();
+    let cfg = harness::cfg_in(&rig.data, Some(chervo_lan::LAN_PORT));
+    // порт занимает сам узел (без общего доступа): параллельные тесты со службой поиска держат его
+    // недолго, поэтому открытие повторяется
+    let mut opened = None;
+    for _ in 0..200 {
+        match Node::open_with_store_for_tests(cfg.clone(), &hardened(), rig.store.backend()) {
+            Ok(v) => {
+                opened = Some(v);
+                break;
+            }
+            Err(NodeError::PortInUse) => std::thread::sleep(Duration::from_millis(50)),
+            Err(e) => panic!("открытие: {e}"),
+        }
+    }
+    let (node, _ev) = opened.expect("порт маяка не освободился за 10 с");
+    assert_eq!(node.settings().lan_mode, LanMode::Listen);
+    assert_eq!(node.lan_status(), Some(LanStatus::PortBusy));
+    assert!(node.lan_addrs().is_empty());
+    // смена режима не создаёт службу и не падает
+    node.set_lan_mode(LanMode::Announce).unwrap();
+    assert_eq!(node.lan_status(), Some(LanStatus::PortBusy));
+    assert!(node.lan_addrs().is_empty());
+    node.set_lan_mode(LanMode::Off).unwrap();
+    assert_eq!(node.lan_status(), None);
+    node.shutdown(Duration::from_secs(5));
+}

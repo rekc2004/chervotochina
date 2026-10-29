@@ -351,6 +351,8 @@ pub struct SettingsView {
     pub key_store: KeyStoreKind,
     /// Согласие на проверку новых версий (этап 19г). Время последней проверки наружу не отдаётся.
     pub update_consent: crate::update::UpdateConsent,
+    /// Режим поиска друзей в локальной сети (по умолчанию «только слушать»).
+    pub lan_mode: chervo_addr::LanMode,
     /// Порт, папка приёма, запас места или ручной проброс изменены: вступят в силу после
     /// перезапуска программы.
     pub restart_needed: bool,

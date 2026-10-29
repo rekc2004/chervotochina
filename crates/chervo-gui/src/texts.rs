@@ -168,7 +168,7 @@ pub const ROOT_CHANGED: &str =
     "Папка приёма изменена. Изменение вступит в силу после перезапуска программы.";
 pub const CLOCK_SKEW_HINT: &str =
     "Возможно, часы у вас или у друга идут неверно. Сверьте свои часы в настройках.";
-pub const LAN_EXPIRED_HINT: &str = "Адрес в локальной сети устарел (он живёт сутки). Отправьте токен адреса с отметкой «мы в одной сети».";
+pub const LAN_EXPIRED_HINT: &str = "Адрес в локальной сети устарел (он живёт сутки). Отправьте токен адреса с отметкой «мы в одной сети» или включите „Сообщать о себе“ на домашнем компьютере.";
 pub const BTN_CLOCK_HINT: &str = "Сверить часы";
 
 pub const DIAG_TITLE: &str = "Диагностика соединения";
@@ -193,6 +193,7 @@ pub const SET_MIN_FREE: &str = "Запас свободного места, % т
 pub const SET_PORT: &str = "Порт UDP (вступит в силу после перезапуска)";
 pub const SET_FORWARD: &str = "Внешний порт ручного проброса (пусто: нет)";
 pub const SET_RESTART: &str = "Есть изменения, которые вступят в силу после перезапуска программы.";
+pub const SET_TITLE_LAN: &str = "Локальная сеть";
 pub const SET_TITLE_UPNP: &str = "Проброс порта на роутере";
 pub const BTN_FIND_ROUTER: &str = "Найти роутер";
 pub const BTN_YES: &str = "Да";

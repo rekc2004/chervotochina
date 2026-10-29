@@ -20,7 +20,10 @@
 //! `--udp-window S` (окно эвристики «UDP закрыт»), `--upnp-router UDN` (подключить UPnP с этим
 //! роутером, подтверждённым пользователем), `--token-to L --token-out F [--token-lan]` (когда
 //! появляется файл `F.go`: удалить его и выпустить токен для друга `L` в файл `F`, затем
-//! `connect_now`), `--token-in F` (при каждом изменении содержимого `F` применить токен, затем
+//! `connect_now`), `--lan off|listen|announce` (поиск друзей в локальной сети, этап 13в; без
+//! флага служба не подключается), `--dump-pubkeys F` (записать в `F` шестнадцатеричные открытые
+//! ключи пар этого узла, по одному в строке: стенд 13в проверяет, что их нет в маяке),
+//! `--token-in F` (при каждом изменении содержимого `F` применить токен, затем
 //! `connect_now`), `--send-to L` (получатель для `--send`), `--stop-file F` (чистое завершение,
 //! когда файл есть), `--diag-every S` (период строк `DIAG`, по умолчанию 5).
 //! Выход: 0 — ожидание выполнено или остановка по файлу, 1 — нет, 2 — ошибка запуска или
@@ -35,13 +38,14 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use chervo_addr::PortMapper;
+use chervo_addr::{LanDiscovery, LanMode, PortMapper};
 use chervo_connect::{
     AllowSet, Clock, ConnectConfig, ConnectError, Engine, EngineEvent, InviteAddrs, RouteProbe,
     SystemClock, SystemProbe,
 };
 use chervo_friends::{FriendBook, FriendState};
 use chervo_identity::{IdentityError, ListKeyStore, PairId, SecretStore};
+use chervo_lan::LanBeacon;
 use chervo_transfer::{
     AskAlways, GeneratedNames, SourceFile, TransferConfig, TransferEvent, TransferKey, Transfers,
     state_dir_name,
@@ -158,6 +162,8 @@ struct Args {
     window: Option<u8>,
     udp_window: Option<u64>,
     upnp_router: Option<String>,
+    lan: Option<LanMode>,
+    dump_pubkeys: Option<PathBuf>,
     token_to: Option<String>,
     token_out: Option<PathBuf>,
     token_lan: bool,
@@ -189,6 +195,8 @@ fn parse_args() -> Result<Args, String> {
         window: None,
         udp_window: None,
         upnp_router: None,
+        lan: None,
+        dump_pubkeys: None,
         token_to: None,
         token_out: None,
         token_lan: false,
@@ -236,6 +244,15 @@ fn parse_args() -> Result<Args, String> {
                 a.udp_window = Some(val("--udp-window")?.parse().map_err(|_| "--udp-window")?);
             }
             "--upnp-router" => a.upnp_router = Some(val("--upnp-router")?),
+            "--lan" => {
+                a.lan = Some(match val("--lan")?.as_str() {
+                    "off" => LanMode::Off,
+                    "listen" => LanMode::Listen,
+                    "announce" => LanMode::Announce,
+                    _ => return Err("--lan: off, listen or announce".to_owned()),
+                });
+            }
+            "--dump-pubkeys" => a.dump_pubkeys = Some(PathBuf::from(val("--dump-pubkeys")?)),
             "--token-to" => a.token_to = Some(val("--token-to")?),
             "--token-out" => a.token_out = Some(PathBuf::from(val("--token-out")?)),
             "--token-lan" => a.token_lan = true,
@@ -302,6 +319,29 @@ fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
     f.sync_all()?;
     drop(f);
     std::fs::rename(&tmp, path)
+}
+
+/// Открытые ключи пар этого узла (обмена наш и друга, подписи наш и друга), по одному в строке.
+/// Файл переписывается только при изменении. Только для стенда: ключей в маяке быть не должно.
+fn dump_pubkeys(engine: &Eng, store: &FileStore, path: &Path) {
+    let mut lines: Vec<String> = Vec::new();
+    if let Ok((peers, _)) = engine.read_book(|b| b.kx_peers(store)) {
+        for p in peers {
+            lines.push(hex(&p.ours_public().to_bytes()));
+            lines.push(hex(&p.theirs().to_bytes()));
+        }
+    }
+    engine.read_book(|b| {
+        for f in b.friends() {
+            lines.push(hex(&f.friend_ed.to_bytes()));
+            lines.push(hex(&f.our_ed.to_bytes()));
+        }
+    });
+    let mut text = lines.join("\n");
+    text.push('\n');
+    if std::fs::read_to_string(path).ok().as_deref() != Some(text.as_str()) {
+        let _ = std::fs::write(path, text);
+    }
 }
 
 fn hex(b: &[u8]) -> String {
@@ -468,7 +508,15 @@ async fn main() -> ExitCode {
     if let Some(s) = args.udp_window {
         cfg.udp_blocked_window = Duration::from_secs(s);
     }
-    let started = Engine::start(transport.clone(), allow, book, store, clock, probe, cfg);
+    let started = Engine::start(
+        transport.clone(),
+        allow,
+        book,
+        store.clone(),
+        clock.clone(),
+        probe,
+        cfg,
+    );
     let Ok((engine, mut events)) = started else {
         eprintln!("node16: engine");
         return ExitCode::from(2);
@@ -494,6 +542,20 @@ async fn main() -> ExitCode {
                 return ExitCode::from(2);
             }
             Some(m)
+        }
+    };
+    // поиск друзей в локальной сети (13в): только по флагу `--lan`, режим «выключено» службу не создаёт
+    let lan: Option<Arc<LanBeacon>> = match args.lan {
+        None | Some(LanMode::Off) => None,
+        Some(mode) => {
+            let c = clock.clone();
+            let b = Arc::new(LanBeacon::new(mode, Arc::new(move || c.now_unix())));
+            let dynamic: Arc<dyn LanDiscovery> = b.clone();
+            if engine.attach_lan(dynamic).is_err() {
+                eprintln!("node16: attach lan");
+                return ExitCode::from(2);
+            }
+            Some(b)
         }
     };
     let Ok(inbox) = engine.stream_inbox(&[
@@ -567,6 +629,7 @@ async fn main() -> ExitCode {
     let mut last_diag = Instant::now();
     let mut tick = interval(Duration::from_millis(500));
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let _lan_alive = &lan;
     let code: u8 = loop {
         let mut stop_requested = false;
         tokio::select! {
@@ -586,6 +649,9 @@ async fn main() -> ExitCode {
                             "EVENT connected pair={} path={path:?} role={role}",
                             labels.label(&pair)
                         );
+                    }
+                    EngineEvent::LanStatusChanged { status } => {
+                        out!(t0, "EVENT lan_status status={status:?}");
                     }
                     EngineEvent::Disconnected { pair } => {
                         connected.remove(&pair);
@@ -672,6 +738,9 @@ async fn main() -> ExitCode {
             _ = tick.tick() => {
                 if args.stop_file.as_deref().is_some_and(Path::exists) {
                     stop_requested = true;
+                }
+                if let Some(path) = &args.dump_pubkeys {
+                    dump_pubkeys(&engine, &store, path);
                 }
                 if let Some(path) = args.invite_in.get(in_next)
                     && let Some(text) = std::fs::read_to_string(path).ok().filter(|t| !t.trim().is_empty())
@@ -793,6 +862,11 @@ async fn main() -> ExitCode {
                         engine.nat_view(),
                         engine.mapping_status().map_or_else(|| "none".to_owned(), |m| format!("{m:?}"))
                     );
+                    // поиск в локальной сети (13в): состояние службы и число интерфейсов поиска
+                    if let Some(b) = &lan {
+                        let st = engine.lan_status().map_or_else(|| "none".to_owned(), |s| format!("{s:?}"));
+                        line.push_str(&format!(" lan={st} lan_addrs={}", b.addrs().len()));
+                    }
                     for (pair, addrs) in active_friends(&engine) {
                         let list: Vec<String> = addrs.iter().map(ToString::to_string).collect();
                         line.push_str(&format!(" friend:{}=[{}]", labels.label(&pair), list.join(",")));
