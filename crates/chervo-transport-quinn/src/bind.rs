@@ -51,20 +51,81 @@ pub(crate) fn mode_of(sock: &UdpSocket) -> ListenMode {
     }
 }
 
-fn dual(port: u16) -> Result<UdpSocket, DualFail> {
+/// Попыток при `port = 0`: чужой держатель мог занять выбранный ОС порт между шагами.
+const MAX_EPHEMERAL_TRIES: usize = 8;
+
+/// Ошибка `bind` двойного или IPv6-пробного гнезда: занято (или нет прав) или иное.
+fn busy_or_unavailable(kind: io::ErrorKind) -> DualFail {
+    match kind {
+        io::ErrorKind::AddrInUse | io::ErrorKind::PermissionDenied => DualFail::PortInUse,
+        _ => DualFail::Unavailable,
+    }
+}
+
+/// Создание и `bind` двойного гнезда `[::]:p` (`IPV6_V6ONLY = 0` до `bind`, обратное чтение).
+fn open_dual(port: u16) -> Result<UdpSocket, DualFail> {
     let s = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))
         .map_err(|_| DualFail::Unavailable)?;
     s.set_only_v6(false).map_err(|_| DualFail::Unavailable)?;
     let any = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0);
-    s.bind(&SockAddr::from(any)).map_err(|e| match e.kind() {
-        io::ErrorKind::AddrInUse | io::ErrorKind::PermissionDenied => DualFail::PortInUse,
-        _ => DualFail::Unavailable,
-    })?;
+    s.bind(&SockAddr::from(any))
+        .map_err(|e| busy_or_unavailable(e.kind()))?;
     // обратное чтение: гнездо действительно двойное
     if !matches!(s.only_v6(), Ok(false)) {
         return Err(DualFail::Unavailable);
     }
     Ok(s.into())
+}
+
+/// Пробный захват IPv6-половины: `[::]:p` с `IPV6_V6ONLY = 1`.
+fn open_probe6(port: u16) -> Result<Socket, DualFail> {
+    let s = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))
+        .map_err(|_| DualFail::Unavailable)?;
+    s.set_only_v6(true).map_err(|_| DualFail::Unavailable)?;
+    let any = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0);
+    s.bind(&SockAddr::from(any))
+        .map_err(|e| busy_or_unavailable(e.kind()))?;
+    Ok(s)
+}
+
+/// Одна попытка: пробные захваты обеих половин порта, затем двойное гнездо. Пробы живут только
+/// здесь и закрыты на любом пути выхода (они локальные значения).
+fn dual_once(port: u16) -> Result<UdpSocket, DualFail> {
+    // 1. IPv4-половина; при `port = 0` это же выбор порта
+    let g4 = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port)).map_err(|e| match e.kind() {
+        io::ErrorKind::AddrNotAvailable => DualFail::PortInUse,
+        k => busy_or_unavailable(k),
+    })?;
+    let p = g4.local_addr().map_err(|_| DualFail::Unavailable)?.port();
+    // 2. IPv6-половина
+    let g6 = open_probe6(p)?;
+    // 3. двойное гнездо, пока пробы открыты
+    match open_dual(p) {
+        // ОС не закрепляет половины за двойным гнездом: пробы свободны для двойного
+        Ok(d) => {
+            drop(g4);
+            drop(g6);
+            Ok(d)
+        }
+        // ОС закрепляет половины: конфликт с нашими пробами, повтор без них
+        Err(DualFail::PortInUse) => {
+            drop(g4);
+            drop(g6);
+            open_dual(p)
+        }
+        Err(DualFail::Unavailable) => Err(DualFail::Unavailable),
+    }
+}
+
+fn dual(port: u16) -> Result<UdpSocket, DualFail> {
+    let tries = if port == 0 { MAX_EPHEMERAL_TRIES } else { 1 };
+    for _ in 0..tries {
+        match dual_once(port) {
+            Err(DualFail::PortInUse) => {}
+            other => return other,
+        }
+    }
+    Err(DualFail::PortInUse)
 }
 
 /// Выбор по результату двойного гнезда (без ОС, для тестов): двойное готово; ОС его не даёт,

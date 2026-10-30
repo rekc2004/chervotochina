@@ -30,6 +30,9 @@ jobs:
       - run: bash scripts/check-gui-linux-tree.sh --self-test
       - run: bash scripts/check-gui-linux-tree.sh
   test:
+    env:
+      # Этап 13г: на CI тесты IPv6 на петле не пропускаются, а падают (тест `ci_requires_ipv6`).
+      CHERVO_REQUIRE_IPV6: "1"
     strategy:
       fail-fast: false
       matrix:
@@ -48,6 +51,8 @@ jobs:
         if: runner.os == 'macOS'
         run: for n in 2 3 4 9 10 11 12 13 14 15 16 17 18 19; do sudo ifconfig lo0 alias "127.0.0.$n" up; done
       - run: cargo test --workspace --locked
+      # Этап 13г: замеры разделения порта (строки `INFO share`), включая игнорируемый `share_ephemeral_v4_scan`.
+      - run: cargo test -p chervo-transport-quinn --locked share_ -- --nocapture --include-ignored
   # Stage 18b: the real GUI binary renders 3 frames and exits 0 (`--render-check`: no node, no keys,
   # no files). Linux runs under xvfb with Mesa software drivers; apt is used in CI only, the program
   # itself needs nothing installed. If a runner cannot create a window, record it as "CI cannot

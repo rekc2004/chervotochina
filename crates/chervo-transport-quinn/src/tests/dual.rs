@@ -35,14 +35,55 @@ fn cfg() -> QuinnConfig {
     }
 }
 
-/// Есть ли IPv6 на петле; иначе печатает `SKIP ipv6 <имя>` (единственное место печати в тестах).
+/// `CHERVO_REQUIRE_IPV6=1` (задаётся в `ci.yml`): пропуск тестов IPv6 запрещён, они падают.
+fn v6_required() -> bool {
+    std::env::var("CHERVO_REQUIRE_IPV6").as_deref() == Ok("1")
+}
+
+/// Пропуск теста IPv6: печать `SKIP ipv6-<what> <имя>` или, при `CHERVO_REQUIRE_IPV6=1`, паника.
 #[allow(clippy::print_stdout)]
-fn v6_loopback(name: &str) -> bool {
-    if UdpSocket::bind("[::1]:0").is_ok() {
-        return true;
-    }
-    println!("SKIP ipv6 {name}");
+fn skip_v6(what: &str, name: &str) -> bool {
+    assert!(!v6_required(), "IPv6 на петле обязателен: {what} ({name})");
+    println!("SKIP ipv6-{what} {name}");
     false
+}
+
+/// Есть ли возможность `bind` на `[::1]`; иначе `SKIP ipv6-bind <имя>`.
+fn v6_bind(name: &str) -> bool {
+    UdpSocket::bind("[::1]:0").is_ok() || skip_v6("bind", name)
+}
+
+/// Доставляется ли UDP по `[::1]`: два сокета, до 3 попыток с маркером, приёмник ждёт 500 мс;
+/// иначе `SKIP ipv6-delivery <имя>`.
+fn v6_delivery(name: &str) -> bool {
+    if !v6_bind(name) {
+        return false;
+    }
+    let (Ok(rx), Ok(tx)) = (UdpSocket::bind("[::1]:0"), UdpSocket::bind("[::1]:0")) else {
+        return skip_v6("bind", name);
+    };
+    let (Ok(dest), Ok(from)) = (rx.local_addr(), tx.local_addr()) else {
+        return skip_v6("delivery", name);
+    };
+    if rx
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .is_err()
+    {
+        return skip_v6("delivery", name);
+    }
+    let marker = *b"chervo-13g-probe";
+    for _ in 0..3 {
+        if tx.send_to(&marker, dest).is_ok() {
+            let mut buf = [0u8; 64];
+            if let Ok((n, src)) = rx.recv_from(&mut buf)
+                && buf[..n] == marker
+                && src == from
+            {
+                return true;
+            }
+        }
+    }
+    skip_v6("delivery", name)
 }
 
 fn v6(s: &str) -> Ipv6Addr {
@@ -173,7 +214,7 @@ fn choose_v4_error_mapping() {
 fn listen_mode_detected_v4_v6only_dual() {
     let s4 = UdpSocket::bind("127.0.0.1:0").unwrap();
     assert_eq!(bind::mode_of(&s4), ListenMode::V4Only);
-    if !v6_loopback("listen_mode_detected_v4_v6only_dual") {
+    if !v6_bind("listen_mode_detected_v4_v6only_dual") {
         return;
     }
     let s6 = UdpSocket::bind("[::1]:0").unwrap();
@@ -210,7 +251,7 @@ async fn rebind_recomputes_mode() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn dual_v6_loopback_race_and_knock() {
-    if !v6_loopback("dual_v6_loopback_race_and_knock") {
+    if !v6_delivery("dual_v6_loopback_race_and_knock") {
         return;
     }
     let k = Keys::new();
@@ -267,7 +308,7 @@ async fn dual_dials_v4_only_peer() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn dual_mixed_race_one_auth() {
-    if !v6_loopback("dual_mixed_race_one_auth") {
+    if !v6_delivery("dual_mixed_race_one_auth") {
         return;
     }
     let k = Keys::new();
@@ -292,7 +333,7 @@ async fn dual_mixed_race_one_auth() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn v6only_endpoint_skips_v4_candidates() {
-    if !v6_loopback("v6only_endpoint_skips_v4_candidates") {
+    if !v6_bind("v6only_endpoint_skips_v4_candidates") {
         return;
     }
     let k = Keys::new();
@@ -513,7 +554,7 @@ async fn monitor_ignores_flowinfo_only_change() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stranger_v6_silence() {
-    if !v6_loopback("stranger_v6_silence") {
+    if !v6_delivery("stranger_v6_silence") {
         return;
     }
     let mut seen_control = false;
@@ -661,4 +702,151 @@ async fn fuzz_smoke_src_canon() {
     }
     assert_eq!(rd(&counters.dropped_src_class), dropped);
     report_iters(n);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Пробные захваты порта и замеры разделения порта (Дополнение 1, Р2)
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn bind_listen_twice_port_in_use() {
+    let (first, mode) = bind_listen(0).unwrap();
+    assert_eq!(mode, ListenMode::DualStack);
+    let p = first.local_addr().unwrap().port();
+    assert_eq!(bind_listen(p).err(), Some(BindError::PortInUse));
+    drop(first);
+}
+
+#[test]
+fn bind_listen_releases_probes() {
+    let (probe, _) = bind_listen(0).unwrap();
+    let p = probe.local_addr().unwrap().port();
+    drop(probe);
+    let (d, mode) = bind_listen(p).unwrap();
+    assert_eq!(mode, ListenMode::DualStack);
+    assert_eq!(d.local_addr().unwrap().port(), p);
+    drop(d);
+    // пробы не утекли: обе половины порта свободны
+    let v4 = UdpSocket::bind(("0.0.0.0", p)).unwrap();
+    use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+    let s = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+    s.set_only_v6(true).unwrap();
+    s.bind(&SockAddr::from(SocketAddrV6::new(
+        Ipv6Addr::UNSPECIFIED,
+        p,
+        0,
+        0,
+    )))
+    .unwrap();
+    drop((v4, s));
+}
+
+/// Строка замера (адресов не печатать).
+#[allow(clippy::print_stdout)]
+fn info(line: &str) {
+    println!("INFO share {line}");
+}
+
+/// Сколько из `n` датаграмм получил сокет (таймаут чтения 500 мс).
+fn drain_count(s: &UdpSocket) -> usize {
+    s.set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    let mut buf = [0u8; 16];
+    let mut n = 0;
+    while s.recv_from(&mut buf).is_ok() {
+        n += 1;
+    }
+    n
+}
+
+/// Замер М1: что бывает, если чужая программа позже занимает половину порта двойного гнезда.
+/// Падает только на утверждениях Linux.
+#[test]
+fn share_later_binder_report() {
+    let linux = cfg!(target_os = "linux");
+    let (d, mode) = bind_listen(0).unwrap();
+    assert_eq!(mode, ListenMode::DualStack);
+    let p = d.local_addr().unwrap().port();
+    // (а) IPv4-половина
+    match UdpSocket::bind(("0.0.0.0", p)) {
+        Err(e) => {
+            if linux {
+                assert_eq!(e.kind(), io::ErrorKind::AddrInUse);
+            }
+            info("later_v4_bind=refused");
+        }
+        Ok(other) => {
+            assert!(!linux, "на Linux поздний bind 0.0.0.0:p успешен");
+            info("later_v4_bind=accepted");
+            let tx = UdpSocket::bind("127.0.0.1:0").unwrap();
+            for _ in 0..5 {
+                tx.send_to(b"share-probe", lo4(p)).unwrap();
+            }
+            let (nd, no) = (drain_count(&d), drain_count(&other));
+            info(&format!("later_v4_rx dual={nd} other={no}"));
+        }
+    }
+    // (б) IPv6-половина с v6only
+    if v6_delivery("share_later_binder_report") {
+        use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+        let s = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+        s.set_only_v6(true).unwrap();
+        let r = s.bind(&SockAddr::from(SocketAddrV6::new(
+            Ipv6Addr::UNSPECIFIED,
+            p,
+            0,
+            0,
+        )));
+        match r {
+            Err(e) => {
+                if linux {
+                    assert_eq!(e.kind(), io::ErrorKind::AddrInUse);
+                }
+                info("later_v6_bind=refused");
+            }
+            Ok(()) => {
+                assert!(!linux, "на Linux поздний bind v6only [::]:p успешен");
+                info("later_v6_bind=accepted");
+                let other: UdpSocket = s.into();
+                let tx = UdpSocket::bind("[::1]:0").unwrap();
+                for _ in 0..5 {
+                    tx.send_to(b"share-probe", lo6(p)).unwrap();
+                }
+                let (nd, no) = (drain_count(&d), drain_count(&other));
+                info(&format!("later_v6_rx dual={nd} other={no}"));
+            }
+        }
+    }
+    drop(d);
+}
+
+/// Замер М2: отдаёт ли ОС занятый двойным гнездом порт как эфемерный новому IPv4-сокету.
+#[test]
+#[ignore = "замер; запускается шагом CI и вручную с --include-ignored"]
+fn share_ephemeral_v4_scan() {
+    let (d, mode) = bind_listen(0).unwrap();
+    assert_eq!(mode, ListenMode::DualStack);
+    let p = d.local_addr().unwrap().port();
+    let mut held = Vec::new();
+    let mut hit = false;
+    let mut stop = "limit".to_owned();
+    while held.len() < 20_000 {
+        match UdpSocket::bind("0.0.0.0:0") {
+            Ok(s) => {
+                if s.local_addr().is_ok_and(|a| a.port() == p) {
+                    hit = true;
+                }
+                held.push(s);
+            }
+            Err(e) => {
+                stop = format!("{:?}", e.kind());
+                break;
+            }
+        }
+    }
+    info(&format!(
+        "ephemeral scanned={} hit={hit} stop={stop}",
+        held.len()
+    ));
+    drop((held, d));
 }

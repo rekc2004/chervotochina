@@ -129,7 +129,18 @@ fn src_guard() {
             .any(|(n, s)| n == "bind.rs" && s.contains("socket2::")),
         "socket2 должен использоваться в bind.rs"
     );
-    assert_eq!(count(&srcs, "set_only_v6("), 1, "set_only_v6( ровно одно");
+    // Дополнение 1: по одному `set_only_v6(false)` (двойное гнездо) и `set_only_v6(true)` (проба)
+    assert_eq!(count(&srcs, "set_only_v6(false)"), 1);
+    assert_eq!(count(&srcs, "set_only_v6(true)"), 1);
+    assert_eq!(count(&srcs, "set_only_v6("), 2, "посторонний set_only_v6(");
+    for (name, s) in &srcs {
+        if name != "bind.rs" {
+            assert!(
+                !s.contains("set_only_v6("),
+                "set_only_v6( вне bind.rs: {name}"
+            );
+        }
+    }
 
     // CLOSE_REFUSED: ровно два использования (не объявление и не комментарий), оба в conn.rs:
     // внутри fn refuse и внутри fn close_endpoint (закрытие гнезда при shutdown)
@@ -263,3 +274,37 @@ fn src_guard_tests_and_examples() {
 }
 
 const MIN_OUTSIDE_FILES: usize = 5;
+
+/// Этап 13г, Дополнение 1: `ci.yml` обязывает тесты IPv6 на петле (`CHERVO_REQUIRE_IPV6`) и
+/// запускает замеры `share_`; тихое удаление переменной или шага ловится здесь.
+#[test]
+fn ci_requires_ipv6() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let ci = fs::read_to_string(root.join("../../.github/workflows/ci.yml"))
+        .unwrap()
+        .replace("\r\n", "\n");
+    // задание test: от строки `  test:` до следующего задания верхнего уровня (отступ в 2 пробела)
+    let mut job = String::new();
+    let mut inside = false;
+    for line in ci.lines() {
+        let top = line.starts_with("  ") && !line.starts_with("   ") && line.ends_with(':');
+        if line == "  test:" {
+            inside = true;
+        } else if inside && top {
+            break;
+        }
+        if inside {
+            job.push_str(line);
+            job.push('\n');
+        }
+    }
+    assert!(!job.is_empty(), "в ci.yml нет задания test");
+    assert!(
+        job.contains("CHERVO_REQUIRE_IPV6: \"1\""),
+        "в задании test нет CHERVO_REQUIRE_IPV6: \"1\""
+    );
+    assert!(
+        job.contains("share_"),
+        "в задании test нет шага с замерами share_"
+    );
+}
