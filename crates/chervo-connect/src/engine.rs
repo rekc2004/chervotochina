@@ -677,7 +677,7 @@ where
         unix: u64,
         out: &mut Vec<(PairId, Vec<Candidate>)>,
     ) {
-        let fam = families_of(&st.own, local);
+        let fam = families_of(&st.own, local, &*self.probe);
         let mut pairs: Vec<(PairId, Option<Instant>)> = Vec::new();
         for f in st.book.friends() {
             if st.book.is_active(&f.pair) && !st.key_problems.contains_key(&f.pair) {

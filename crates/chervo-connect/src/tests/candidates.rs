@@ -10,15 +10,16 @@ use super::kit::*;
 use crate::ConnectConfig;
 use crate::plan::{Families, families, friend_plan, guest_plan, only_unusable_v6};
 
-fn v4_only() -> Families {
-    families(&[addr("0.0.0.0:4000")], None)
+fn v4_only() -> Families<'static> {
+    families(&[addr("0.0.0.0:4000")], None, &ROUTE_GLOBAL)
 }
 
 /// Двойное гнездо и собственный глобальный маршрут IPv6 (выход есть).
-fn dual_egress() -> Families {
+fn dual_egress() -> Families<'static> {
     families(
         &[addr("0.0.0.0:4000"), addr("[::]:4000")],
         Some("2a00:1450::5".parse().unwrap()),
+        &ROUTE_GLOBAL,
     )
 }
 

@@ -1,13 +1,15 @@
 //! Выбор пути (U7): какие адреса пробовать и в каком порядке. Адреса берутся только из книги
 //! друга (`usable_known`) или из токена приглашения; ничего другого сюда не попадает.
 
-use std::net::{Ipv6Addr, SocketAddr};
+use std::fmt;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
 use chervo_addr::{
     AddrClass, AddrSource, KnownAddr, OwnAddrs, classify, normalize, v6_egress_ok, v6_peer_ok,
 };
 use tokio::time::Instant;
 
+use crate::clock::RouteProbe;
 use crate::limiter::Limiter;
 
 /// Сколько адресов уходит в один вызов `connect`.
@@ -61,46 +63,79 @@ pub(crate) fn dialable(addr: &SocketAddr) -> bool {
         }
 }
 
-/// Семейства, которыми умеет пользоваться транспорт, и наличие собственного выхода в IPv6.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Families {
+/// Семейства, которыми умеет пользоваться транспорт, наличие собственного выхода в IPv6 и
+/// источник маршрута к цели (`RouteProbe::source_for`, пакетов не шлёт).
+#[derive(Clone, Copy)]
+pub(crate) struct Families<'a> {
     pub(crate) v4: bool,
     pub(crate) v6: bool,
     /// Есть маршрутный источник IPv6, глобальный или ULA (`v6_egress_ok`).
     pub(crate) v6_egress: bool,
+    /// Откуда берётся адрес-источник маршрута к IPv6-цели (в движке проба движка, в тестах оракул).
+    route: &'a dyn RouteProbe,
 }
 
-/// Семейства по адресам прослушивания транспорта и маршрутному источнику IPv6 (`own.local()`).
-pub(crate) fn families(local: &[SocketAddr], route_v6: Option<Ipv6Addr>) -> Families {
+impl fmt::Debug for Families<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Families")
+            .field("v4", &self.v4)
+            .field("v6", &self.v6)
+            .field("v6_egress", &self.v6_egress)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Семейства по адресам прослушивания транспорта, маршрутному источнику IPv6 и пробе маршрута.
+pub(crate) fn families<'a>(
+    local: &[SocketAddr],
+    route_v6: Option<Ipv6Addr>,
+    route: &'a dyn RouteProbe,
+) -> Families<'a> {
     Families {
         v4: local.iter().any(SocketAddr::is_ipv4),
         v6: local.iter().any(SocketAddr::is_ipv6),
         v6_egress: v6_egress_ok(route_v6),
+        route,
     }
 }
 
 /// Семейства для планировщика и диагноза: `route_v6` берётся из снимка `own.local()`. Пока снимка
 /// нет, собственного выхода в IPv6 нет (глобальные IPv6 не набираются).
-pub(crate) fn families_of(own: &OwnAddrs, local: &[SocketAddr]) -> Families {
-    families(local, own.local().and_then(|l| l.route.v6))
+pub(crate) fn families_of<'a>(
+    own: &OwnAddrs,
+    local: &[SocketAddr],
+    route: &'a dyn RouteProbe,
+) -> Families<'a> {
+    families(local, own.local().and_then(|l| l.route.v6), route)
+}
+
+/// Источник маршрута ОС именно к этой цели глобальный или ULA (Teredo, 6to4, link-local и
+/// отсутствие маршрута: нет). Иначе ULA-цель ушла бы через туннель третьей стороны.
+fn route_source_ok(addr: &SocketAddr, fam: &Families<'_>) -> bool {
+    match fam.route.source_for(*addr) {
+        Some(IpAddr::V6(src)) => v6_egress_ok(Some(src)),
+        _ => false,
+    }
 }
 
 /// Можно ли набирать адрес с нашей стороны: IPv4 при IPv4 в `local_addrs`; IPv6 при IPv6 в
-/// `local_addrs`, допустимом классе цели, а глобальный ещё и при собственном выходе в IPv6
-/// (иначе Teredo или отсутствие маршрута слали бы трафик через третьи стороны, реш. 7).
-/// ULA и `::1` идут при одном лишь IPv6 в `local_addrs`.
-pub(crate) fn family_ok(addr: &SocketAddr, fam: &Families) -> bool {
+/// `local_addrs`, допустимом классе цели и (кроме `::1`) при источнике маршрута к этому адресу
+/// класса Global или ULA; глобальная цель ещё и при собственном выходе в IPv6 (иначе Teredo или
+/// отсутствие маршрута слали бы трафик через третьи стороны, реш. 7).
+pub(crate) fn family_ok(addr: &SocketAddr, fam: &Families<'_>) -> bool {
     match addr {
         SocketAddr::V4(_) => fam.v4,
         SocketAddr::V6(v6) => {
+            let class = classify(addr.ip());
             fam.v6
                 && v6_peer_ok(v6.ip())
-                && (classify(addr.ip()) != AddrClass::Global || fam.v6_egress)
+                && (class == AddrClass::Loopback || route_source_ok(addr, fam))
+                && (class != AddrClass::Global || fam.v6_egress)
         }
     }
 }
 
-fn build(raw: impl Iterator<Item = (SocketAddr, bool, bool)>, fam: &Families) -> Plan {
+fn build(raw: impl Iterator<Item = (SocketAddr, bool, bool)>, fam: &Families<'_>) -> Plan {
     let mut cands: Vec<Candidate> = Vec::new();
     for (addr, hint, strict) in raw {
         let addr = normalize(addr);
@@ -121,7 +156,7 @@ fn build(raw: impl Iterator<Item = (SocketAddr, bool, bool)>, fam: &Families) ->
 
 /// Кандидаты друга: записи `usable_known` (порядок книги: обновление без подсказки,
 /// приглашение, контакт, подсказки), семейство по `local`, сначала LAN.
-pub(crate) fn friend_plan(entries: &[KnownAddr], fam: &Families) -> Plan {
+pub(crate) fn friend_plan(entries: &[KnownAddr], fam: &Families<'_>) -> Plan {
     build(entries.iter().map(|k| (k.addr, k.hint, is_strict(k))), fam)
 }
 
@@ -131,7 +166,7 @@ pub(crate) fn friend_plan(entries: &[KnownAddr], fam: &Families) -> Plan {
 pub(crate) fn friend_plan_confirmed(
     entries: &[KnownAddr],
     confirmed: &[SocketAddr],
-    fam: &Families,
+    fam: &Families<'_>,
 ) -> Plan {
     let mut plan = friend_plan(entries, fam);
     for c in &mut plan.cands {
@@ -152,15 +187,20 @@ fn is_strict(k: &KnownAddr) -> bool {
 }
 
 /// Кандидаты гостевой пары приглашённого: только адреса токена.
-pub(crate) fn guest_plan(token_addrs: &[SocketAddr], fam: &Families) -> Plan {
+pub(crate) fn guest_plan(token_addrs: &[SocketAddr], fam: &Families<'_>) -> Plan {
     build(token_addrs.iter().map(|a| (*a, false, false)), fam)
 }
 
-/// В книге есть записи, все они IPv6, и ни одна не проходит `family_ok` (нет IPv6 в
-/// `local_addrs` или нет собственного выхода для глобальных): причина `NoIpv6`.
-pub(crate) fn only_unusable_v6(entries: &[KnownAddr], fam: &Families) -> bool {
+/// В книге есть записи, все они IPv6, хотя бы одна допустимого класса (`v6_peer_ok`) и ни одна не
+/// проходит `family_ok` (нет IPv6 в `local_addrs`, выхода или маршрута): причина `NoIpv6`. Если
+/// все записи враждебного класса, причина другая («нет пригодных адресов»).
+pub(crate) fn only_unusable_v6(entries: &[KnownAddr], fam: &Families<'_>) -> bool {
     !entries.is_empty()
         && entries.iter().all(|k| normalize(k.addr).is_ipv6())
+        && entries.iter().any(|k| match normalize(k.addr) {
+            SocketAddr::V6(v6) => v6_peer_ok(v6.ip()),
+            SocketAddr::V4(_) => false,
+        })
         && !entries.iter().any(|k| family_ok(&normalize(k.addr), fam))
 }
 

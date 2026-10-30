@@ -226,6 +226,32 @@ impl RouteProbe for FakeProbe {
     }
 }
 
+/// Оракул маршрута для тестов плана: один и тот же источник к любой цели, кроме петли (как
+/// настоящая проба: к петле `None`).
+pub struct FixedRoute(pub Option<IpAddr>);
+
+impl RouteProbe for FixedRoute {
+    fn probe(&self) -> RouteSources {
+        RouteSources::default()
+    }
+
+    fn source_for(&self, target: SocketAddr) -> Option<IpAddr> {
+        if target.ip().is_loopback() {
+            None
+        } else {
+            self.0
+        }
+    }
+}
+
+/// Глобальный источник IPv6 к любой цели (выход есть).
+pub static ROUTE_GLOBAL: FixedRoute = FixedRoute(Some(IpAddr::V6(std::net::Ipv6Addr::new(
+    0x2a00, 0x1450, 0, 0, 0, 0, 0, 5,
+))));
+
+/// Маршрута к цели нет.
+pub static ROUTE_NONE: FixedRoute = FixedRoute(None);
+
 // --------------------------------------------------------------------- потоки
 
 pub struct FakeTx(Option<mpsc::UnboundedSender<Vec<u8>>>);

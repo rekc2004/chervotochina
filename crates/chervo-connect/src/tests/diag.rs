@@ -295,6 +295,8 @@ fn node_v6_friend(local: Vec<SocketAddr>, route_v6: Option<&str>, friend: &str) 
     t.set_local(local);
     let probe = FakeProbe::new(Some("192.168.1.5"));
     probe.set_v6(route_v6);
+    // маршрут к цели от ОС: глобальный источник (изолирует проверку выхода `v6_egress`)
+    probe.set_source(friend, Some("2a00:1450::5"));
     let n = Node::start_with(pre, ConnectConfig::default(), t, probe);
     n.t.set_script(|_, _| Action::Fail(TransportError::TimedOut, secs(0)));
     (n, p)
@@ -354,4 +356,30 @@ async fn diag_not_no_ipv6_dual_with_egress() {
             "{route:?}"
         );
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn diag_hostile_v6_only_not_no_ipv6() {
+    // книга из link-local и Teredo при двойном гнезде и выходе в IPv6: набирать нечего, но
+    // «нет связи по IPv6» это неверно: причина не NoIpv6
+    let mut pre = Pre::new();
+    let p = pre.solo_friend(vec![
+        inv("[fe80::1]:4000"),
+        inv("[2001:0:4136:e378::1]:4000"),
+    ]);
+    let t = FakeTransport::new();
+    t.set_local(vec![addr("0.0.0.0:4000"), addr("[::]:4000")]);
+    let probe = FakeProbe::new(Some("192.168.1.5"));
+    probe.set_v6(Some("2a00:1450::5"));
+    let n = Node::start_with(pre, ConnectConfig::default(), t, probe);
+    n.t.set_script(|_, _| Action::Fail(TransportError::TimedOut, secs(0)));
+    tokio::time::sleep(secs(60)).await;
+    assert!(
+        n.t.calls_for(&p).is_empty(),
+        "hostile targets are never dialled"
+    );
+    assert_ne!(
+        n.engine.diagnose(&p).unwrap().map(|d| d.reason),
+        Some(NoDirectPath::NoIpv6)
+    );
 }

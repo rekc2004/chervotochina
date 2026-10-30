@@ -126,7 +126,7 @@ where
                 NoDirectPath::NoKnownAddress
             }));
         }
-        if only_unusable_v6(&entries, &families_of(&st.own, local)) {
+        if only_unusable_v6(&entries, &families_of(&st.own, local, &*self.probe)) {
             return Some(Diagnosis::of(NoDirectPath::NoIpv6));
         }
         let seen = st

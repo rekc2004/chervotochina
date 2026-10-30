@@ -850,3 +850,37 @@ fn share_ephemeral_v4_scan() {
     ));
     drop((held, d));
 }
+
+/// Защита в глубину (круг 1 ревью): враждебные IPv6-адреса не доходят до набора, даже если
+/// движок их передал. Только такие адреса: пустой список кандидатов и быстрая ошибка `Io`;
+/// рядом с живым IPv4 соединение проходит.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn candidates_drop_hostile_v6() {
+    let k = Keys::new();
+    let a = bind_dual(cfg(), vec![k.peer_a()]);
+    let b = bind_dual(cfg(), vec![k.peer_b()]);
+    let hostile: Vec<SocketAddr> = [
+        "[fe80::1]:9",
+        "[2002::1]:9",
+        "[2001:0::1]:9",
+        "[64:ff9b::1]:9",
+        "[::1.2.3.4]:9",
+        "[ff02::1]:9",
+        "[::]:9",
+        "[2001:db8::1]:9",
+        "[fec0::1]:9",
+    ]
+    .iter()
+    .map(|s| s.parse().unwrap())
+    .collect();
+    let t0 = Instant::now();
+    let r = a.connect(&to(k.pid, hostile.clone())).await;
+    assert_eq!(r.err(), Some(TransportError::Io));
+    assert!(t0.elapsed() < Duration::from_secs(1));
+    let mut mixed = hostile;
+    mixed.push(SocketAddr::new(
+        Ipv4Addr::LOCALHOST.into(),
+        b.local_addrs()[0].port(),
+    ));
+    a.connect(&to(k.pid, mixed)).await.unwrap();
+}

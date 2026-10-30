@@ -128,7 +128,12 @@ where
     /// Адрес из маяка идёт первым в наборе друга. Тот же адрес в книге не дублируется: запись
     /// книги переезжает на первое место и сохраняет свою строгость (подтверждённый `Contact`
     /// остаётся нестрогим). Новый адрес строгий, без подсказки.
-    pub(crate) fn lan_first(st: &State<T::Conn>, pair: &PairId, plan: &mut Plan, fam: &Families) {
+    pub(crate) fn lan_first(
+        st: &State<T::Conn>,
+        pair: &PairId,
+        plan: &mut Plan,
+        fam: &Families<'_>,
+    ) {
         let Some((seen, _)) = st.lan_seen.get(pair) else {
             return;
         };

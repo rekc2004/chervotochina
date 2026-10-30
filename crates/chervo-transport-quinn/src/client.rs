@@ -72,6 +72,13 @@ fn candidates(inner: &Inner, addrs: &[SocketAddr]) -> Result<Vec<SocketAddr>, Tr
         if (v4_endpoint && a.is_ipv6()) || (v6_endpoint && a.is_ipv4()) {
             continue;
         }
+        // защита в глубину: IPv6 недопустимого класса (link-local, Teredo, 6to4, NAT64,
+        // документация, multicast, `::`) не набирается и здесь, даже если движок его пропустил
+        if let SocketAddr::V6(v6) = a
+            && !chervo_addr::v6_peer_ok(v6.ip())
+        {
+            continue;
+        }
         if out.len() >= inner.cfg.max_race {
             break;
         }

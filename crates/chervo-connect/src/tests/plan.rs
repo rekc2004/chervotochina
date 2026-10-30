@@ -13,8 +13,12 @@ fn local_dual() -> Vec<SocketAddr> {
     vec![addr("0.0.0.0:4000"), addr("[::]:4000")]
 }
 
-fn dual_with_route(route_v6: Option<&str>) -> Families {
-    families(&local_dual(), route_v6.map(|s| s.parse().unwrap()))
+fn dual_with_route(route_v6: Option<&str>) -> Families<'static> {
+    families(
+        &local_dual(),
+        route_v6.map(|s| s.parse().unwrap()),
+        &ROUTE_GLOBAL,
+    )
 }
 
 fn got(plan: &crate::plan::Plan) -> Vec<SocketAddr> {
@@ -24,14 +28,7 @@ fn got(plan: &crate::plan::Plan) -> Vec<SocketAddr> {
 #[test]
 fn plan_dual_accepts_v4_and_v6() {
     let fam = dual_with_route(Some(GLOBAL_SRC));
-    assert_eq!(
-        fam,
-        Families {
-            v4: true,
-            v6: true,
-            v6_egress: true
-        }
-    );
+    assert!(fam.v4 && fam.v6 && fam.v6_egress);
     let book = vec![
         known("5.6.7.8:1000", AddrSource::Invite, false),
         known("[2606:4700::1]:1000", AddrSource::Invite, false),
@@ -42,9 +39,13 @@ fn plan_dual_accepts_v4_and_v6() {
         vec![addr("5.6.7.8:1000"), addr("[2606:4700::1]:1000")]
     );
     // только IPv4: IPv6 пропущен; только IPv6: IPv4 пропущен
-    let v4 = families(&[addr("0.0.0.0:4000")], None);
+    let v4 = families(&[addr("0.0.0.0:4000")], None, &ROUTE_GLOBAL);
     assert_eq!(got(&friend_plan(&book, &v4)), vec![addr("5.6.7.8:1000")]);
-    let v6 = families(&[addr("[::]:4000")], Some(GLOBAL_SRC.parse().unwrap()));
+    let v6 = families(
+        &[addr("[::]:4000")],
+        Some(GLOBAL_SRC.parse().unwrap()),
+        &ROUTE_GLOBAL,
+    );
     assert_eq!(
         got(&friend_plan(&book, &v6)),
         vec![addr("[2606:4700::1]:1000")]
@@ -95,7 +96,11 @@ fn plan_v6_global_needs_egress() {
         4
     );
     // ULA и ::1 не требуют выхода, но требуют IPv6 в `local_addrs`
-    let v4 = families(&[addr("0.0.0.0:4000")], Some(GLOBAL_SRC.parse().unwrap()));
+    let v4 = families(
+        &[addr("0.0.0.0:4000")],
+        Some(GLOBAL_SRC.parse().unwrap()),
+        &ROUTE_GLOBAL,
+    );
     assert_eq!(got(&friend_plan(&book, &v4)), vec![addr("5.6.7.8:1000")]);
 }
 
@@ -171,7 +176,11 @@ fn plan_v4_mapped_target_normalized_and_deduped() {
     assert_eq!(got(&plan), vec![addr("5.6.7.8:1000")]);
     assert!(plan.cands[0].addr.is_ipv4());
     // v4-mapped на транспорте без IPv4 не уходит в IPv6
-    let v6 = families(&[addr("[::]:4000")], Some(GLOBAL_SRC.parse().unwrap()));
+    let v6 = families(
+        &[addr("[::]:4000")],
+        Some(GLOBAL_SRC.parse().unwrap()),
+        &ROUTE_GLOBAL,
+    );
     assert!(friend_plan(&book, &v6).cands.is_empty());
 }
 
@@ -200,4 +209,78 @@ fn guest_plan_same_v6_rules() {
         vec![addr("[::1]:1000"), addr("5.5.5.5:1111")]
     );
     assert!(guest_plan(&token, &with).cands.iter().all(|c| !c.strict));
+}
+
+// ------------------------------------------------ круг 1 ревью: источник маршрута к цели
+
+fn ula_book() -> Vec<chervo_addr::KnownAddr> {
+    vec![
+        known("[fd12:3456:789a::7]:1000", AddrSource::Invite, false),
+        known("[2606:4700::1]:1000", AddrSource::Invite, false),
+        known("5.6.7.8:1000", AddrSource::Invite, false),
+    ]
+}
+
+#[test]
+fn plan_ula_via_teredo_source_dropped() {
+    // ULA-цель, но ОС повела бы пакет через Teredo, 6to4, link-local или документацию: не набирать
+    // (глобальная цель тоже: источник маршрута не глобальный и не ULA)
+    for src in [
+        "2001:0:4136:e378::1",
+        "2002:c000:204::1",
+        "fe80::1",
+        "2001:db8::5",
+    ] {
+        let probe = FixedRoute(Some(std::net::IpAddr::V6(src.parse().unwrap())));
+        let fam = families(&local_dual(), Some(GLOBAL_SRC.parse().unwrap()), &probe);
+        assert!(fam.v6_egress);
+        assert_eq!(
+            got(&friend_plan(&ula_book(), &fam)),
+            vec![addr("5.6.7.8:1000")],
+            "{src}"
+        );
+        assert!(
+            guest_plan(&[addr("[fd12:3456:789a::7]:1000")], &fam)
+                .cands
+                .is_empty(),
+            "{src}"
+        );
+    }
+}
+
+#[test]
+fn plan_ula_via_ula_source_kept() {
+    let probe = FixedRoute(Some(std::net::IpAddr::V6("fd00::5".parse().unwrap())));
+    // выхода (route_v6) нет: ULA-цель идёт, глобальная нет
+    let fam = families(&local_dual(), None, &probe);
+    assert_eq!(
+        got(&friend_plan(&ula_book(), &fam)),
+        vec![addr("[fd12:3456:789a::7]:1000"), addr("5.6.7.8:1000")]
+    );
+    // выход есть (ULA за NAT66): глобальная тоже
+    let fam = families(&local_dual(), Some("fd00::5".parse().unwrap()), &probe);
+    assert_eq!(friend_plan(&ula_book(), &fam).cands.len(), 3);
+}
+
+#[test]
+fn plan_ula_no_route_dropped() {
+    let fam = families(
+        &local_dual(),
+        Some(GLOBAL_SRC.parse().unwrap()),
+        &ROUTE_NONE,
+    );
+    assert_eq!(
+        got(&friend_plan(&ula_book(), &fam)),
+        vec![addr("5.6.7.8:1000")]
+    );
+}
+
+#[test]
+fn plan_loopback_v6_no_route_check() {
+    // `::1` маршрута не требует (проба к петле даёт `None`), но требует IPv6 в `local_addrs`
+    let book = vec![known("[::1]:1000", AddrSource::Invite, false)];
+    let fam = families(&local_dual(), None, &ROUTE_NONE);
+    assert_eq!(got(&friend_plan(&book, &fam)), vec![addr("[::1]:1000")]);
+    let v4 = families(&[addr("0.0.0.0:4000")], None, &ROUTE_NONE);
+    assert!(friend_plan(&book, &v4).cands.is_empty());
 }
