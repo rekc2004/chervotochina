@@ -194,7 +194,7 @@ NFT
 fw6_on() {
   nsx "$1" nft -f - <<NFT
 table ip6 fw13g {
-  chain fwd {
+  chain forward6 {
     type filter hook forward priority 0; policy accept;
     ct state established,related accept
     meta l4proto ipv6-icmp accept
