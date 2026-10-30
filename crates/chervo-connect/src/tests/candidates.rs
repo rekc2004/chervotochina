@@ -8,10 +8,18 @@ use chervo_transport::TransportError;
 
 use super::kit::*;
 use crate::ConnectConfig;
-use crate::plan::{friend_plan, guest_plan, only_unusable_v6};
+use crate::plan::{Families, families, friend_plan, guest_plan, only_unusable_v6};
 
-fn v4_only() -> Vec<SocketAddr> {
-    vec![addr("0.0.0.0:4000")]
+fn v4_only() -> Families {
+    families(&[addr("0.0.0.0:4000")], None)
+}
+
+/// Двойное гнездо и собственный глобальный маршрут IPv6 (выход есть).
+fn dual_egress() -> Families {
+    families(
+        &[addr("0.0.0.0:4000"), addr("[::]:4000")],
+        Some("2a00:1450::5".parse().unwrap()),
+    )
 }
 
 #[test]
@@ -59,7 +67,7 @@ fn candidates_skip_ipv6_on_v4_transport() {
     assert!(friend_plan(&v6, &v4_only()).cands.is_empty());
     assert!(only_unusable_v6(&v6, &v4_only()));
     // транспорт с IPv6 те же записи принимает
-    let dual = vec![addr("0.0.0.0:4000"), addr("[::]:4000")];
+    let dual = dual_egress();
     assert_eq!(friend_plan(&v6, &dual).cands.len(), 1);
     assert!(!only_unusable_v6(&v6, &dual));
     // порт 0 и неуказанный адрес не набираются

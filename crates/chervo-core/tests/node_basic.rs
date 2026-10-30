@@ -548,3 +548,50 @@ fn lan_service_not_started_on_lan_port() {
     assert_eq!(node.lan_status(), None);
     node.shutdown(Duration::from_secs(5));
 }
+
+/// Этап 13г: порт держит чужой сокет `0.0.0.0:p` (IPv4): узел не стартует и запасного пути
+/// «только IPv6» нет; после освобождения порта узел открывается.
+#[test]
+fn node_port_in_use_v4_holder() {
+    let rig = Rig::new("port_v4_holder");
+    rig.setup();
+    let holder = std::net::UdpSocket::bind(("0.0.0.0", rig.port)).unwrap();
+    assert_eq!(rig.open().err(), Some(NodeError::PortInUse));
+    drop(holder);
+    let (node, _ev) = rig.open().unwrap();
+    node.shutdown(Duration::from_secs(5));
+}
+
+/// Этап 13г: порт держит чужой сокет `[::]:p` (IPv6): тоже `PortInUse`. Если IPv6 в ОС нет,
+/// тест пропускается.
+#[test]
+fn node_port_in_use_v6_holder() {
+    let rig = Rig::new("port_v6_holder");
+    rig.setup();
+    let Ok(holder) = std::net::UdpSocket::bind(("::", rig.port)) else {
+        return;
+    };
+    assert_eq!(rig.open().err(), Some(NodeError::PortInUse));
+    drop(holder);
+    let (node, _ev) = rig.open().unwrap();
+    node.shutdown(Duration::from_secs(5));
+}
+
+/// Работающий узел держит порт: второе двойное гнездо на нём невозможно (`PortInUse`), а на Linux
+/// заняты обе половины, IPv4 и IPv6.
+#[test]
+fn node_holds_port_while_running() {
+    let rig = Rig::new("port_held");
+    let (node, _ev) = rig.start();
+    assert_eq!(
+        chervo_transport_quinn::bind_listen(rig.port).err(),
+        Some(chervo_transport_quinn::BindError::PortInUse)
+    );
+    if cfg!(target_os = "linux") {
+        assert!(std::net::UdpSocket::bind(("127.0.0.1", rig.port)).is_err());
+        if std::net::UdpSocket::bind("[::1]:0").is_ok() {
+            assert!(std::net::UdpSocket::bind(("::1", rig.port)).is_err());
+        }
+    }
+    node.shutdown(Duration::from_secs(5));
+}

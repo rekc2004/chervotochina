@@ -543,3 +543,31 @@ async fn lan_shutdown_signalled() {
     n.engine.shutdown();
     assert!(lan.shutdowns.load(Ordering::SeqCst) >= 1);
 }
+
+#[tokio::test(start_paused = true)]
+async fn lan_local_dual_listen() {
+    // двойное гнездо: `local_addrs` = IPv4 и IPv6; порт для маяка берётся из записи IPv4
+    for local in [
+        vec![addr("0.0.0.0:4321"), addr("[::]:4321")],
+        vec![addr("[::]:4321"), addr("0.0.0.0:4321")],
+    ] {
+        let mut pre = Pre::new();
+        pre.solo_friend(vec![inv("5.6.7.8:4000")]);
+        let t = FakeTransport::new();
+        t.set_local(local.clone());
+        let n = Node::start_with(
+            pre,
+            ConnectConfig::default(),
+            t,
+            FakeProbe::new(Some("192.168.1.5")),
+        );
+        let lan = FakeLan::new();
+        n.engine.attach_lan(lan.clone()).unwrap();
+        tokio::time::sleep(secs(30)).await;
+        let l = lan
+            .last_local()
+            .unwrap_or_else(|| panic!("{local:?}: None"));
+        assert_eq!(l.own, "192.168.1.5".parse::<std::net::Ipv4Addr>().unwrap());
+        assert_eq!(l.listen_port, 4321, "{local:?}");
+    }
+}

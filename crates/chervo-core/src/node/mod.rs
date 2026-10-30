@@ -27,7 +27,7 @@ mod transfers;
 mod updates;
 mod views;
 
-use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -44,7 +44,7 @@ use chervo_transfer::{
     STREAM_TRANSFER_CTL, STREAM_TRANSFER_DATA, TransferConfig, TransferEvents, Transfers,
 };
 use chervo_transport::PeerFilter;
-use chervo_transport_quinn::{QuinnConfig, QuinnTransport};
+use chervo_transport_quinn::{BindError, ListenMode, QuinnConfig, QuinnTransport, bind_listen};
 use chervo_upnp::{UpnpMapper, UpnpSettings};
 use tokio::runtime::Handle;
 
@@ -140,12 +140,17 @@ impl std::fmt::Debug for Node {
     }
 }
 
-fn map_bind(e: &std::io::Error) -> NodeError {
-    use std::io::ErrorKind::{AddrInUse, AddrNotAvailable, PermissionDenied};
-    match e.kind() {
-        AddrInUse | AddrNotAvailable | PermissionDenied => NodeError::PortInUse,
-        _ => NodeError::Io,
+fn map_bind(e: BindError) -> NodeError {
+    match e {
+        BindError::PortInUse => NodeError::PortInUse,
+        BindError::Io => NodeError::Io,
     }
+}
+
+/// Гнездо приёма узла: двойное `[::]:port` (IPv4 и IPv6), при невозможности ОС только IPv4
+/// (этап 13г). Занятый порт это `PortInUse` без запасного пути.
+fn bind_sock(port: u16) -> Result<(UdpSocket, ListenMode), NodeError> {
+    bind_listen(port).map_err(map_bind)
 }
 
 /// Случайный порт из динамического диапазона (не криптография: порт открыт и так).
@@ -162,7 +167,7 @@ fn random_port() -> u16 {
 fn pick_port() -> u16 {
     for _ in 0..32 {
         let p = random_port();
-        if UdpSocket::bind((Ipv4Addr::UNSPECIFIED, p)).is_ok() {
+        if bind_listen(p).is_ok() {
             return p;
         }
     }
@@ -449,8 +454,7 @@ fn build_core(cfg: &NodeConfig, p: Parts) -> Result<Built, NodeError> {
     let allow = AllowSet::new();
     let filter: Arc<dyn PeerFilter> = allow.clone();
     let port = cfg.port_override.unwrap_or(st.port);
-    let sock = UdpSocket::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)))
-        .map_err(|e| map_bind(&e))?;
+    let (sock, _mode) = bind_sock(port)?;
     let transport = Arc::new(
         QuinnTransport::from_socket(sock, QuinnConfig::default(), filter)
             .map_err(|_| NodeError::Io)?,

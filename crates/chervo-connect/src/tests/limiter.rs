@@ -273,3 +273,95 @@ async fn limiter_pasted_token_resets_that_pair_only() {
     assert!(st.friends.get(&pa).unwrap().fast_until.is_none());
     assert!(st.friends.get(&pc).unwrap().fast_until.is_none());
 }
+
+// ------------------------------------------------------------ этап 13г: ключ жертвы IPv6 /64
+
+#[tokio::test(start_paused = true)]
+async fn limiter_v6_strict_per_64() {
+    let cfg = ConnectConfig::default();
+    let mut l = Limiter::new(&cfg);
+    let t0 = Instant::now();
+    // лгущий друг называет разные адреса одной чужой /64: строгий набор один на 32 с
+    let a = addr("[2606:4700:1:2::1]:4000");
+    let b = addr("[2606:4700:1:2:aaaa:bbbb:cccc:dddd]:5000");
+    let other64 = addr("[2606:4700:1:3::1]:4000");
+    assert!(l.take(a, true, t0));
+    assert!(!l.take(b, true, t0 + secs(1)), "та же /64");
+    assert!(!l.take(b, true, t0 + secs(31)), "предел 30 с + запас 2 с");
+    assert!(l.take(other64, true, t0 + secs(1)), "другая /64");
+    assert!(l.take(b, true, t0 + secs(32)));
+    // нестрогий адрес этой же /64 предел строгих не трогает
+    assert!(l.allow(addr("[2606:4700:1:2::77]:1"), false, t0 + secs(33)));
+}
+
+#[tokio::test(start_paused = true)]
+async fn limiter_v6_per_ip_cap_per_64() {
+    let cfg = ConnectConfig::default();
+    let mut l = Limiter::new(&cfg);
+    let t0 = Instant::now();
+    // восемь разных адресов одной /64: не больше `per_ip_dials` за окно
+    let mut taken = 0u32;
+    for i in 1..=8u16 {
+        if l.take(addr(&format!("[2606:4700:1:2::{i:x}]:4000")), false, t0) {
+            taken += 1;
+        }
+    }
+    assert_eq!(taken, cfg.per_ip_dials);
+    // соседняя /64 не затронута
+    assert!(l.take(addr("[2606:4700:1:9::1]:4000"), false, t0));
+    // после окна снова можно
+    assert!(l.take(
+        addr("[2606:4700:1:2::9]:4000"),
+        false,
+        t0 + cfg.per_ip_window
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn limiter_v4_mapped_same_key_as_v4() {
+    let cfg = ConnectConfig::default();
+    let mut l = Limiter::new(&cfg);
+    let t0 = Instant::now();
+    assert_eq!(
+        crate::limiter::victim_key(addr("[::ffff:5.6.7.8]:1")),
+        crate::limiter::victim_key(addr("5.6.7.8:2"))
+    );
+    assert!(l.take(addr("5.6.7.8:4000"), true, t0));
+    assert!(!l.take(addr("[::ffff:5.6.7.8]:4001"), true, t0 + secs(1)));
+    // предел на IP считает обе записи вместе
+    let mut taken = 1u32;
+    for p in 0..8u16 {
+        let a = if p % 2 == 0 {
+            addr(&format!("[::ffff:5.6.7.8]:{}", 5000 + p))
+        } else {
+            addr(&format!("5.6.7.8:{}", 5000 + p))
+        };
+        if l.take(a, false, t0 + secs(2)) {
+            taken += 1;
+        }
+    }
+    assert_eq!(taken, cfg.per_ip_dials);
+}
+
+#[tokio::test(start_paused = true)]
+async fn limiter_v4_unchanged() {
+    // IPv4 по-прежнему по /32: соседние адреса одной /24 независимы
+    let cfg = ConnectConfig::default();
+    let mut l = Limiter::new(&cfg);
+    let t0 = Instant::now();
+    assert!(l.take(addr("5.6.7.8:4000"), true, t0));
+    assert!(l.take(addr("5.6.7.9:4000"), true, t0));
+    assert!(!l.take(addr("5.6.7.8:4001"), true, t0 + secs(1)));
+    for i in 1..=cfg.per_ip_dials {
+        assert!(l.take(addr(&format!("5.6.7.10:{}", 5000 + i)), false, t0));
+    }
+    assert!(!l.take(addr("5.6.7.10:6000"), false, t0));
+    assert_eq!(
+        crate::limiter::victim_key(addr("5.6.7.8:1")),
+        "5.6.7.8".parse::<std::net::IpAddr>().unwrap()
+    );
+    assert_eq!(
+        crate::limiter::victim_key(addr("[2606:4700:1:2:3:4:5:6]:1")),
+        "2606:4700:1:2::".parse::<std::net::IpAddr>().unwrap()
+    );
+}

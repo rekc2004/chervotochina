@@ -1,12 +1,14 @@
 //! Ограничитель набора номера для каждого назначения (обзор 12, M1; решение 5 спецификации).
 //!
-//! Ключ записи: нормализованный `SocketAddr`. Отдельно считается предел на IP по всем парам и
-//! портам: сколько раз за `per_ip_window` мы позволили себе стучать на этот IP. Адрес из книги
+//! Ключ записи: нормализованный `SocketAddr`. Отдельно считается предел на жертву по всем парам и
+//! портам: сколько раз за `per_ip_window` мы позволили себе стучать на этого получателя. Ключ
+//! жертвы: IPv4 целиком (/32), IPv6 по /64 (этап 13г, реш. 8): иначе лгущий друг, называя разные
+//! адреса одной чужой /64, обходил бы предел. Адрес из книги
 //! друга (любой источник, любые флаги) может попасть в набор только через `take`. Вся
 //! арифметика насыщающая: ни переполнения, ни паники.
 
 use std::collections::{HashMap, VecDeque};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use chervo_addr::normalize;
@@ -16,6 +18,18 @@ use crate::config::ConnectConfig;
 
 /// Год: запасной срок, когда сумма времени не помещается в `Instant`.
 const FAR: Duration = Duration::from_secs(365 * 24 * 3600);
+
+/// Ключ жертвы: IPv4 как есть, IPv6 по /64 (младшие 64 бита обнулены). Адрес приводится к
+/// каноническому виду, так что `::ffff:a.b.c.d` и `a.b.c.d` дают один ключ.
+pub(crate) fn victim_key(addr: SocketAddr) -> IpAddr {
+    match normalize(addr).ip() {
+        IpAddr::V6(v6) => {
+            let masked = u128::from(v6) & (u128::MAX << 64);
+            IpAddr::V6(Ipv6Addr::from(masked))
+        }
+        v4 => v4,
+    }
+}
 
 /// `Instant + Duration` без паники.
 pub(crate) fn add_sat(t: Instant, d: Duration) -> Instant {
@@ -78,8 +92,8 @@ impl Limiter {
         }
     }
 
-    fn recent(&self, ip: &IpAddr, now: Instant) -> usize {
-        self.ip_log.get(ip).map_or(0, |log| {
+    fn recent(&self, key: &IpAddr, now: Instant) -> usize {
+        self.ip_log.get(key).map_or(0, |log| {
             log.iter()
                 .filter(|t| now.saturating_duration_since(**t) < self.per_ip_window)
                 .count()
@@ -95,7 +109,7 @@ impl Limiter {
         if strict
             && self
                 .strict_ip
-                .get(&addr.ip())
+                .get(&victim_key(addr))
                 .is_some_and(|t| add_sat(*t, self.strict_floor) > now)
         {
             return false;
@@ -111,7 +125,7 @@ impl Limiter {
                 return false;
             }
         }
-        let used = self.recent(&addr.ip(), now);
+        let used = self.recent(&victim_key(addr), now);
         u32::try_from(used).is_ok_and(|u| u < self.per_ip_dials)
     }
 
@@ -120,7 +134,7 @@ impl Limiter {
         for a in addrs {
             let a = normalize(*a);
             let window = self.per_ip_window;
-            let log = self.ip_log.entry(a.ip()).or_default();
+            let log = self.ip_log.entry(victim_key(a)).or_default();
             while log
                 .front()
                 .is_some_and(|t| now.saturating_duration_since(*t) >= window)
@@ -143,7 +157,7 @@ impl Limiter {
         }
         self.charge(&[addr], now);
         if strict {
-            self.strict_ip.insert(normalize(addr).ip(), now);
+            self.strict_ip.insert(victim_key(addr), now);
             self.trim_strict_ip(now);
         }
         true

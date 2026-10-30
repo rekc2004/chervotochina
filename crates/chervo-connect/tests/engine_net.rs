@@ -26,7 +26,7 @@ use chervo_lan::{LanBeacon, TestNet};
 use chervo_token::addr_flow::exchange_addr_info;
 use chervo_token::{Token, decode};
 use chervo_transport::{Connection, PeerAddr, PeerFilter, Transport};
-use chervo_transport_quinn::{QuinnConfig, QuinnTransport};
+use chervo_transport_quinn::{ListenMode, QuinnConfig, QuinnTransport, bind_listen};
 use zeroize::Zeroizing;
 
 // ------------------------------------------------------------------- помощники
@@ -848,4 +848,146 @@ async fn engine_lan_finds_peer_after_port_change() {
     nx.engine.shutdown();
     ny.engine.shutdown();
     let _ = (m.pair_y, sx, sy);
+}
+
+// ------------------------------------------------------------------ этап 13г: IPv6
+
+/// `CHERVO_REQUIRE_IPV6=1` (задаётся в `ci.yml`): пропуск тестов IPv6 запрещён, они падают.
+fn v6_required() -> bool {
+    std::env::var("CHERVO_REQUIRE_IPV6").as_deref() == Ok("1")
+}
+
+/// Пропуск теста IPv6: печать `SKIP ipv6-<what> <имя>` или, при `CHERVO_REQUIRE_IPV6=1`, паника.
+#[allow(clippy::print_stdout)]
+fn skip_v6(what: &str, name: &str) -> bool {
+    assert!(!v6_required(), "IPv6 на петле обязателен: {what} ({name})");
+    println!("SKIP ipv6-{what} {name}");
+    false
+}
+
+/// Доставляется ли UDP по `[::1]`: два сокета, до 3 попыток с маркером, приёмник ждёт 500 мс;
+/// иначе `SKIP ipv6-bind|ipv6-delivery <имя>`. Копия проверки из тестов транспорта.
+fn v6_delivery(name: &str) -> bool {
+    let (Ok(rx), Ok(tx)) = (
+        std::net::UdpSocket::bind("[::1]:0"),
+        std::net::UdpSocket::bind("[::1]:0"),
+    ) else {
+        return skip_v6("bind", name);
+    };
+    let (Ok(dest), Ok(from)) = (rx.local_addr(), tx.local_addr()) else {
+        return skip_v6("delivery", name);
+    };
+    if rx
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .is_err()
+    {
+        return skip_v6("delivery", name);
+    }
+    let marker = *b"chervo-13g-probe";
+    for _ in 0..3 {
+        if tx.send_to(&marker, dest).is_ok() {
+            let mut buf = [0u8; 64];
+            if let Ok((n, src)) = rx.recv_from(&mut buf)
+                && buf[..n] == marker
+                && src == from
+            {
+                return true;
+            }
+        }
+    }
+    skip_v6("delivery", name)
+}
+
+/// Транспорт на двойном гнезде `bind_listen(0)`; `addr` приглашения на петле IPv4 или IPv6.
+fn bind_dual(loopback_v6: bool) -> Bound {
+    let allow = AllowSet::new();
+    let filter: Arc<dyn PeerFilter> = allow.clone();
+    let (sock, mode) = bind_listen(0).unwrap();
+    assert_eq!(mode, ListenMode::DualStack);
+    let t = Arc::new(QuinnTransport::from_socket(sock, quinn_cfg(), filter).unwrap());
+    let port = t.local_addrs()[0].port();
+    let addr = if loopback_v6 {
+        SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port))
+    } else {
+        SocketAddr::from(([127, 0, 0, 1], port))
+    };
+    Bound { t, allow, addr }
+}
+
+/// Два движка на двойных гнёздах, приглашение с адресом `[::1]:p` (`Manual`): оба `Added`,
+/// затем `Connected` по IPv6 на петле (путь `Lan`: петля это локальная сеть).
+#[tokio::test]
+async fn engine_v6_loopback_friends_connect() {
+    if !v6_delivery("engine_v6_loopback_friends_connect") {
+        return;
+    }
+    let mut a = Node::start(
+        bind_dual(true),
+        Arc::new(MemStore::default()),
+        TestDir::new(),
+        None,
+    );
+    let mut b = Node::start(
+        bind_dual(true),
+        Arc::new(MemStore::default()),
+        TestDir::new(),
+        None,
+    );
+    assert!(a.addr.is_ipv6());
+    let (pa, pb) = invite(&mut a, &mut b, true, true).await;
+    assert_eq!(
+        outcome(wait_for(&mut a.events, 15, is_finished).await),
+        Some(InviteOutcome::Added)
+    );
+    assert_eq!(
+        outcome(wait_for(&mut b.events, 15, is_finished).await),
+        Some(InviteOutcome::Added)
+    );
+    both_connected(&mut a, &mut b, 15).await;
+    assert!(round_trip(&a.engine, &pa).await);
+    assert!(round_trip(&b.engine, &pb).await);
+    let remote = a.engine.connection(&pa).unwrap().remote_addr();
+    assert!(remote.is_ipv6(), "соединение должно идти по IPv6");
+    assert!(remote.ip().is_loopback());
+}
+
+/// Сторона только с IPv4 звонит двойной: у двойной в книге `Contact` это IPv4, а не v4-mapped.
+#[tokio::test]
+async fn engine_v4_only_friend_to_dual() {
+    let (mut x, mut y) = (pre(), pre());
+    let (bx, by) = (bind(0), bind_dual(false));
+    assert_eq!(bx.t.listen_mode(), ListenMode::V4Only);
+    let m = befriend(&mut x, &mut y, Some(by.addr), None);
+    let (mut nx, mut ny) = (run(x, bx), run(y, by));
+    both_connected(&mut nx, &mut ny, 15).await;
+    assert!(round_trip(&nx.engine, &m.pair_x).await);
+    assert!(round_trip(&ny.engine, &m.pair_y).await);
+    // двойная сторона видит соединение как IPv4 (без v4-mapped)
+    let remote = ny.engine.connection(&m.pair_y).unwrap().remote_addr();
+    assert!(
+        remote.is_ipv4(),
+        "remote_addr должен быть каноническим IPv4"
+    );
+    // запись `Contact` попадает в книгу после соединения
+    let end = tokio::time::Instant::now() + Duration::from_secs(5);
+    let contacts = loop {
+        let known = ny
+            .engine
+            .read_book(|bk| bk.get(&m.pair_y).unwrap().known_addrs.clone());
+        let c: Vec<SocketAddr> = known
+            .iter()
+            .filter(|k| k.source == AddrSource::Contact)
+            .map(|k| k.addr)
+            .collect();
+        if !c.is_empty() || tokio::time::Instant::now() >= end {
+            break (c, known);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert!(!contacts.0.is_empty(), "нет записи Contact");
+    assert!(contacts.0.iter().all(SocketAddr::is_ipv4));
+    assert!(
+        contacts.1.iter().all(|k| k.addr.is_ipv4()),
+        "v4-mapped в книге"
+    );
 }

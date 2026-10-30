@@ -1147,3 +1147,30 @@ fn events_debug_redacted() {
     assert_eq!(friend, FriendRef::new(pair));
     assert_eq!(FriendRef::from_invite(invite), friend);
 }
+
+// ------------------------------------------------------------------ этап 13г: гнездо приёма
+
+/// Гнездо узла (то, что берёт `build_core`): двойное `[::]:port`; занятый порт это `PortInUse`.
+#[test]
+fn node_binds_dual_stack() {
+    use chervo_transport_quinn::ListenMode;
+    let (sock, mode) = super::bind_sock(0).unwrap();
+    assert_eq!(mode, ListenMode::DualStack, "ОС без двойного гнезда");
+    let port = sock.local_addr().unwrap().port();
+    assert!(sock.local_addr().unwrap().is_ipv6());
+    assert_eq!(super::bind_sock(port).err(), Some(NodeError::PortInUse));
+    drop(sock);
+    // порт свободен снова
+    assert!(super::bind_sock(port).is_ok());
+}
+
+#[test]
+fn pick_port_dual_free() {
+    for _ in 0..8 {
+        let p = super::pick_port();
+        assert!((49_152..=u16::MAX).contains(&p), "{p}");
+        // выбранный порт действительно свободен для двойного гнезда
+        let (sock, _) = chervo_transport_quinn::bind_listen(p).unwrap();
+        drop(sock);
+    }
+}

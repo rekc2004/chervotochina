@@ -285,3 +285,73 @@ async fn diag_double_nat() {
         Some(NoDirectPath::DoubleNat)
     );
 }
+
+// ------------------------------------------------------------------ этап 13г: NoIpv6
+
+fn node_v6_friend(local: Vec<SocketAddr>, route_v6: Option<&str>, friend: &str) -> (Node, PairId) {
+    let mut pre = Pre::new();
+    let p = pre.solo_friend(vec![inv(friend)]);
+    let t = FakeTransport::new();
+    t.set_local(local);
+    let probe = FakeProbe::new(Some("192.168.1.5"));
+    probe.set_v6(route_v6);
+    let n = Node::start_with(pre, ConnectConfig::default(), t, probe);
+    n.t.set_script(|_, _| Action::Fail(TransportError::TimedOut, secs(0)));
+    (n, p)
+}
+
+#[tokio::test(start_paused = true)]
+async fn diag_no_ipv6_v4_only_transport() {
+    // транспорт слушает только IPv4: маршрут IPv6 у системы есть, но пользоваться им нечем
+    let (n, p) = node_v6_friend(
+        vec![addr("0.0.0.0:4000")],
+        Some("2a00:1450::5"),
+        "[2606:4700::1]:4000",
+    );
+    tokio::time::sleep(secs(60)).await;
+    assert_eq!(
+        n.engine.diagnose(&p).unwrap(),
+        Some(diag(NoDirectPath::NoIpv6, false))
+    );
+    assert!(n.t.calls_for(&p).is_empty(), "no IPv6 socket, no dial");
+}
+
+#[tokio::test(start_paused = true)]
+async fn diag_no_ipv6_no_v6_egress() {
+    // двойное гнездо есть, а собственного выхода в IPv6 нет: глобальный друг не набирается
+    for route in [None, Some("fe80::1"), Some("2001:0:4136:e378::1")] {
+        let (n, p) = node_v6_friend(
+            vec![addr("0.0.0.0:4000"), addr("[::]:4000")],
+            route,
+            "[2606:4700::1]:4000",
+        );
+        tokio::time::sleep(secs(60)).await;
+        assert_eq!(
+            n.engine.diagnose(&p).unwrap(),
+            Some(diag(NoDirectPath::NoIpv6, false)),
+            "{route:?}"
+        );
+        assert!(
+            n.t.calls_for(&p).is_empty(),
+            "{route:?}: no egress, no dial"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn diag_not_no_ipv6_dual_with_egress() {
+    for route in [Some("2a00:1450::5"), Some("fd00::5")] {
+        let (n, p) = node_v6_friend(
+            vec![addr("0.0.0.0:4000"), addr("[::]:4000")],
+            route,
+            "[2606:4700::1]:4000",
+        );
+        tokio::time::sleep(secs(60)).await;
+        assert!(!n.t.calls_for(&p).is_empty(), "{route:?}: must dial");
+        assert_ne!(
+            n.engine.diagnose(&p).unwrap().map(|d| d.reason),
+            Some(NoDirectPath::NoIpv6),
+            "{route:?}"
+        );
+    }
+}

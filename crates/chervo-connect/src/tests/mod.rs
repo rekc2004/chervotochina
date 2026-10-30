@@ -20,6 +20,7 @@ mod kit;
 mod lan;
 mod limiter;
 mod manual_token;
+mod plan;
 mod publish;
 mod src_guard;
 mod texts;

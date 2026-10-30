@@ -34,7 +34,9 @@ use crate::inbox::IncomingStream;
 use crate::invite::Invite;
 use crate::lan::LanHook;
 use crate::limiter::{Limiter, add_sat};
-use crate::plan::{Candidate, PathKind, friend_plan_confirmed, guest_plan, path_kind, select};
+use crate::plan::{
+    Candidate, PathKind, families_of, friend_plan_confirmed, guest_plan, path_kind, select,
+};
 
 const EVENTS_CAPACITY: usize = 256;
 
@@ -675,6 +677,7 @@ where
         unix: u64,
         out: &mut Vec<(PairId, Vec<Candidate>)>,
     ) {
+        let fam = families_of(&st.own, local);
         let mut pairs: Vec<(PairId, Option<Instant>)> = Vec::new();
         for f in st.book.friends() {
             if st.book.is_active(&f.pair) && !st.key_problems.contains_key(&f.pair) {
@@ -708,20 +711,17 @@ where
                 continue;
             }
             let plan = match st.guests.get(&pair) {
-                Some(g) if st.book.get(&pair).is_none() => guest_plan(&g.token_addrs, local),
+                Some(g) if st.book.get(&pair).is_none() => guest_plan(&g.token_addrs, &fam),
                 _ => {
                     let confirmed = st
                         .book
                         .get(&pair)
                         .map(|f| confirmed_addrs(&f.known_addrs, unix))
                         .unwrap_or_default();
-                    let mut p = friend_plan_confirmed(
-                        &st.book.usable_known(&pair, unix),
-                        &confirmed,
-                        local,
-                    );
+                    let mut p =
+                        friend_plan_confirmed(&st.book.usable_known(&pair, unix), &confirmed, &fam);
                     // 13в: адрес из маяка в локальной сети идёт первым (строгий)
-                    Self::lan_first(st, &pair, &mut p, local);
+                    Self::lan_first(st, &pair, &mut p, &fam);
                     p
                 }
             };

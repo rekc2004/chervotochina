@@ -353,3 +353,28 @@ async fn mapping_changed_event_once_per_status() {
         ]
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn gateway_request_dual_listen() {
+    // двойное гнездо: запрос проброса берёт порт из записи IPv4, IPv6 в запросе не участвует
+    for local in [
+        vec![addr("0.0.0.0:4321"), addr("[::]:4321")],
+        vec![addr("[::]:4321"), addr("0.0.0.0:4321")],
+    ] {
+        let mut pre = Pre::new();
+        pre.solo_friend(vec![inv("5.6.7.8:4000")]);
+        let t = FakeTransport::new();
+        t.set_local(local.clone());
+        let n = Node::start_with(
+            pre,
+            ConnectConfig::default(),
+            t,
+            FakeProbe::new(Some("192.168.1.5")),
+        );
+        let m = FakeMapper::new(|_, _| mapped("9.9.9.9", 4321, 1800));
+        n.engine.attach_mapper(m.clone()).unwrap();
+        wait_until(|| n.engine.mapping_status().is_some()).await;
+        assert_eq!(m.call_count(), 1, "{local:?}");
+        assert_eq!(m.call(0).internal, "192.168.1.5:4321".parse().unwrap());
+    }
+}

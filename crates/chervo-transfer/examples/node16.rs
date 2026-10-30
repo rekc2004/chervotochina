@@ -17,6 +17,8 @@
 //! `--invite-addr`, `--sas-auto-confirm`, `--send`, `--dest`, `--partial`, `--accept`,
 //! `--hash-sources`, `--streams`, `--window`, `--expect-connected`, `--expect-complete`,
 //! `--deadline`, `--hold`) и новые: `--invite-lan` (в приглашение адреса своей сети),
+//! `--listen v4|dual` (гнездо приёма, по умолчанию `dual`: `[::]:port` с запасным путём «только
+//! IPv4»; `v4`: прежний `0.0.0.0:port`; режим печатает строка `EVENT started`),
 //! `--udp-window S` (окно эвристики «UDP закрыт»), `--upnp-router UDN` (подключить UPnP с этим
 //! роутером, подтверждённым пользователем), `--token-to L --token-out F [--token-lan]` (когда
 //! появляется файл `F.go`: удалить его и выпустить токен для друга `L` в файл `F`, затем
@@ -51,7 +53,7 @@ use chervo_transfer::{
     state_dir_name,
 };
 use chervo_transport::{PeerFilter, Transport};
-use chervo_transport_quinn::{QuinnConfig, QuinnTransport};
+use chervo_transport_quinn::{ListenMode, QuinnConfig, QuinnTransport, bind_listen};
 use chervo_upnp::{AllowedRouter, RouterId, UpnpMapper, UpnpSettings};
 use tokio::time::{Instant, MissedTickBehavior, interval};
 use zeroize::Zeroizing;
@@ -151,6 +153,8 @@ struct Args {
     invite_in: Vec<PathBuf>,
     invite_addr: Option<SocketAddr>,
     invite_lan: bool,
+    /// `--listen v4`: только IPv4 на `0.0.0.0:port`; по умолчанию (`dual`) двойное гнездо.
+    listen_v4: bool,
     auto_confirm: bool,
     send: Vec<PathBuf>,
     send_to: Option<String>,
@@ -184,6 +188,7 @@ fn parse_args() -> Result<Args, String> {
         invite_in: Vec::new(),
         invite_addr: None,
         invite_lan: false,
+        listen_v4: false,
         auto_confirm: false,
         send: Vec::new(),
         send_to: None,
@@ -220,6 +225,13 @@ fn parse_args() -> Result<Args, String> {
                 a.invite_addr = Some(val("--invite-addr")?.parse().map_err(|_| "--invite-addr")?);
             }
             "--invite-lan" => a.invite_lan = true,
+            "--listen" => {
+                a.listen_v4 = match val("--listen")?.as_str() {
+                    "v4" => true,
+                    "dual" => false,
+                    _ => return Err("--listen: v4 or dual".to_owned()),
+                };
+            }
             "--sas-auto-confirm" => a.auto_confirm = true,
             "--send" => {
                 // все следующие аргументы до очередного `--флага` это файлы
@@ -493,12 +505,21 @@ async fn main() -> ExitCode {
     };
     let allow = AllowSet::new();
     let filter: Arc<dyn PeerFilter> = allow.clone();
-    let Ok(transport) = QuinnTransport::bind(
-        SocketAddr::from(([0, 0, 0, 0], args.port)),
-        QuinnConfig::default(),
-        filter,
-    )
-    .map(Arc::new) else {
+    // `--listen v4`: прежний путь (`0.0.0.0:port`); `dual` (по умолчанию): двойное гнездо
+    // `[::]:port` с запасным путём «только IPv4» (этап 13г)
+    let bound = if args.listen_v4 {
+        QuinnTransport::bind(
+            SocketAddr::from(([0, 0, 0, 0], args.port)),
+            QuinnConfig::default(),
+            filter,
+        )
+        .ok()
+    } else {
+        bind_listen(args.port).ok().and_then(|(sock, _mode)| {
+            QuinnTransport::from_socket(sock, QuinnConfig::default(), filter).ok()
+        })
+    };
+    let Some(transport) = bound.map(Arc::new) else {
         eprintln!("node16: bind");
         return ExitCode::from(2);
     };
@@ -606,8 +627,13 @@ async fn main() -> ExitCode {
     let t0 = Instant::now();
     out!(
         t0,
-        "EVENT started listen_port={} stall_reknock={}",
+        "EVENT started listen_port={} listen={} stall_reknock={}",
         transport.local_addrs().first().map_or(0, SocketAddr::port),
+        match transport.listen_mode() {
+            ListenMode::DualStack => "dual",
+            ListenMode::V4Only => "v4",
+            ListenMode::V6Only => "v6",
+        },
         // F4 (повторный стук при застое) в транспорте появится отдельным шагом: пока выключен
         "off"
     );

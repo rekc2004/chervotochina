@@ -17,7 +17,7 @@ use chervo_transport::ManagedTransport;
 use tokio::time::Instant;
 
 use crate::engine::{ConnectError, Engine, EngineEvent, Inner, State};
-use crate::plan::{Candidate, Plan, dialable, family_ok};
+use crate::plan::{Candidate, Families, Plan, dialable, family_ok};
 
 /// Не больше находок за один такт (служба сама держит очередь не больше 64).
 const MAX_SIGHTINGS_PER_TICK: usize = 64;
@@ -128,17 +128,12 @@ where
     /// Адрес из маяка идёт первым в наборе друга. Тот же адрес в книге не дублируется: запись
     /// книги переезжает на первое место и сохраняет свою строгость (подтверждённый `Contact`
     /// остаётся нестрогим). Новый адрес строгий, без подсказки.
-    pub(crate) fn lan_first(
-        st: &State<T::Conn>,
-        pair: &PairId,
-        plan: &mut Plan,
-        local: &[SocketAddr],
-    ) {
+    pub(crate) fn lan_first(st: &State<T::Conn>, pair: &PairId, plan: &mut Plan, fam: &Families) {
         let Some((seen, _)) = st.lan_seen.get(pair) else {
             return;
         };
         let addr = normalize(SocketAddr::V4(*seen));
-        if !dialable(&addr) || !family_ok(&addr, local) {
+        if !dialable(&addr) || !family_ok(&addr, fam) {
             return;
         }
         let mut c = match plan.cands.iter().position(|c| c.addr == addr) {

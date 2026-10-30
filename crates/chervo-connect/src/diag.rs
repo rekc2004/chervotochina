@@ -8,7 +8,7 @@ use chervo_transport::ManagedTransport;
 use tokio::time::Instant;
 
 use crate::engine::{Inner, State};
-use crate::plan::only_unusable_v6;
+use crate::plan::{families_of, only_unusable_v6};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -126,7 +126,7 @@ where
                 NoDirectPath::NoKnownAddress
             }));
         }
-        if only_unusable_v6(&entries, local) {
+        if only_unusable_v6(&entries, &families_of(&st.own, local)) {
             return Some(Diagnosis::of(NoDirectPath::NoIpv6));
         }
         let seen = st
