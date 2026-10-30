@@ -847,6 +847,7 @@ dependencies = [
 name = "chervo-transport-quinn"
 version = "0.0.0"
 dependencies = [
+ "chervo-addr",
  "chervo-connect",
  "chervo-friends",
  "chervo-identity",
@@ -855,6 +856,7 @@ dependencies = [
  "quinn",
  "ring",
  "rustls",
+ "socket2",
  "tokio",
  "zeroize",
 ]

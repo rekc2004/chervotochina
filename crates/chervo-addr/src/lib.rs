@@ -27,7 +27,9 @@ pub use book::{
     SHORT_LIVED_TTL_SECS, confirmed_addrs, findability, from_invite, merge_update, note_contact,
     prune, usable, usable_entries,
 };
-pub use class::{AddrClass, classify, is_eui64, normalize, update_allowed};
+pub use class::{
+    AddrClass, classify, is_eui64, normalize, update_allowed, v6_egress_ok, v6_peer_ok,
+};
 pub use lan::{LanDiscovery, LanLocal, LanMode, LanSighting, LanStatus};
 pub use mapper::{MapReport, MapRequest, MapStatus, PortMapper};
 pub use own::{

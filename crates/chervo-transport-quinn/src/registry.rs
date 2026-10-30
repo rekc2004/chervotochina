@@ -137,7 +137,7 @@ impl Registry {
             .flat_map(|(pair, list)| {
                 list.iter()
                     .filter(|e| e.conn.close_reason().is_none())
-                    .map(|e| (*pair, e.conn.remote_address()))
+                    .map(|e| (*pair, crate::knock::canon(e.conn.remote_address())))
             })
             .collect()
     }
@@ -254,7 +254,7 @@ pub(crate) fn promote(
 /// Опрос `remote_address()` раз в `addr_poll` до закрытия; событие смены адреса; уборка записи.
 fn spawn_monitor(inner: &Arc<Inner>, conn: quinn::Connection, pair: PairId, id: u64) {
     let inner = inner.clone();
-    let mut last = conn.remote_address();
+    let mut last = crate::knock::canon(conn.remote_address());
     // закрепление адреса собеседника до закрытия (берётся синхронно, до конца `serve`);
     // при смене адреса перепинивается
     let mut pin = inner.knock.pin(last);
@@ -265,7 +265,7 @@ fn spawn_monitor(inner: &Arc<Inner>, conn: quinn::Connection, pair: PairId, id: 
             tokio::select! {
                 e = conn.closed() => break e,
                 _ = tick.tick() => {
-                    let now = conn.remote_address();
+                    let now = crate::knock::canon(conn.remote_address());
                     if now != last {
                         last = now;
                         pin = inner.knock.pin(now);

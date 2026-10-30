@@ -167,7 +167,7 @@ async fn serve(
     };
     // адрес, снятый сразу после QUIC-рукопожатия, до KK: ему доверяет `Contact`, а не позднему
     // `remote_address()`, который мог смениться миграцией пути
-    let established = conn.remote_address();
+    let established = crate::knock::canon(conn.remote_address());
     let result = timeout_at(
         deadline,
         callee_handshake(&inner, &conn, msg1_deadline, deadline),

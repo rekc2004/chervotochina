@@ -136,7 +136,7 @@ impl Connection for QuinnConn {
     }
 
     fn remote_addr(&self) -> SocketAddr {
-        self.conn.remote_address()
+        crate::knock::canon(self.conn.remote_address())
     }
 
     fn established_addr(&self) -> SocketAddr {

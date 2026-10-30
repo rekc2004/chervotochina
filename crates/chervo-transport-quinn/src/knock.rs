@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::future::poll_fn;
 use std::io::{self, IoSliceMut};
-use std::net::{IpAddr, SocketAddr, SocketAddrV6};
+use std::net::{SocketAddr, SocketAddrV6};
 use std::pin::Pin as StdPin;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -50,14 +50,20 @@ pub fn window_at(unix_ms: i64) -> u64 {
     ms / KNOCK_WINDOW_SECS.saturating_mul(1000)
 }
 
-/// Адрес источника в каноническом виде: v4-mapped как IPv4.
+/// Адрес источника в каноническом виде: v4-mapped как IPv4, у IPv6 `flowinfo` и `scope_id`
+/// равны нулю (`chervo_addr::normalize`).
 pub(crate) fn canon(a: SocketAddr) -> SocketAddr {
-    if let SocketAddr::V6(v6) = a
-        && let Some(v4) = v6.ip().to_ipv4_mapped()
-    {
-        return SocketAddr::new(IpAddr::V4(v4), v6.port());
+    chervo_addr::normalize(a)
+}
+
+/// Запись для quinn: `flowinfo` и `scope_id` источника IPv6 обнуляются (иначе `SocketAddrV6`
+/// одного собеседника сравнивался бы как разные адреса); вид v4-mapped сохраняется, потому что
+/// quinn на IPv6-гнезде работает именно с ним. IPv4 не меняется.
+fn zero_v6_extras(a: SocketAddr) -> SocketAddr {
+    match a {
+        SocketAddr::V6(v6) => SocketAddr::V6(SocketAddrV6::new(*v6.ip(), v6.port(), 0, 0)),
+        SocketAddr::V4(_) => a,
     }
-    a
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -764,6 +770,26 @@ impl KnockState {
                 continue;
             };
             let addr = canon(m.addr);
+            // Класс источника IPv6: O(1), без разбора и без поиска в таблице допуска.
+            if let SocketAddr::V6(v6) = addr
+                && !chervo_addr::v6_peer_ok(v6.ip())
+            {
+                Counters::bump(&self.counters.dropped_src_class);
+                continue;
+            }
+            // quinn получает адрес без `flowinfo` и `scope_id`.
+            if let Some(mm) = meta.get_mut(i) {
+                mm.addr = zero_v6_extras(m.addr);
+            }
+            if !self.required {
+                // без стука: записи идут в quinn после фильтра класса и переписывания адреса
+                if kept != i {
+                    bufs.swap(kept, i);
+                    meta.swap(kept, i);
+                }
+                kept += 1;
+                continue;
+            }
             let now = Instant::now();
             let gate = {
                 let mut adm = lock(&self.admit);
@@ -862,9 +888,6 @@ impl AsyncUdpSocket for KnockSocket {
         bufs: &mut [IoSliceMut<'_>],
         meta: &mut [RecvMeta],
     ) -> Poll<io::Result<usize>> {
-        if !self.state.required {
-            return self.inner.poll_recv(cx, bufs, meta);
-        }
         for _ in 0..MAX_FILTER_POLLS {
             match self.inner.poll_recv(cx, bufs, meta) {
                 Poll::Ready(Ok(n)) => {

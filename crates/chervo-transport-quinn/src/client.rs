@@ -17,7 +17,7 @@ use crate::knock::{Pin, canon};
 use crate::limits::Counters;
 use crate::registry::{Promoted, promote};
 use crate::tls::client_config;
-use crate::{Inner, SERVER_NAME};
+use crate::{Inner, ListenMode, SERVER_NAME};
 
 /// Предел одной попытки KK на установленном соединении гонки (ревью 13, L1).
 const KK_ATTEMPT_CAP: Duration = Duration::from_secs(3);
@@ -56,17 +56,20 @@ impl Drop for DialGuard {
 /// Кандидаты гонки: v4-mapped как IPv4, без семейства, чужого для гнезда, без повторов, не
 /// больше `max_race`, порядок приоритета сохраняется.
 fn candidates(inner: &Inner, addrs: &[SocketAddr]) -> Result<Vec<SocketAddr>, TransportError> {
-    let v4_endpoint = inner
+    inner
         .endpoint
         .local_addr()
-        .map_err(|_| TransportError::Io)?
-        .is_ipv4();
+        .map_err(|_| TransportError::Io)?;
+    let mode = *inner.mode.lock().unwrap_or_else(PoisonError::into_inner);
+    let v4_endpoint = mode == ListenMode::V4Only;
+    let v6_endpoint = mode == ListenMode::V6Only;
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for a in addrs {
         let a = canon(*a);
-        // IPv6 на IPv4-гнезде: `InvalidRemoteAddress`; IPv4 на IPv6-гнезде quinn отображает сам
-        if v4_endpoint && a.is_ipv6() {
+        // чужое семейство для гнезда пропускается: IPv6 на IPv4-гнезде (`InvalidRemoteAddress`) и
+        // IPv4 на гнезде только IPv6; на двойном гнезде IPv4 quinn отображает сам
+        if (v4_endpoint && a.is_ipv6()) || (v6_endpoint && a.is_ipv4()) {
             continue;
         }
         if out.len() >= inner.cfg.max_race {
@@ -286,7 +289,7 @@ async fn dial_one(
     };
     match outcome {
         Some(Ok(conn)) => Ok(Established {
-            addr: conn.remote_address(),
+            addr: crate::knock::canon(conn.remote_address()),
             conn,
             _pin: pin,
         }),

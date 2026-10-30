@@ -8,6 +8,7 @@
 )]
 
 mod attacks;
+mod dual;
 mod flood;
 mod fuzz;
 mod gate;

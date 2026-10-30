@@ -118,6 +118,19 @@ fn src_guard() {
         "try_send( должен быть в knock.rs"
     );
 
+    // этап 13г: `socket2` только в bind.rs; `IPV6_V6ONLY` снимается ровно в одном месте
+    for (name, s) in &srcs {
+        if name != "bind.rs" {
+            assert!(!s.contains("socket2"), "socket2 вне bind.rs: {name}");
+        }
+    }
+    assert!(
+        srcs.iter()
+            .any(|(n, s)| n == "bind.rs" && s.contains("socket2::")),
+        "socket2 должен использоваться в bind.rs"
+    );
+    assert_eq!(count(&srcs, "set_only_v6("), 1, "set_only_v6( ровно одно");
+
     // CLOSE_REFUSED: ровно два использования (не объявление и не комментарий), оба в conn.rs:
     // внутри fn refuse и внутри fn close_endpoint (закрытие гнезда при shutdown)
     let mut uses = Vec::new();

@@ -775,3 +775,96 @@ fn port_mapper_types_debug_redacted() {
     assert_eq!(format!("{rep:?}"), "MapReport(..)");
     assert_eq!(format!("{:?}", MapStatus::Refused(606)), "Refused(606)");
 }
+
+fn lan_ctx() -> PublishCtx {
+    PublishCtx {
+        include_lan: true,
+        path_source: None,
+    }
+}
+
+#[test]
+fn publishable_dual_listen_v4_and_v6() {
+    let mut o = OwnAddrs::new();
+    o.set_local(snap(
+        Some("8.8.4.4"),
+        Some("2606:4700::7"),
+        &["0.0.0.0:4000", "[::]:4000"],
+    ));
+    assert_eq!(
+        publish(&o),
+        vec![
+            (sa("8.8.4.4:4000"), false, false),
+            (sa("[2606:4700::7]:4000"), true, false)
+        ]
+    );
+}
+
+#[test]
+fn publishable_v6_eui64_never() {
+    for r in ["2606:4700::211:22ff:fe33:4455", "fd00::211:22ff:fe33:4455"] {
+        let mut o = OwnAddrs::new();
+        o.set_local(snap(
+            Some("8.8.4.4"),
+            Some(r),
+            &["0.0.0.0:4000", "[::]:4000"],
+        ));
+        assert_eq!(publish(&o), vec![(sa("8.8.4.4:4000"), false, false)], "{r}");
+        assert_eq!(
+            flags(&o.publishable(lan_ctx(), NOW))
+                .iter()
+                .filter(|(a, _, _)| a.is_ipv6())
+                .count(),
+            0,
+            "{r}"
+        );
+    }
+}
+
+#[test]
+fn publishable_v6_reserved_route_never() {
+    for r in [
+        // Teredo, 6to4, NAT64, документация, link-local, loopback
+        "2001:0:4136:e378::1",
+        "2002:0102:0304::1",
+        "64:ff9b::808:808",
+        "2001:db8::1",
+        "3fff::1",
+        "fe80::1",
+        "::1",
+    ] {
+        let mut o = OwnAddrs::new();
+        o.set_local(snap(None, Some(r), &["0.0.0.0:4000", "[::]:4000"]));
+        assert!(o.publishable(lan_ctx(), NOW).is_empty(), "{r}");
+        assert!(publish(&o).is_empty(), "{r}");
+    }
+}
+
+#[test]
+fn publishable_v4_only_listen_no_v6() {
+    let mut o = OwnAddrs::new();
+    o.set_local(snap(
+        Some("8.8.4.4"),
+        Some("2606:4700::7"),
+        &["0.0.0.0:4000"],
+    ));
+    assert_eq!(publish(&o), vec![(sa("8.8.4.4:4000"), false, false)]);
+}
+
+#[test]
+fn publishable_path_source_ula_on_dual() {
+    let mut o = OwnAddrs::new();
+    o.set_local(snap(
+        Some("192.168.1.2"),
+        Some("fd00::7"),
+        &["0.0.0.0:4000", "[::]:4000"],
+    ));
+    let set = o.publishable(
+        PublishCtx {
+            include_lan: false,
+            path_source: Some("fd00::7".parse().unwrap()),
+        },
+        NOW,
+    );
+    assert_eq!(flags(&set), vec![(sa("[fd00::7]:4000"), true, false)]);
+}

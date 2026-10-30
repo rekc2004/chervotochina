@@ -1,12 +1,14 @@
 //! Таблицы классификации: первый и последний адрес каждого диапазона и обе соседние точки.
 
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV6};
 
 use chervo_addr::AddrClass::{
     Benchmark, Broadcast, Documentation, Global, LinkLocal, Loopback, Multicast, Private, Reserved,
     Shared, Unspecified, V4Mapped,
 };
-use chervo_addr::{AddrClass, classify, is_eui64, normalize, update_allowed};
+use chervo_addr::{
+    AddrClass, classify, is_eui64, normalize, update_allowed, v6_egress_ok, v6_peer_ok,
+};
 
 fn ip(s: &str) -> IpAddr {
     s.parse().unwrap()
@@ -220,5 +222,163 @@ fn update_allowed_only_global_and_private() {
         "ff02::1",
     ] {
         assert!(!update_allowed(ip(s)), "{s}");
+    }
+}
+
+fn v6(s: &str) -> Ipv6Addr {
+    s.parse().unwrap()
+}
+
+/// Факт, на который опирается канон адреса: `SocketAddrV6` сравнивается по всем четырём полям.
+#[test]
+fn std_v6_eq_includes_flowinfo() {
+    let ip = v6("2606:4700::1");
+    let a = SocketAddr::V6(SocketAddrV6::new(ip, 443, 0, 0));
+    let b = SocketAddr::V6(SocketAddrV6::new(ip, 443, 7, 0));
+    let c = SocketAddr::V6(SocketAddrV6::new(ip, 443, 0, 3));
+    assert_ne!(a, b);
+    assert_ne!(a, c);
+    assert_eq!(a, SocketAddr::V6(SocketAddrV6::new(ip, 443, 0, 0)));
+}
+
+#[test]
+fn normalize_v6_zeroes_flowinfo_and_scope() {
+    let ip = v6("2606:4700::1");
+    let dirty = SocketAddr::V6(SocketAddrV6::new(ip, 443, 7, 3));
+    let clean = SocketAddr::V6(SocketAddrV6::new(ip, 443, 0, 0));
+    let n = normalize(dirty);
+    assert_eq!(n, clean);
+    let SocketAddr::V6(n6) = n else {
+        panic!("не IPv6")
+    };
+    assert_eq!((n6.flowinfo(), n6.scope_id()), (0, 0));
+    // link-local со scope id тоже обнуляется (набирать его всё равно нельзя)
+    let ll = SocketAddr::V6(SocketAddrV6::new(v6("fe80::1"), 5, 9, 3));
+    assert_eq!(
+        normalize(ll),
+        SocketAddr::V6(SocketAddrV6::new(v6("fe80::1"), 5, 0, 0))
+    );
+}
+
+#[test]
+fn normalize_v4_mapped_to_v4_keeps_port() {
+    let m = SocketAddr::V6(SocketAddrV6::new(v6("::ffff:1.2.3.4"), 9999, 7, 3));
+    assert_eq!(normalize(m), "1.2.3.4:9999".parse::<SocketAddr>().unwrap());
+}
+
+fn xorshift(s: &mut u64) -> u64 {
+    *s ^= *s << 13;
+    *s ^= *s >> 7;
+    *s ^= *s << 17;
+    *s
+}
+
+#[test]
+fn normalize_idempotent() {
+    let mut s = 0x9e37_79b9_7f4a_7c15u64;
+    for i in 0..10_000u32 {
+        let mut o = [0u8; 16];
+        for ch in o.chunks_mut(8) {
+            ch.copy_from_slice(&xorshift(&mut s).to_le_bytes());
+        }
+        // каждый пятый: v4-mapped
+        if i % 5 == 0 {
+            o[..10].fill(0);
+            o[10] = 0xff;
+            o[11] = 0xff;
+        }
+        let r = xorshift(&mut s);
+        let a = if i % 7 == 0 {
+            SocketAddr::new(IpAddr::from([o[0], o[1], o[2], o[3]]), r as u16)
+        } else {
+            SocketAddr::V6(SocketAddrV6::new(
+                Ipv6Addr::from(o),
+                r as u16,
+                (r >> 16) as u32,
+                (r >> 40) as u32,
+            ))
+        };
+        let once = normalize(a);
+        assert_eq!(normalize(once), once);
+        if let SocketAddr::V6(v) = once {
+            assert_eq!((v.flowinfo(), v.scope_id()), (0, 0));
+            assert!(v.ip().to_ipv4_mapped().is_none());
+        }
+    }
+}
+
+#[test]
+fn v6_peer_ok_table() {
+    for ok in [
+        "2606:4700::1",
+        "2000::1",
+        "3ffe::1",
+        // EUI-64 как адрес друга принимается
+        "2606:4700::211:22ff:fe33:4455",
+        // ULA
+        "fc00::1",
+        "fd00::1",
+        "::1",
+    ] {
+        assert!(v6_peer_ok(&v6(ok)), "{ok}");
+    }
+    for bad in [
+        // link-local, site-local
+        "fe80::1",
+        "febf::1",
+        "fec0::1",
+        // Teredo и всё 2001::/23, 6to4
+        "2001::1",
+        "2001:0:4136:e378::1",
+        "2001:1ff::1",
+        "2002::1",
+        "2002:0102:0304::1",
+        // NAT64
+        "64:ff9b::1",
+        "64:ff9b::808:808",
+        "64:ff9b:1::1",
+        // v4-compatible, неуказанный, v4-mapped
+        "::1.2.3.4",
+        "::",
+        "::ffff:1.2.3.4",
+        // 100::/64
+        "100::1",
+        // документация
+        "2001:db8::1",
+        "3fff::1",
+        "3fff:fff:ffff::1",
+        // multicast
+        "ff02::1",
+        "ff00::1",
+        // вне 2000::/3
+        "1000::1",
+        "4000::1",
+        "8000::1",
+        "e000::1",
+    ] {
+        assert!(!v6_peer_ok(&v6(bad)), "{bad}");
+    }
+}
+
+#[test]
+fn v6_egress_ok_table() {
+    assert!(!v6_egress_ok(None));
+    assert!(v6_egress_ok(Some(v6("2606:4700::7"))));
+    // ULA за NAT66
+    assert!(v6_egress_ok(Some(v6("fd00::7"))));
+    // EUI-64 как свой исходящий источник допускается (решение владельца В1 = а)
+    assert!(v6_egress_ok(Some(v6("2606:4700::211:22ff:fe33:4455"))));
+    for bad in [
+        "fe80::1",
+        "2001:0:4136:e378::1",
+        "2002:0102:0304::1",
+        "2001:db8::1",
+        "3fff::1",
+        "64:ff9b::1",
+        "::1",
+        "::",
+        "ff02::1",
+    ] {
+        assert!(!v6_egress_ok(Some(v6(bad))), "{bad}");
     }
 }

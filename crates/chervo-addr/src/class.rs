@@ -4,7 +4,7 @@
 //! дополнения); у каждого диапазона указан RFC, чтобы сверить таблицу с реестром.
 //! Побеждает первое совпадение в порядке записи; порядок задан спецификацией этапа 12.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -151,15 +151,30 @@ pub fn is_eui64(ip: &Ipv6Addr) -> bool {
     o.get(11) == Some(&0xff) && o.get(12) == Some(&0xfe)
 }
 
-/// IPv6 вида `::ffff:a.b.c.d` становится IPv4 с тем же портом; остальное без изменений.
+/// Канонический вид адреса: IPv6 вида `::ffff:a.b.c.d` становится IPv4 с тем же портом;
+/// у любого другого IPv6 `flowinfo` и `scope_id` обнуляются (сравнение `SocketAddrV6` идёт по
+/// всем четырём полям); IPv4 без изменений. Идемпотентна.
 pub fn normalize(a: SocketAddr) -> SocketAddr {
     match a {
         SocketAddr::V6(v6) => match v6.ip().to_ipv4_mapped() {
             Some(v4) => SocketAddr::new(IpAddr::V4(v4), v6.port()),
-            None => a,
+            None => SocketAddr::V6(SocketAddrV6::new(*v6.ip(), v6.port(), 0, 0)),
         },
         SocketAddr::V4(_) => a,
     }
+}
+
+/// Допустимый адрес IPv6 собеседника (источник пакета и цель набора): глобальный, ULA или
+/// `::1`. Link-local, Teredo, 6to4, NAT64, документация, multicast, `::` и прочее не
+/// принимается и не набирается (третьи стороны и неоднозначные адреса).
+pub fn v6_peer_ok(ip: &Ipv6Addr) -> bool {
+    matches!(classify(IpAddr::V6(*ip)), Global | Private | Loopback)
+}
+
+/// Есть ли у нас собственный выход в IPv6: маршрутный источник существует и он глобальный или
+/// ULA (за NAT66). Teredo, 6to4, link-local, документация и отсутствие маршрута не считаются.
+pub fn v6_egress_ok(route_v6: Option<Ipv6Addr>) -> bool {
+    route_v6.is_some_and(|ip| matches!(classify(IpAddr::V6(ip)), Global | Private))
 }
 
 /// В токене обновления допустимы только глобальные и частные (RFC 1918, ULA) адреса.

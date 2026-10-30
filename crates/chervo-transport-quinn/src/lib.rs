@@ -13,6 +13,7 @@
     clippy::todo
 )]
 
+mod bind;
 mod client;
 mod conn;
 #[cfg(any(test, feature = "fuzzing"))]
@@ -28,7 +29,7 @@ mod tests;
 
 use std::fmt;
 use std::future::Future;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -39,6 +40,7 @@ use chervo_transport::{
 use quinn::Runtime;
 use tokio::sync::{Semaphore, broadcast, mpsc};
 
+pub use bind::{BindError, ListenMode, bind_listen};
 pub use chervo_transport::{DuplicatePairError, TransportEvent};
 pub use conn::{QuinnConn, QuinnRecv, QuinnSend};
 /// Этап 17, B6/C04, S1 L6: только для фаззинга (`fuzz/`, вне рабочего пространства) и тестов,
@@ -250,6 +252,8 @@ pub struct TransportStats {
     pub knock_skewed: u64,
     /// Принятые гнездом записи недопущенных адресов (не переданы quinn).
     pub dropped_unadmitted: u64,
+    /// Записи с источником IPv6 недопустимого класса (выброшены до таблицы допуска).
+    pub dropped_src_class: u64,
     /// Переполнение таблицы допуска или кэша повторов.
     pub admit_full: u64,
     /// Подтверждённый `Incoming` без допуска или сверх числа попыток.
@@ -287,6 +291,8 @@ pub(crate) struct Inner {
     pub(crate) cfg: QuinnConfig,
     pub(crate) filter: Arc<dyn PeerFilter>,
     pub(crate) endpoint: quinn::Endpoint,
+    /// Семейства гнезда (определяются по факту в `from_socket` и `rebind`).
+    pub(crate) mode: Mutex<ListenMode>,
     pub(crate) peers: Mutex<Arc<Vec<KxPeer>>>,
     /// Крюк тестов гонки: пауза между концом KK и `promote`.
     #[cfg(test)]
@@ -389,6 +395,7 @@ impl QuinnTransport {
             return Err(TransportError::Io);
         }
         sock.set_nonblocking(true).map_err(|_| TransportError::Io)?;
+        let mode = bind::mode_of(&sock);
         let base = tls::base_server_config(&cfg).map_err(|_| TransportError::Io)?;
         let counters = Arc::new(Counters::default());
         let (events, _) = broadcast::channel(64);
@@ -435,6 +442,7 @@ impl QuinnTransport {
             cfg,
             filter,
             endpoint,
+            mode: Mutex::new(mode),
             events,
             counters,
             knock,
@@ -451,6 +459,15 @@ impl QuinnTransport {
             }
         });
         Ok(Self { inner })
+    }
+
+    /// Семейства гнезда, определённые по факту при создании или последнем `rebind`.
+    pub fn listen_mode(&self) -> ListenMode {
+        *self
+            .inner
+            .mode
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Атомарная замена набора пар. Ёмкость бюджета перебора не меньше числа пар
@@ -507,6 +524,7 @@ impl QuinnTransport {
 
     pub fn rebind(&self, sock: std::net::UdpSocket) -> Result<(), TransportError> {
         sock.set_nonblocking(true).map_err(|_| TransportError::Io)?;
+        let mode = bind::mode_of(&sock);
         let raw = quinn::TokioRuntime
             .wrap_udp_socket(sock)
             .map_err(|_| TransportError::Io)?;
@@ -515,6 +533,11 @@ impl QuinnTransport {
             .endpoint
             .rebind_abstract(wrapped)
             .map_err(|_| TransportError::Io)?;
+        *self
+            .inner
+            .mode
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = mode;
         self.inner.knock.set_tx(raw);
         client::reknock_live(&self.inner);
         Ok(())
@@ -593,8 +616,18 @@ impl ManagedTransport for QuinnTransport {
 impl Transport for QuinnTransport {
     type Conn = QuinnConn;
 
+    /// Семейства, которыми пользуется транспорт: у двойного гнезда `[0.0.0.0:p, [::]:p]`.
     fn local_addrs(&self) -> Vec<SocketAddr> {
-        self.inner.endpoint.local_addr().into_iter().collect()
+        let Ok(local) = self.inner.endpoint.local_addr() else {
+            return Vec::new();
+        };
+        if self.listen_mode() == ListenMode::DualStack {
+            return vec![
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), local.port()),
+                SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), local.port()),
+            ];
+        }
+        vec![local]
     }
 
     fn connect(

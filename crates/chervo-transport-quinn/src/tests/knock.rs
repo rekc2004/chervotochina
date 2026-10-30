@@ -506,7 +506,7 @@ async fn rebind_reknock() {
 }
 
 /// Один обмен «ping»/«pong» по живому соединению; каждая операция ограничена `limit`.
-async fn ping_pong(
+pub(super) async fn ping_pong(
     conn_a: &crate::conn::QuinnConn,
     conn_b: &crate::conn::QuinnConn,
     limit: Duration,
