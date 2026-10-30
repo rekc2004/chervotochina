@@ -37,6 +37,7 @@ use crate::limiter::{Limiter, add_sat};
 use crate::plan::{
     Candidate, PathKind, families_of, friend_plan_confirmed, guest_plan, path_kind, select,
 };
+use crate::routes::{RouteCache, RouteMap, route_snapshot};
 
 const EVENTS_CAPACITY: usize = 256;
 
@@ -251,6 +252,8 @@ pub(crate) struct State<C> {
     pub(crate) lan_seen: HashMap<PairId, (SocketAddrV4, Instant)>,
     /// 13в: последнее известное состояние службы поиска (для события «изменилось»).
     pub(crate) lan_status_last: Option<LanStatus>,
+    /// 13г: ответы пробы маршрута к IPv6-целям (пробы идут вне замка, см. `routes.rs`).
+    pub(crate) route_cache: RouteCache,
 }
 
 /// Через сколько `tick` повторяет неудавшуюся публикацию набора пар.
@@ -673,11 +676,12 @@ where
         &self,
         st: &mut State<T::Conn>,
         local: &[SocketAddr],
+        routes: &RouteMap,
         now: Instant,
         unix: u64,
         out: &mut Vec<(PairId, Vec<Candidate>)>,
     ) {
-        let fam = families_of(&st.own, local, &*self.probe);
+        let fam = families_of(&st.own, local, routes);
         let mut pairs: Vec<(PairId, Option<Instant>)> = Vec::new();
         for f in st.book.friends() {
             if st.book.is_active(&f.pair) && !st.key_problems.contains_key(&f.pair) {
@@ -788,8 +792,11 @@ where
                 self.on_connection(conn);
             }
             Err(e) => {
+                // пробы маршрута для диагноза идут до взятия замка состояния (16а П2а)
+                let fresh = self.probe_routes(Some(pair), now, unix);
                 {
                     let mut st = self.lock();
+                    let routes = route_snapshot(&mut st, fresh, now);
                     st.inflight.remove(&pair);
                     let fast = self.fast_active(&st, &pair, now);
                     let plain: Vec<SocketAddr> =
@@ -813,7 +820,15 @@ where
                         events.push(EngineEvent::Internal);
                     }
                     if reached {
-                        self.evaluate_unreachable(&mut st, &pair, &local, now, unix, &mut events);
+                        self.evaluate_unreachable(
+                            &mut st,
+                            &pair,
+                            &local,
+                            &routes,
+                            now,
+                            unix,
+                            &mut events,
+                        );
                     }
                 }
             }
@@ -824,11 +839,13 @@ where
     }
 
     /// Диагноз пары; `Unreachable` выдаётся один раз на смену причины.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn evaluate_unreachable(
         &self,
         st: &mut State<T::Conn>,
         pair: &PairId,
         local: &[SocketAddr],
+        routes: &RouteMap,
         now: Instant,
         unix: u64,
         events: &mut Vec<EngineEvent>,
@@ -836,7 +853,7 @@ where
         if st.book.get(pair).is_none() {
             return;
         }
-        let Some(d) = self.diagnose_locked(st, pair, local, now, unix) else {
+        let Some(d) = self.diagnose_locked(st, pair, local, routes, now, unix) else {
             return;
         };
         let rt = st.friends.entry(*pair).or_default();
@@ -854,6 +871,7 @@ where
         &self,
         st: &mut State<T::Conn>,
         local: &[SocketAddr],
+        routes: &RouteMap,
         now: Instant,
         unix: u64,
         events: &mut Vec<EngineEvent>,
@@ -879,7 +897,7 @@ where
             if st.live.contains_key(&pair) || !st.book.is_active(&pair) {
                 continue;
             }
-            self.evaluate_unreachable(st, &pair, local, now, unix, events);
+            self.evaluate_unreachable(st, &pair, local, routes, now, unix, events);
         }
     }
 
@@ -891,18 +909,21 @@ where
         let mut dials: Vec<(PairId, Vec<Candidate>)> = Vec::new();
         let mut sends: Vec<(PairId, T::Conn)> = Vec::new();
         let announce;
+        // пробы маршрута к IPv6-целям идут до взятия замка состояния (16а П2а)
+        let fresh = self.probe_routes(None, now, unix);
         {
             let mut st = self.lock();
+            let routes = route_snapshot(&mut st, fresh, now);
             if st.publish_retry_at.is_some_and(|t| t <= now) {
                 let _ = self.publish(&mut st);
             }
-            self.fast_window_ends(&mut st, &local, now, unix, &mut events);
+            self.fast_window_ends(&mut st, &local, &routes, now, unix, &mut events);
             self.retry_deferred(&mut st, now, unix);
             self.lan_collect(&mut st, now, &mut events);
             // F2: до `collect_sends`, чтобы ADDR_INFO ушёл этим же тактом
             announce = self.check_external(&mut st, now, unix);
             self.collect_sends(&mut st, now, &mut sends);
-            self.plan_dials(&mut st, &local, now, unix, &mut dials);
+            self.plan_dials(&mut st, &local, &routes, now, unix, &mut dials);
         }
         if announce {
             self.transport.reknock();
@@ -1141,6 +1162,7 @@ where
             publish_internal_reported: false,
             lan_seen: HashMap::new(),
             lan_status_last: None,
+            route_cache: RouteCache::default(),
         };
         let inner = Arc::new(Inner {
             transport,
@@ -1223,14 +1245,29 @@ where
         let now = Instant::now();
         let unix = self.inner.clock.now_unix();
         let local = self.inner.transport.local_addrs();
-        let st = self.inner.lock();
+        {
+            let st = self.inner.lock();
+            if st.book.get(pair).is_none() {
+                return Err(ConnectError::UnknownPair);
+            }
+            if !st.book.is_active(pair) {
+                return Err(ConnectError::NotActive);
+            }
+        }
+        // пробы маршрута вне замка (16а П2а); книга могла измениться между замками: проверка
+        // пары повторяется ниже
+        let fresh = self.inner.probe_routes(Some(*pair), now, unix);
+        let mut st = self.inner.lock();
         if st.book.get(pair).is_none() {
             return Err(ConnectError::UnknownPair);
         }
         if !st.book.is_active(pair) {
             return Err(ConnectError::NotActive);
         }
-        Ok(self.inner.diagnose_locked(&st, pair, &local, now, unix))
+        let routes = route_snapshot(&mut st, fresh, now);
+        Ok(self
+            .inner
+            .diagnose_locked(&st, pair, &local, &routes, now, unix))
     }
 
     pub fn nat_view(&self) -> NatView {

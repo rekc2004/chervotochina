@@ -27,6 +27,7 @@ mod invite;
 mod lan;
 mod limiter;
 mod plan;
+mod routes;
 mod texts;
 mod watch;
 

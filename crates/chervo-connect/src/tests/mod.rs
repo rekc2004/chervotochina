@@ -22,6 +22,7 @@ mod limiter;
 mod manual_token;
 mod plan;
 mod publish;
+mod routes;
 mod src_guard;
 mod texts;
 mod watch;

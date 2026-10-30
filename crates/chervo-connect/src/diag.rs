@@ -9,6 +9,7 @@ use tokio::time::Instant;
 
 use crate::engine::{Inner, State};
 use crate::plan::{families_of, only_unusable_v6};
+use crate::routes::RouteMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -107,6 +108,7 @@ where
         st: &State<T::Conn>,
         pair: &PairId,
         local: &[SocketAddr],
+        routes: &RouteMap,
         now: Instant,
         unix: u64,
     ) -> Option<Diagnosis> {
@@ -126,7 +128,7 @@ where
                 NoDirectPath::NoKnownAddress
             }));
         }
-        if only_unusable_v6(&entries, &families_of(&st.own, local, &*self.probe)) {
+        if only_unusable_v6(&entries, &families_of(&st.own, local, routes)) {
             return Some(Diagnosis::of(NoDirectPath::NoIpv6));
         }
         let seen = st

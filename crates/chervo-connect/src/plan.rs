@@ -1,7 +1,6 @@
 //! Выбор пути (U7): какие адреса пробовать и в каком порядке. Адреса берутся только из книги
 //! друга (`usable_known`) или из токена приглашения; ничего другого сюда не попадает.
 
-use std::fmt;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
 use chervo_addr::{
@@ -9,8 +8,8 @@ use chervo_addr::{
 };
 use tokio::time::Instant;
 
-use crate::clock::RouteProbe;
 use crate::limiter::Limiter;
+use crate::routes::RouteMap;
 
 /// Сколько адресов уходит в один вызов `connect`.
 pub(crate) const MAX_DIAL_ADDRS: usize = 8;
@@ -64,38 +63,28 @@ pub(crate) fn dialable(addr: &SocketAddr) -> bool {
 }
 
 /// Семейства, которыми умеет пользоваться транспорт, наличие собственного выхода в IPv6 и
-/// источник маршрута к цели (`RouteProbe::source_for`, пакетов не шлёт).
-#[derive(Clone, Copy)]
+/// готовые ответы пробы маршрута к целям (`RouteMap`, пробы шли вне замка).
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct Families<'a> {
     pub(crate) v4: bool,
     pub(crate) v6: bool,
     /// Есть маршрутный источник IPv6, глобальный или ULA (`v6_egress_ok`).
     pub(crate) v6_egress: bool,
-    /// Откуда берётся адрес-источник маршрута к IPv6-цели (в движке проба движка, в тестах оракул).
-    route: &'a dyn RouteProbe,
+    /// Адрес-источник маршрута к IPv6-цели; цели нет в карте: не набирать.
+    routes: &'a RouteMap,
 }
 
-impl fmt::Debug for Families<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Families")
-            .field("v4", &self.v4)
-            .field("v6", &self.v6)
-            .field("v6_egress", &self.v6_egress)
-            .finish_non_exhaustive()
-    }
-}
-
-/// Семейства по адресам прослушивания транспорта, маршрутному источнику IPv6 и пробе маршрута.
+/// Семейства по адресам прослушивания транспорта, маршрутному источнику IPv6 и карте маршрутов.
 pub(crate) fn families<'a>(
     local: &[SocketAddr],
     route_v6: Option<Ipv6Addr>,
-    route: &'a dyn RouteProbe,
+    routes: &'a RouteMap,
 ) -> Families<'a> {
     Families {
         v4: local.iter().any(SocketAddr::is_ipv4),
         v6: local.iter().any(SocketAddr::is_ipv6),
         v6_egress: v6_egress_ok(route_v6),
-        route,
+        routes,
     }
 }
 
@@ -104,15 +93,15 @@ pub(crate) fn families<'a>(
 pub(crate) fn families_of<'a>(
     own: &OwnAddrs,
     local: &[SocketAddr],
-    route: &'a dyn RouteProbe,
+    routes: &'a RouteMap,
 ) -> Families<'a> {
-    families(local, own.local().and_then(|l| l.route.v6), route)
+    families(local, own.local().and_then(|l| l.route.v6), routes)
 }
 
 /// Источник маршрута ОС именно к этой цели глобальный или ULA (Teredo, 6to4, link-local и
 /// отсутствие маршрута: нет). Иначе ULA-цель ушла бы через туннель третьей стороны.
 fn route_source_ok(addr: &SocketAddr, fam: &Families<'_>) -> bool {
-    match fam.route.source_for(*addr) {
+    match fam.routes.get(addr).copied() {
         Some(IpAddr::V6(src)) => v6_egress_ok(Some(src)),
         _ => false,
     }

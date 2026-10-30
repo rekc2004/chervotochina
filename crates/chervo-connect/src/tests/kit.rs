@@ -226,31 +226,52 @@ impl RouteProbe for FakeProbe {
     }
 }
 
-/// Оракул маршрута для тестов плана: один и тот же источник к любой цели, кроме петли (как
-/// настоящая проба: к петле `None`).
-pub struct FixedRoute(pub Option<IpAddr>);
+/// IPv6-цели, которые используют тесты плана (хорошие и враждебные; `::1` не нужен: маршрута к
+/// петле не требуется).
+const ROUTED_V6: &[&str] = &[
+    "[2606:4700::1]:1000",
+    "[2606:4700::9]:1000",
+    "[2606:4700::1]:4000",
+    "[2001:4860::1]:1000",
+    "[fd12:3456:789a::7]:1000",
+    "[::1.2.3.4]:1000",
+    "[::]:1000",
+    "[fe80::1]:1000",
+    "[fec0::1]:1000",
+    "[100::1]:1000",
+    "[ff02::1]:1000",
+    "[ff0e::1]:1000",
+    "[64:ff9b::1.2.3.4]:1000",
+    "[64:ff9b:1::1]:1000",
+    "[2002::1]:1000",
+    "[2001::1]:1000",
+    "[2001:0:4136:e378::1]:1000",
+    "[2001:db8::1]:1000",
+    "[3fff::1]:1000",
+    "[4000::1]:1000",
+];
 
-impl RouteProbe for FixedRoute {
-    fn probe(&self) -> RouteSources {
-        RouteSources::default()
-    }
-
-    fn source_for(&self, target: SocketAddr) -> Option<IpAddr> {
-        if target.ip().is_loopback() {
-            None
-        } else {
-            self.0
+/// Карта маршрутов для тестов плана: ко всем целям `ROUTED_V6` один источник `src` (`None`: ни к
+/// одной нет маршрута). Карта «утекает» (`'static`): тесты короткие.
+pub fn routes_with(src: Option<&str>) -> &'static crate::routes::RouteMap {
+    let mut m = crate::routes::RouteMap::new();
+    if let Some(s) = src {
+        for t in ROUTED_V6 {
+            m.insert(addr(t), s.parse().unwrap());
         }
     }
+    Box::leak(Box::new(m))
 }
 
 /// Глобальный источник IPv6 к любой цели (выход есть).
-pub static ROUTE_GLOBAL: FixedRoute = FixedRoute(Some(IpAddr::V6(std::net::Ipv6Addr::new(
-    0x2a00, 0x1450, 0, 0, 0, 0, 0, 5,
-))));
+pub fn routes_global() -> &'static crate::routes::RouteMap {
+    routes_with(Some("2a00:1450::5"))
+}
 
-/// Маршрута к цели нет.
-pub static ROUTE_NONE: FixedRoute = FixedRoute(None);
+/// Маршрута ни к одной цели нет.
+pub fn routes_none() -> &'static crate::routes::RouteMap {
+    routes_with(None)
+}
 
 // --------------------------------------------------------------------- потоки
 
