@@ -109,3 +109,27 @@ async fn route_no_answer_not_dialled() {
         "{calls:?}"
     );
 }
+
+/// Переполнение кэша посреди прохода не выбрасывает ответы этого прохода из карты; `clear`
+/// забывает всё (ревью 13г, Low 1 и Low 2).
+#[test]
+fn route_cache_merge_keeps_pass_answers_and_clear_forgets() {
+    use crate::routes::RouteCache;
+    use std::net::{IpAddr, Ipv6Addr};
+    use tokio::time::Instant;
+
+    let now = Instant::now();
+    let src = IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1));
+    let target =
+        |i: u16| SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0xfd00, 1, 0, 0, 0, 0, 0, i)), 9);
+    let mut cache = RouteCache::default();
+    let old: Vec<_> = (0..250).map(|i| (target(i), Some(src))).collect();
+    assert_eq!(cache.merge(old, now).len(), 250);
+    let pass: Vec<_> = (1000..1016).map(|i| (target(i), Some(src))).collect();
+    let map = cache.merge(pass, now);
+    for i in 1000..1016 {
+        assert_eq!(map.get(&target(i)), Some(&src), "ответ прохода {i} потерян");
+    }
+    cache.clear();
+    assert!(cache.merge(Vec::new(), now).is_empty());
+}

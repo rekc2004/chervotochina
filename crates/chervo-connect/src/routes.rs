@@ -57,6 +57,26 @@ impl RouteCache {
         self.map.insert(a, (src, now));
     }
 
+    /// Забыть все ответы: свои адреса сменились, старый маршрут мог исчезнуть (ревью 13г, Low 1).
+    pub(crate) fn clear(&mut self) {
+        self.map.clear();
+    }
+
+    /// Положить ответы прохода и вернуть снимок свежих. Ответы этого прохода входят в снимок,
+    /// даже если переполнение кэша стёрло их посреди прохода (ревью 13г, Low 2).
+    pub(crate) fn merge(
+        &mut self,
+        fresh: Vec<(SocketAddr, Option<IpAddr>)>,
+        now: Instant,
+    ) -> RouteMap {
+        for (a, src) in &fresh {
+            self.put(*a, *src, now);
+        }
+        let mut snap = self.snapshot(now);
+        snap.extend(fresh.into_iter().filter_map(|(a, s)| s.map(|s| (a, s))));
+        snap
+    }
+
     fn snapshot(&self, now: Instant) -> RouteMap {
         self.map
             .iter()
@@ -133,10 +153,7 @@ pub(crate) fn route_snapshot<C>(
     fresh: Vec<(SocketAddr, Option<IpAddr>)>,
     now: Instant,
 ) -> RouteMap {
-    for (a, src) in fresh {
-        st.route_cache.put(a, src, now);
-    }
-    st.route_cache.snapshot(now)
+    st.route_cache.merge(fresh, now)
 }
 
 impl<T, S> Inner<T, S>

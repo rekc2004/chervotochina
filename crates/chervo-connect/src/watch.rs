@@ -74,6 +74,7 @@ where
         {
             let mut st = self.lock();
             st.limiter.reset_all(now);
+            st.route_cache.clear();
             self.start_fast_global(&mut st, now);
             let State { live, friends, .. } = &mut *st;
             for pair in live.keys() {
