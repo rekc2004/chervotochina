@@ -10,6 +10,7 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 template="$root/packaging/macos/Info.plist"
+icns="$root/packaging/icons/chervotochina.icns"  # stage 19e: Contents/Resources/chervotochina.icns
 
 valid_version() { [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
 valid_label() { [[ "$1" == macos-aarch64 || "$1" == macos-x86_64 ]]; }
@@ -34,6 +35,9 @@ if [[ "${1:-}" == "--self-test" ]]; then
     if valid_label "$l"; then echo "self-test: FAILED (accepted label '$l')" >&2; fail=1; fi
   done
   [[ -f "$template" ]] || { echo "self-test: FAILED (no template $template)" >&2; exit 1; }
+  # Stage 19e: the icon file exists with the ICNS magic, and the template names it (without the extension).
+  [[ -f "$icns" ]] || { echo "self-test: FAILED (no icon file $icns)" >&2; fail=1; }
+  [[ "$(head -c 4 "$icns" 2>/dev/null)" == icns ]] || { echo "self-test: FAILED (icon file is not ICNS)" >&2; fail=1; }
   # The template has exactly two @VERSION@ and no other '@'.
   raw="$(cat "$template")"
   stripped="${raw//@VERSION@/}"
@@ -43,7 +47,9 @@ if [[ "${1:-}" == "--self-test" ]]; then
   out="$(render_plist 1.2.3)"
   [[ "$out" != *@* ]] || { echo "self-test: FAILED (label left after substitution)" >&2; fail=1; }
   [[ "$(grep -c '<string>1.2.3</string>' <<<"$out")" == 2 ]] || { echo "self-test: FAILED (version not substituted twice)" >&2; fail=1; }
-  for k in '<key>CFBundleExecutable</key>' '<string>chervotochina</string>' '<string>io.github.rekc2004.chervotochina</string>' \
+  [[ "$(grep -A1 -F '<key>CFBundleIconFile</key>' <<<"$out" | tail -n 1)" == *'<string>chervotochina</string>'* ]] ||
+    { echo "self-test: FAILED (CFBundleIconFile is not chervotochina)" >&2; fail=1; }
+  for k in '<key>CFBundleExecutable</key>' '<key>CFBundleIconFile</key>' '<string>chervotochina</string>' '<string>io.github.rekc2004.chervotochina</string>' \
            '<string>APPL</string>' '<string>11.0</string>' '<key>NSHighResolutionCapable</key>'; do
     grep -qF -- "$k" <<<"$out" || { echo "self-test: FAILED (missing in plist: $k)" >&2; fail=1; }
   done
@@ -67,6 +73,7 @@ bin="$1"; ver="$2"; label="$3"; outdir="$4"
 valid_version "$ver" || { echo "package-macos: bad version '$ver'" >&2; exit 2; }
 valid_label "$label" || { echo "package-macos: bad label '$label'" >&2; exit 2; }
 [[ -f "$bin" ]] || { echo "package-macos: no such file: $bin" >&2; exit 1; }
+[[ -f "$icns" ]] || { echo "package-macos: no such file: $icns" >&2; exit 1; }
 for tool in plutil codesign ditto otool; do
   command -v "$tool" >/dev/null 2>&1 || { echo "package-macos: '$tool' is not available (macOS only)" >&2; exit 1; }
 done
@@ -80,9 +87,12 @@ zip="$outdir/chervotochina-$ver-$label.zip"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 app="$work/Chervotochina.app"
-mkdir -p "$app/Contents/MacOS"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$bin" "$app/Contents/MacOS/chervotochina"
 chmod 755 "$app/Contents/MacOS/chervotochina"
+# Before codesign: the icon becomes part of the sealed resources.
+cp "$icns" "$app/Contents/Resources/chervotochina.icns"
+chmod 644 "$app/Contents/Resources/chervotochina.icns"
 render_plist "$ver" > "$app/Contents/Info.plist"
 plutil -lint "$app/Contents/Info.plist"
 

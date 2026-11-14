@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Червоточина
+GenericName=Передача файлов
+Comment=Прямая передача файлов между компьютерами
+Exec=chervotochina
+Icon=io.github.rekc2004.chervotochina
+Terminal=false
+Categories=Network;FileTransfer;
+StartupNotify=true
+StartupWMClass=io.github.rekc2004.chervotochina

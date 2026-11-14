@@ -4,6 +4,8 @@
 <dict>
 	<key>CFBundleExecutable</key>
 	<string>chervotochina</string>
+	<key>CFBundleIconFile</key>
+	<string>chervotochina</string>
 	<key>CFBundleIdentifier</key>
 	<string>io.github.rekc2004.chervotochina</string>
 	<key>CFBundleName</key>

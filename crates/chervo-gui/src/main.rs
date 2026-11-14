@@ -74,6 +74,22 @@ fn guarded(panicked: &mut bool, f: impl FnOnce() -> bool) -> bool {
     }
 }
 
+/// Идентификатор приложения: `app_id` окна (Wayland) и имя `.desktop` на Linux (этап 19е, `StartupWMClass`).
+const APP_ID: &str = "io.github.rekc2004.chervotochina";
+
+/// Значок окна: сырые RGBA 64x64 из `assets/icon-64.rgba` (генератор `packaging/icons/make-icons.py`).
+/// Ресурс в самом `.exe` не вшивается: `build.rs` в этом крейте запрещён (тест `manifest_only_core`).
+const ICON_SIDE: u32 = 64;
+const ICON_RGBA: &[u8] = include_bytes!("../assets/icon-64.rgba");
+
+fn window_icon() -> egui::IconData {
+    egui::IconData {
+        rgba: ICON_RGBA.to_vec(),
+        width: ICON_SIDE,
+        height: ICON_SIDE,
+    }
+}
+
 /// Что `main` узнаёт о запуске окна: создано ли приложение и фоновый поток (его `main` ждёт).
 #[derive(Default)]
 struct Session {
@@ -91,6 +107,8 @@ fn run(
         renderer,
         viewport: egui::ViewportBuilder::default()
             .with_title(texts::WINDOW_TITLE)
+            .with_app_id(APP_ID)
+            .with_icon(window_icon())
             .with_inner_size([760.0, 560.0]),
         ..Default::default()
     };
@@ -120,4 +138,25 @@ fn run(
         }),
     )
     .is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_icon_is_64x64_rgba_with_opaque_pixels() {
+        let icon = window_icon();
+        assert_eq!(ICON_RGBA.len(), 16384);
+        assert_eq!((icon.width, icon.height), (64, 64));
+        assert_eq!(icon.rgba.len(), (icon.width * icon.height * 4) as usize);
+        assert!(icon.rgba.iter().skip(3).step_by(4).any(|&a| a == 255));
+        // углы прозрачны: значок круглый
+        assert_eq!(icon.rgba[3], 0);
+    }
+
+    #[test]
+    fn app_id_matches_desktop_entry_and_bundle_id() {
+        assert_eq!(APP_ID, "io.github.rekc2004.chervotochina");
+    }
 }

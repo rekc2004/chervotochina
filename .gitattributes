@@ -1,3 +1,12 @@
 fuzz/corpus/** -text binary
 crates/chervo-receive/tests/fixtures/*.bin -text binary
 *.sh text eol=lf
+# Stage 19e: icons and packaging text files are byte-exact (CI compares / packs them).
+packaging/icons/*.png -text binary
+packaging/icons/*.ico -text binary
+packaging/icons/*.icns -text binary
+crates/chervo-gui/assets/*.rgba -text binary
+*.py text eol=lf
+*.desktop text eol=lf
+packaging/tools.lock text eol=lf
+packaging/windows/APPID text eol=lf
