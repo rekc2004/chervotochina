@@ -220,6 +220,22 @@ CHECKLIST before publishing $tag (the script publishes nothing):
         'подходит, та же версия'; the keys on that screen match the README;
       Linux machine of the owner: 'chervo doctor' per docs/HEADLESS_LINUX.md, 'chervo release-keys' matches the README;
       macOS: no machine, write 'not verified on macOS' in the release notes
+  [ ] by hand, INSTALLERS (stage 19e; CI proves only the silent install and removal; until this is done write
+      'installers: not verified on machines' in the release notes). Check minisign and Get-FileHash / sha256sum of the
+      installer BEFORE running it:
+      Windows 11, an ordinary (non-administrator) account if possible: run chervotochina-*-windows-x86_64-setup.exe
+        with /LOG="%USERPROFILE%\Desktop\chervo-setup.log"; NO UAC prompt; 'Червоточина' in the Start menu with an
+        icon; the window opens, the icon of the window and the taskbar is shown; 'Параметры -> Приложения' lists
+        'Червоточина <version>'; uninstall from there (log: unins000.exe /LOG="%USERPROFILE%\Desktop\chervo-uninstall.log"
+        in %LOCALAPPDATA%\Programs\Chervotochina); after the removal %LOCALAPPDATA%\Chervotochina and the Credential
+        Manager entries are still there. Keep both logs, %TEMP%\Setup Log *.txt and a screenshot of the list of apps;
+      Ubuntu 24.04 with a desktop: sudo apt install ./chervotochina-*-linux-x86_64.deb 2>&1 | tee ~/apt-install.log;
+        apt only OFFERS gnome-keyring (Suggests) and installs nothing beyond the package; the icon is in the list of
+        programs and in the dock; dpkg -L chervotochina > ~/files.txt BEFORE the removal; sudo apt remove chervotochina
+        2>&1 | tee ~/apt-remove.log; the data in ~/.local/share/chervotochina are still there. Keep both logs, files.txt,
+        the pieces of /var/log/dpkg.log and /var/log/apt/term.log;
+      mini PC without a desktop (optional): the same installation, 'chervo doctor', apt pulls no graphics libraries;
+      macOS: no machine ('not verified'); for a later analysis: hdiutil attach -verbose, spctl --assess -vv, codesign -dv --verbose=4
   [ ] optional, owner decides: file transfer between two machines with release files, SHA-256 match
   [ ] after publishing: Linux: 'chervo check-update' with the binary of the previous version (or a 0.0.0 build) shows
       the new version, with the release binary it says the latest version is installed;
