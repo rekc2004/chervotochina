@@ -26,6 +26,8 @@ jobs:
       - run: bash scripts/release/check-whitelist.sh --self-test
       - run: bash scripts/release/check-deps.sh --self-test
       - run: bash scripts/release/version.sh --self-test
+      # Stage 19e-2: the only downloader of build tools (no network in the self-test).
+      - run: bash scripts/release/fetch-tool.sh --self-test
       # Stage 18b (DECISION 2.9): the Linux tree of the GUI has no zbus 5 / zvariant / accesskit_unix.
       - run: bash scripts/check-gui-linux-tree.sh --self-test
       - run: bash scripts/check-gui-linux-tree.sh

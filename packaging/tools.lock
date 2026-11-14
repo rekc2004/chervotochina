@@ -1,0 +1,12 @@
+# Pinned external build tools (stage 19e, SPEC 19e section 4). Read ONLY by scripts/release/fetch-tool.sh.
+# One line per tool, fields separated by single spaces, no other format is accepted:
+#   tool <name> <version> <https-url> <sha256: 64 lowercase hex> <size in bytes> <signer>
+# <signer>: no spaces; "_" stands for a space and is turned back by fetch-tool.sh (--get <name> signer).
+#   It is a list of RDNs of the Authenticode signer; the workflow step checks that each listed RDN
+#   (CN, O) is present in the certificate subject exactly (not as a substring).
+# Source of the values (SPEC 19e, Dopolnenie 1, p.1, checked by the conductor 2026-11-15, no TOFU):
+#   URL: link from https://jrsoftware.org/isdl.php (GitHub release is-6_7_4);
+#   SHA-256: "digest" of the asset in the GitHub API of the release is-6_7_4, equal to the local hash;
+#   signer: Authenticode Status Valid, subject CN=Pyrsys B.V., O=Pyrsys B.V., S=Noord-Holland, C=NL,
+#   issuer Sectigo Public Code Signing CA R36.
+tool inno-setup 6.7.4 https://github.com/jrsoftware/issrc/releases/download/is-6_7_4/innosetup-6.7.4.exe a549929319f9120716677c685535ca4671e4b937b5fdc87e2585f32d8eb30e8c 10604576 CN=Pyrsys_B.V.,_O=Pyrsys_B.V.

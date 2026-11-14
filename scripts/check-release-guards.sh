@@ -289,8 +289,73 @@ guard_cargo_install() { # repo-root
   return "$bad"
 }
 
+# --- 7 --- (stage 19e-2, SPEC 19e section 5.2) downloads: the only downloader is scripts/release/fetch-tool.sh.
+# Workflows (.github/workflows/*.yml|yaml) and every file under scripts/ must not name curl, wget,
+# Invoke-WebRequest, iwr, Invoke-RestMethod, irm, Start-BitsTransfer, certutil or bitsadmin (case-insensitive,
+# comment-only lines are skipped as they run nothing). Exempt: fetch-tool.sh itself (checked by
+# guard_fetch_tool) and this file (its self-test must name the words). Explicit exceptions (existing
+# legitimate places, found 2026-11-15): "<path relative to the repo>|<exact text>": that text is cut out of
+# the line and the REST of the line is still scanned. gui-probe.yml:42 names `curl` only as a crate name in a
+# grep pattern over `cargo tree` output (it is not a command).
+dl_words_re='(^|[^A-Za-z0-9_-])(curl|wget|Invoke-WebRequest|iwr|Invoke-RestMethod|irm|Start-BitsTransfer|certutil|bitsadmin)([^A-Za-z0-9_]|$)'
+dl_exceptions=(
+  ".github/workflows/gui-probe.yml|grep -E '^(reqwest|hyper|ureq|curl|h2|isahc|surf|sentry|opentelemetry|tokio) ' tree.txt"
+)
+
+guard_downloads() { # repo-root
+  local root="$1" bad=0 f rel line rest ex ex_path ex_text
+  local files=()
+  [[ -d "$root/.github/workflows" ]] || { echo "missing directory: $root/.github/workflows" >&2; return 1; }
+  for f in "$root/.github/workflows"/*.yml "$root/.github/workflows"/*.yaml; do [[ -f "$f" ]] && files+=("$f"); done
+  while IFS= read -r f; do files+=("$f"); done < <(find "$root/scripts" -type f 2>/dev/null | LC_ALL=C sort)
+  for f in "${files[@]}"; do
+    rel="${f#"$root"/}"
+    [[ "$rel" == scripts/release/fetch-tool.sh || "$rel" == scripts/check-release-guards.sh ]] && continue
+    while IFS= read -r line; do
+      rest="$line"
+      for ex in "${dl_exceptions[@]}"; do
+        ex_path="${ex%%|*}"; ex_text="${ex#*|}"
+        [[ "$rel" == "$ex_path" ]] && rest="${rest//"$ex_text"/}"
+      done
+      if grep -qiE -- "$dl_words_re" <<<"$rest"; then
+        echo "$rel: downloads are allowed only in scripts/release/fetch-tool.sh: ${line#"${line%%[![:space:]]*}"}" >&2
+        bad=1
+      fi
+    done < <(logical_lines "$f")
+  done
+  return "$bad"
+}
+
+# fetch-tool.sh: https-only curl line with a size cap; the size/SHA-256 check (`verify_file "$dest"`) sits
+# after the download and BEFORE any `exit 0` (a successful exit before the check would skip it); no chmod.
+guard_fetch_tool() { # path of fetch-tool.sh
+  local f="$1" bad=0 curl_n verify_n exit_n
+  [[ -f "$f" ]] || { echo "missing file: $f" >&2; return 1; }
+  if ! logical_lines "$f" | grep -qF -- "--proto '=https' --proto-redir '=https' --tlsv1.2"; then
+    echo "$f: the curl call must use --proto '=https' --proto-redir '=https' --tlsv1.2" >&2; bad=1
+  fi
+  logical_lines "$f" | grep -qF -- '--max-filesize' || { echo "$f: the curl call has no --max-filesize" >&2; bad=1; }
+  if logical_lines "$f" | grep -qE '(^|[^A-Za-z0-9_-])chmod([[:space:]]|$)'; then
+    echo "$f: chmod is forbidden (a downloaded file must not become executable here)" >&2; bad=1
+  fi
+  curl_n="$(grep -nE '^[[:space:]]*curl[[:space:]]' "$f" | head -n 1 | cut -d: -f1 || true)"
+  verify_n="$(grep -nE '^[[:space:]]*verify_file[[:space:]]+"\$dest"' "$f" | head -n 1 | cut -d: -f1 || true)"
+  exit_n="$(grep -nE '^[[:space:]]*[^#[:space:]]' "$f" | grep -E '(^|[^A-Za-z0-9_-])exit 0([^0-9]|$)' | head -n 1 | cut -d: -f1 || true)"
+  if [[ -z "$curl_n" || -z "$verify_n" ]]; then
+    echo "$f: the download line or the 'verify_file \"\$dest\"' line is missing" >&2; bad=1
+  else
+    [[ "$verify_n" -gt "$curl_n" ]] || { echo "$f: the verification must come after the download" >&2; bad=1; }
+    if [[ -n "$exit_n" && "$exit_n" -le "$verify_n" ]]; then
+      echo "$f: 'exit 0' at line $exit_n stands before the verification (line $verify_n)" >&2; bad=1
+    fi
+  fi
+  return "$bad"
+}
+
 run_all() {
   local root="$1" bad=0 wf="$1/.github/workflows"
+  guard_downloads "$root" || bad=1
+  guard_fetch_tool "$root/scripts/release/fetch-tool.sh" || bad=1
   guard_build_form "$wf/release.yml" "$root"/scripts/release/*.sh || bad=1
   guard_build_line "$root/scripts/release/build-release.sh" || bad=1
   guard_smoke_yml "$wf/release-smoke.yml" || bad=1
@@ -595,6 +660,60 @@ jobs:
   mk5 "$t5" "$good_ci" 'cargo build' "$good_about" 'echo ok'
   printf '      - run: cargo about generate x\n' >> "$t5/.github/workflows/release.yml"
   expect cargo-about-generate-in-release-yml 1 guard_cargo_install "$t5"
+
+  # 7. downloads only in fetch-tool.sh (stage 19e-2)
+  local real_fetch t7="$tmp/t7" w7
+  real_fetch="$(cd "$(dirname "$0")" && pwd)/release/fetch-tool.sh"
+  mk7() { # DIR: a minimal tree with a workflow, two scripts and the real fetch-tool.sh
+    rm -rf "$1"; mkdir -p "$1/.github/workflows" "$1/scripts/release" "$1/scripts/sub"
+    printf 'jobs:\n  lint:\n    steps:\n      - run: echo ok\n' > "$1/.github/workflows/ci.yml"
+    printf '#!/bin/bash\necho ok\n' > "$1/scripts/other.sh"
+    printf 'Write-Host ok\n' > "$1/scripts/sub/x.ps1"
+    cp "$real_fetch" "$1/scripts/release/fetch-tool.sh"
+  }
+  [[ -f "$real_fetch" ]] || { echo "self-test: FAILED (no $real_fetch)" >&2; SELF_FAIL=1; }
+  mk7 "$t7"
+  expect downloads-ok 0 guard_downloads "$t7"
+  expect fetch-tool-ok 0 guard_fetch_tool "$t7/scripts/release/fetch-tool.sh"
+  expect downloads-real-repo 0 guard_downloads "$(cd "$(dirname "$0")/.." && pwd)"
+  for w7 in curl wget Invoke-WebRequest iwr Invoke-RestMethod irm Start-BitsTransfer certutil bitsadmin CURL.exe INVOKE-WEBREQUEST; do
+    mk7 "$t7"; printf '      - run: %s -o x https://example.invalid/x\n' "$w7" >> "$t7/.github/workflows/ci.yml"
+    expect "downloads-workflow[$w7]" 1 guard_downloads "$t7"
+    mk7 "$t7"; printf '%s -o x https://example.invalid/x\n' "$w7" >> "$t7/scripts/other.sh"
+    expect "downloads-script[$w7]" 1 guard_downloads "$t7"
+    mk7 "$t7"; printf '$r = %s https://example.invalid/x\n' "$w7" >> "$t7/scripts/sub/x.ps1"
+    expect "downloads-ps1-subdir[$w7]" 1 guard_downloads "$t7"
+    mk7 "$t7"; printf 'x=$(%s https://example.invalid/x)\n' "$w7" >> "$t7/scripts/release/other.sh"
+    expect "downloads-release-other-script[$w7]" 1 guard_downloads "$t7"
+  done
+  # a comment-only line runs nothing; the same word in the fetch-tool itself is the one allowed place
+  mk7 "$t7"; printf '# curl is only used by fetch-tool.sh\n' >> "$t7/scripts/other.sh"
+  expect downloads-comment-ok 0 guard_downloads "$t7"
+  # the explicit exception cuts out only its exact text: the rest of the line is still scanned
+  local gp_line="          if grep -E '^(reqwest|hyper|ureq|curl|h2|isahc|surf|sentry|opentelemetry|tokio) ' tree.txt; then echo V2; fi"
+  mk7 "$t7"; printf 'jobs:\n  a:\n    steps:\n      - run: |\n%s\n' "$gp_line" > "$t7/.github/workflows/gui-probe.yml"
+  expect downloads-exception-ok 0 guard_downloads "$t7"
+  mk7 "$t7"; printf 'jobs:\n  a:\n    steps:\n      - run: |\n%s; curl https://example.invalid/x\n' "$gp_line" > "$t7/.github/workflows/gui-probe.yml"
+  expect downloads-exception-plus-curl 1 guard_downloads "$t7"
+  mk7 "$t7"; printf 'jobs:\n  a:\n    steps:\n      - run: |\n%s\n' "$gp_line" > "$t7/.github/workflows/other.yml"
+  expect downloads-exception-other-file 1 guard_downloads "$t7"
+  # the fetch-tool: https-only flags, size cap, verification before `exit 0`, no chmod
+  mk7 "$t7"; sed -i "s/--proto '=https' --proto-redir '=https'/--proto-redir '=https'/" "$t7/scripts/release/fetch-tool.sh"
+  expect fetch-tool-no-proto 1 guard_fetch_tool "$t7/scripts/release/fetch-tool.sh"
+  mk7 "$t7"; sed -i "s/--tlsv1.2 //" "$t7/scripts/release/fetch-tool.sh"
+  expect fetch-tool-no-tls12 1 guard_fetch_tool "$t7/scripts/release/fetch-tool.sh"
+  mk7 "$t7"; sed -i "s/--max-filesize/--max-time/g" "$t7/scripts/release/fetch-tool.sh"
+  expect fetch-tool-no-maxfilesize 1 guard_fetch_tool "$t7/scripts/release/fetch-tool.sh"
+  mk7 "$t7"; sed -i '/^verify_file "\$dest"/d' "$t7/scripts/release/fetch-tool.sh"
+  expect fetch-tool-no-verify 1 guard_fetch_tool "$t7/scripts/release/fetch-tool.sh"
+  mk7 "$t7"; sed -i 's/^verify_file "\$dest".*$/echo skipped/' "$t7/scripts/release/fetch-tool.sh"
+  expect fetch-tool-verify-replaced 1 guard_fetch_tool "$t7/scripts/release/fetch-tool.sh"
+  mk7 "$t7"; sed -i 's/^dest="\$dir\/\$L_FILE"$/dest="$dir\/$L_FILE"\nexit 0/' "$t7/scripts/release/fetch-tool.sh"
+  expect fetch-tool-exit0-before-verify 1 guard_fetch_tool "$t7/scripts/release/fetch-tool.sh"
+  mk7 "$t7"; printf 'chmod +x "$dest"\n' >> "$t7/scripts/release/fetch-tool.sh"
+  expect fetch-tool-chmod 1 guard_fetch_tool "$t7/scripts/release/fetch-tool.sh"
+  mk7 "$t7"; rm "$t7/scripts/release/fetch-tool.sh"
+  expect fetch-tool-missing 1 guard_fetch_tool "$t7/scripts/release/fetch-tool.sh"
 
   if [[ $SELF_FAIL -eq 0 ]]; then
     echo "self-test: ok"
