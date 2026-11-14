@@ -10,3 +10,5 @@ crates/chervo-gui/assets/*.rgba -text binary
 *.desktop text eol=lf
 packaging/tools.lock text eol=lf
 packaging/windows/APPID text eol=lf
+*.iss text eol=crlf
+*.ps1 text eol=lf

@@ -28,6 +28,13 @@ jobs:
       - run: bash scripts/release/version.sh --self-test
       # Stage 19e-2: the only downloader of build tools (no network in the self-test).
       - run: bash scripts/release/fetch-tool.sh --self-test
+      # Stage 19e-3: installer scripts. package-deb.sh --self-test builds real .deb files (Linux: dpkg-deb on the runner);
+      # check-dmg.sh needs macOS and a disk image: the trial run of release.yml covers it.
+      - run: bash scripts/release/check-iss.sh --self-test
+      - run: bash scripts/release/check-iss.sh packaging/windows/chervotochina.iss
+      - run: bash scripts/release/package-deb.sh --self-test
+      - run: bash scripts/release/package-dmg.sh --self-test
+      - run: bash scripts/release/package-windows.sh --self-test
       # Stage 18b (DECISION 2.9): the Linux tree of the GUI has no zbus 5 / zvariant / accesskit_unix.
       - run: bash scripts/check-gui-linux-tree.sh --self-test
       - run: bash scripts/check-gui-linux-tree.sh

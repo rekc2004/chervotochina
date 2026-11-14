@@ -22,7 +22,13 @@
 #    `cargo install --locked --version =X.Y.Z <one name>`; `cargo binstall` is forbidden; cargo-about is installed
 #    by exactly one line, in release.yml, job `assemble`; `cargo about` is called only by scripts/release/assemble.sh.
 # 6. release.yml (stage 19g, R19g-11): the jobs `assemble` and `draft` never mention `verifier`: the CLI
-#    builds for Windows/macOS must not reach the release files, the manifest or the draft.
+#    builds for Windows/macOS must not reach the release files, the manifest or the draft. Stage 19e: the logs of
+#    tools (installer-logs, tool-logs) must not reach them either.
+# 7. downloads (stage 19e-2): only scripts/release/fetch-tool.sh may call curl, wget, Invoke-WebRequest, iwr,
+#    Invoke-RestMethod, irm, Start-BitsTransfer, certutil, bitsadmin; fetch-tool.sh itself is https-only and checks
+#    size and SHA-256 before `exit 0`. Details before guard_downloads below.
+# 8. Inno script (stage 19e-3): check-iss.sh is called from ci.yml (lint) and from package-windows.sh before ISCC.
+# 9. assemble (stage 19e-3, R19e-8): the job takes 8 artifacts by exact names, no `pattern:`.
 set -euo pipefail
 
 # Joins lines continued with a trailing backslash and drops comment-only lines.
@@ -216,30 +222,96 @@ guard_no_verifier_in_release() { # release.yml
     if grep -qi 'verifier' <<<"$block"; then
       echo "$f: job $j mentions 'verifier' (the CI verifier must not reach the release)" >&2; bad=1
     fi
+    # Stage 19e: the logs of tools (installer-logs-*, tool-logs-*) must not reach the release either.
+    if grep -qiE 'installer-logs|tool-logs' <<<"$block"; then
+      echo "$f: job $j mentions installer-logs or tool-logs (logs of tools must not reach the release)" >&2; bad=1
+    fi
     # Review 19g-3, L2: what the job downloads is pinned, not only what it must not mention.
-    # assemble: exactly one download step and exactly one `pattern:`, equal to `bin-*`.
     # draft: exactly one download step, no `pattern:`, `name: release-files`.
-    local line t downloads=0 patterns=0 wrong=0 names=0
+    # assemble: since stage 19e the downloads are checked by guard_assemble_exact (rule 9), not here.
+    local line t downloads=0 patterns=0 names=0
     while IFS= read -r line; do
       t="${line#"${line%%[![:space:]]*}"}"
       t="${t%"${t##*[![:space:]]}"}"
       [[ "$t" =~ ^(-[[:space:]]+)?uses:[[:space:]]*actions/download-artifact@ ]] && downloads=$((downloads + 1))
-      if [[ "$t" =~ ^pattern: ]]; then
-        patterns=$((patterns + 1))
-        [[ "$t" == 'pattern: bin-*' ]] || wrong=1
-      fi
+      [[ "$t" =~ ^pattern: ]] && patterns=$((patterns + 1))
       [[ "$t" == 'name: release-files' ]] && names=$((names + 1))
     done <<<"$block"
-    if [[ "$downloads" -ne 1 || "$wrong" -ne 0 ]]; then
-      echo "$f: job $j must have exactly one download-artifact step and, if it has 'pattern:', only 'pattern: bin-*'" >&2; bad=1
-    fi
-    if [[ "$j" == assemble && "$patterns" -ne 1 ]]; then
-      echo "$f: job assemble must download with exactly one 'pattern: bin-*' (found $patterns pattern line(s))" >&2; bad=1
-    fi
-    if [[ "$j" == draft && ( "$patterns" -ne 0 || "$names" -ne 1 ) ]]; then
-      echo "$f: job draft must download only 'name: release-files' (patterns: $patterns, names: $names)" >&2; bad=1
+    if [[ "$j" == draft && ( "$downloads" -ne 1 || "$patterns" -ne 0 || "$names" -ne 1 ) ]]; then
+      echo "$f: job draft must have exactly one download-artifact step, only 'name: release-files' (downloads: $downloads, patterns: $patterns, names: $names)" >&2; bad=1
     fi
   done
+  return "$bad"
+}
+
+# --- 9 --- (stage 19e, R19e-8) `assemble` takes the files by EXACT artifact names, never by a pattern: the job
+# `installers` runs a foreign program (Inno Setup) and could upload an extra artifact (bin-zzz) or replace one.
+# In the job: no `pattern:` anywhere; exactly 8 download-artifact steps, each with `name:` from the closed list below
+# (each name exactly once) and `path: dist`. The upload step (name: release-files) is not a download and is not counted.
+assemble_names='bin-linux-x86_64 bin-macos-aarch64 bin-macos-x86_64 bin-windows-x86_64 inst-linux-x86_64 inst-macos-aarch64 inst-macos-x86_64 inst-windows-x86_64'
+guard_assemble_exact() { # release.yml
+  local f="$1" block line t ctx="" downloads=0 bad=0 n seen="" paths=0
+  [[ -f "$f" ]] || { echo "missing file: $f" >&2; return 1; }
+  block="$(job_block "$f" assemble)"
+  [[ -n "$block" ]] || { echo "$f: job assemble not found" >&2; return 1; }
+  while IFS= read -r line; do
+    t="${line#"${line%%[![:space:]]*}"}"
+    t="${t%"${t##*[![:space:]]}"}"
+    if [[ "$t" =~ ^(-[[:space:]]+)?pattern: ]]; then
+      echo "$f: job assemble must not use 'pattern:' (exact names only): $t" >&2; bad=1
+    fi
+    if [[ "$t" =~ ^(-[[:space:]]+)?uses:[[:space:]]*actions/download-artifact@ ]]; then
+      ctx=download; downloads=$((downloads + 1)); continue
+    elif [[ "$t" =~ ^(-[[:space:]]+)?uses: ]]; then
+      ctx=other; continue
+    elif [[ "$t" == -[[:space:]]* ]]; then
+      ctx=""; continue
+    fi
+    if [[ "$ctx" == download ]]; then
+      if [[ "$t" =~ ^name:[[:space:]]*(.*)$ ]]; then
+        n="${BASH_REMATCH[1]}"
+        if [[ " $assemble_names " != *" $n "* ]]; then
+          echo "$f: job assemble downloads an artifact that is not on the list: '$n'" >&2; bad=1
+        elif [[ " $seen " == *" $n "* ]]; then
+          echo "$f: job assemble downloads '$n' twice" >&2; bad=1
+        fi
+        seen="$seen $n"
+      fi
+      [[ "$t" == 'path: dist' ]] && paths=$((paths + 1))
+      if [[ "$t" =~ ^merge-multiple: ]]; then
+        echo "$f: job assemble must not use merge-multiple (exact names only): $t" >&2; bad=1
+      fi
+    fi
+  done <<<"$block"
+  if [[ "$downloads" -ne 8 ]]; then
+    echo "$f: job assemble must have exactly 8 download-artifact steps, found $downloads" >&2; bad=1
+  fi
+  for n in $assemble_names; do
+    [[ " $seen " == *" $n "* ]] || { echo "$f: job assemble does not download '$n'" >&2; bad=1; }
+  done
+  if [[ "$paths" -ne 8 ]]; then
+    echo "$f: every download of job assemble must have 'path: dist' (found $paths of 8)" >&2; bad=1
+  fi
+  return "$bad"
+}
+
+# --- 8 --- (stage 19e, SPEC 19e 5.3 item 9) the Inno Setup script is checked by text before ISCC runs: check-iss.sh is called
+# by ci.yml (job lint: its --self-test and on the real script) and by package-windows.sh BEFORE the first ISCC call.
+guard_iss_checked() { # repo-root
+  local root="$1" ci="$1/.github/workflows/ci.yml" pw="$1/scripts/release/package-windows.sh" bad=0 chk run
+  [[ -f "$ci" ]] || { echo "missing file: $ci" >&2; return 1; }
+  [[ -f "$pw" ]] || { echo "missing file: $pw" >&2; return 1; }
+  logical_lines "$ci" | grep -qE 'check-iss\.sh --self-test' || { echo "$ci: check-iss.sh --self-test is not called" >&2; bad=1; }
+  logical_lines "$ci" | grep -qE 'check-iss\.sh packaging/windows/chervotochina\.iss' || { echo "$ci: check-iss.sh is not called on packaging/windows/chervotochina.iss" >&2; bad=1; }
+  chk="$(logical_lines "$pw" | grep -nE 'scripts/release/check-iss\.sh' | head -n 1 | cut -d: -f1 || true)"
+  run="$(logical_lines "$pw" | grep -nE '^[[:space:]]*"\$iscc"' | head -n 1 | cut -d: -f1 || true)"
+  if [[ -z "$chk" ]]; then
+    echo "$pw: check-iss.sh is not called" >&2; bad=1
+  elif [[ -z "$run" ]]; then
+    echo "$pw: the ISCC call line (\"\$iscc\" ...) was not found" >&2; bad=1
+  elif [[ "$chk" -ge "$run" ]]; then
+    echo "$pw: check-iss.sh must be called BEFORE ISCC" >&2; bad=1
+  fi
   return "$bad"
 }
 
@@ -363,6 +435,8 @@ run_all() {
   guard_common "$wf"/*.yml || bad=1
   guard_release_yml "$wf/release.yml" || bad=1
   guard_no_verifier_in_release "$wf/release.yml" || bad=1
+  guard_assemble_exact "$wf/release.yml" || bad=1
+  guard_iss_checked "$root" || bad=1
   guard_cargo_install "$root" || bad=1
   guard_no_secrets "$wf/release-smoke.yml" || bad=1
   # release-smoke may hold write access (draft visibility) in `fetch` only; `fetch` runs nothing
@@ -536,19 +610,16 @@ jobs:
   expect verifier-in-assemble-mixed-case 1 guard_no_verifier_in_release "$f"
   f="$tmp/v4.yml"; subst "$asm" '  assemble:' '  assemble2:' > "$f"
   expect verifier-rule-job-missing 1 guard_no_verifier_in_release "$f"
-  # L2: the download of assemble / draft is pinned.
-  f="$tmp/v5.yml"; subst "$asm" 'pattern: bin-*' "pattern: '*'" > "$f"
-  expect assemble-pattern-star 1 guard_no_verifier_in_release "$f"
-  f="$tmp/v6.yml"; subst "$asm" 'pattern: bin-*' 'pattern: verifier-*' > "$f"
-  expect assemble-pattern-verifier-star 1 guard_no_verifier_in_release "$f"
-  f="$tmp/v7.yml"; subst "$asm" 'pattern: bin-*' $'pattern: bin-*\n      - uses: actions/download-artifact@0123456789abcdef0123456789abcdef01234567 # v4.3.0\n        with:\n          pattern: bin-*' > "$f"
-  expect assemble-second-download 1 guard_no_verifier_in_release "$f"
-  f="$tmp/v8.yml"; subst "$asm" 'pattern: bin-*' 'name: bin-linux-x86_64' > "$f"
-  expect assemble-no-pattern 1 guard_no_verifier_in_release "$f"
-  f="$tmp/v9.yml"; subst "$asm" 'pattern: bin-*' $'pattern: bin-*\n      - uses: actions/download-artifact@0123456789abcdef0123456789abcdef01234567 # v4.3.0\n        with:\n          name: release-files' > "$f"
-  expect assemble-bin-plus-name-download 1 guard_no_verifier_in_release "$f"
-  f="$tmp/v10.yml"; subst "$asm" 'pattern: bin-*' 'pattern: bin-linux-*' > "$f"
-  expect assemble-pattern-narrower 1 guard_no_verifier_in_release "$f"
+  # Stage 19e: the logs of tools must not reach assemble / draft.
+  f="$tmp/v5.yml"; subst "$asm" 'pattern: bin-*' 'name: installer-logs-windows' > "$f"
+  expect installer-logs-in-assemble 1 guard_no_verifier_in_release "$f"
+  f="$tmp/v6.yml"; subst "$asm" 'pattern: bin-*' 'name: tool-logs-windows' > "$f"
+  expect tool-logs-in-assemble 1 guard_no_verifier_in_release "$f"
+  f="$tmp/v7.yml"; subst "$asm" 'draft.sh release' 'draft.sh release Installer-Logs' > "$f"
+  expect installer-logs-in-draft 1 guard_no_verifier_in_release "$f"
+  f="$tmp/v8.yml"; subst "$asm" 'draft.sh release' 'draft.sh release tool-logs' > "$f"
+  expect tool-logs-in-draft 1 guard_no_verifier_in_release "$f"
+  # L2: the download of draft is pinned (assemble: rule 9 below).
   f="$tmp/v11.yml"; subst "$asm" 'name: release-files' "pattern: '*'" > "$f"
   expect draft-pattern 1 guard_no_verifier_in_release "$f"
   f="$tmp/v12.yml"; subst "$asm" 'name: release-files' 'name: bin-linux-x86_64' > "$f"
@@ -714,6 +785,94 @@ jobs:
   expect fetch-tool-chmod 1 guard_fetch_tool "$t7/scripts/release/fetch-tool.sh"
   mk7 "$t7"; rm "$t7/scripts/release/fetch-tool.sh"
   expect fetch-tool-missing 1 guard_fetch_tool "$t7/scripts/release/fetch-tool.sh"
+
+  # 9. assemble takes the files by exact names (stage 19e, R19e-8)
+  local dl='      - uses: actions/download-artifact@0123456789abcdef0123456789abcdef01234567 # v4.3.0
+        with:
+          name: NAME
+          path: dist
+'
+  local a9="jobs:
+  installers:
+    steps:
+      - uses: actions/upload-artifact@0123456789abcdef0123456789abcdef01234567 # v4.6.2
+        with:
+          name: inst-linux-x86_64
+  assemble:
+    needs: [gate, build, installers]
+    steps:
+      - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567 # v4.4.0
+        with:
+          persist-credentials: false
+"
+  local n9
+  for n9 in $assemble_names; do a9+="${dl/NAME/$n9}"; done
+  a9+='      - run: bash scripts/release/assemble.sh dist release
+      - uses: actions/upload-artifact@0123456789abcdef0123456789abcdef01234567 # v4.6.2
+        with:
+          name: release-files
+          path: release/*
+  smoke:
+    steps:
+      - uses: actions/download-artifact@0123456789abcdef0123456789abcdef01234567 # v4.3.0
+        with:
+          pattern: anything-*
+'
+  f="$tmp/e0.yml"; printf '%s' "$a9" > "$f"
+  expect assemble-exact-ok 0 guard_assemble_exact "$f"
+  f="$tmp/e1.yml"; subst "$a9" 'name: bin-linux-x86_64' 'pattern: bin-*' > "$f"
+  expect assemble-pattern-instead-of-name 1 guard_assemble_exact "$f"
+  f="$tmp/e2.yml"; subst "$a9" 'name: bin-windows-x86_64' 'name: bin-zzz' > "$f"
+  expect assemble-unknown-name-bin-zzz 1 guard_assemble_exact "$f"
+  f="$tmp/e3.yml"; subst "$a9" 'name: inst-windows-x86_64' 'name: tool-logs-windows' > "$f"
+  expect assemble-tool-logs-name 1 guard_assemble_exact "$f"
+  f="$tmp/e4.yml"; subst "$a9" 'name: inst-macos-x86_64' 'name: inst-macos-aarch64' > "$f"
+  expect assemble-duplicate-name 1 guard_assemble_exact "$f"
+  f="$tmp/e5.yml"; subst "$a9" "${dl/NAME/inst-macos-x86_64}" '' > "$f"
+  expect assemble-only-7-downloads 1 guard_assemble_exact "$f"
+  f="$tmp/e6.yml"; subst "$a9" '      - run: bash scripts/release/assemble.sh' "${dl/NAME/bin-zzz}      - run: bash scripts/release/assemble.sh" > "$f"
+  expect assemble-9th-download 1 guard_assemble_exact "$f"
+  f="$tmp/e7.yml"; subst "$a9" $'name: inst-linux-x86_64\n          path: dist' $'name: inst-linux-x86_64\n          path: other' > "$f"
+  expect assemble-path-not-dist 1 guard_assemble_exact "$f"
+  f="$tmp/e8.yml"; subst "$a9" 'path: dist' $'path: dist\n          merge-multiple: true' > "$f"
+  expect assemble-merge-multiple 1 guard_assemble_exact "$f"
+  f="$tmp/e9.yml"; subst "$a9" '      - run: bash scripts/release/assemble.sh' $'      - run: echo\n        with:\n          pattern: bin-*\n      - run: bash scripts/release/assemble.sh' > "$f"
+  expect assemble-pattern-anywhere 1 guard_assemble_exact "$f"
+  f="$tmp/e10.yml"; subst "$a9" '  assemble:' '  assemble2:' > "$f"
+  expect assemble-job-missing 1 guard_assemble_exact "$f"
+  # the pattern the old pipeline used, and a hostile extra name, as in the spec
+  f="$tmp/e11.yml"; subst "$a9" 'name: bin-macos-aarch64' 'pattern: bin-*' > "$f"
+  expect assemble-old-pattern-bin-star 1 guard_assemble_exact "$f"
+  f="$tmp/e12.yml"; subst "$a9" 'name: bin-macos-aarch64' 'name: bin-zzz' > "$f"
+  expect assemble-name-bin-zzz 1 guard_assemble_exact "$f"
+
+  # 8. check-iss.sh runs in ci.yml (lint) and in package-windows.sh before ISCC (stage 19e)
+  mk8() { # DIR CI-TEXT PACKAGE-TEXT
+    rm -rf "$1"; mkdir -p "$1/.github/workflows" "$1/scripts/release"
+    printf '%s' "$2" > "$1/.github/workflows/ci.yml"
+    printf '%s' "$3" > "$1/scripts/release/package-windows.sh"
+  }
+  local ci8=$'      - run: bash scripts/release/check-iss.sh --self-test\n      - run: bash scripts/release/check-iss.sh packaging/windows/chervotochina.iss\n'
+  local pw8=$'bash "$root/scripts/release/check-iss.sh" "$iss"\n  "$iscc" "/DAppVersion=$ver" \\\n    "/Ox"\n'
+  local t8="$tmp/t8"
+  mk8 "$t8" "$ci8" "$pw8"
+  expect iss-checked-ok 0 guard_iss_checked "$t8"
+  mk8 "$t8" $'      - run: bash scripts/release/check-iss.sh packaging/windows/chervotochina.iss\n' "$pw8"
+  expect iss-ci-no-self-test 1 guard_iss_checked "$t8"
+  mk8 "$t8" $'      - run: bash scripts/release/check-iss.sh --self-test\n' "$pw8"
+  expect iss-ci-not-on-real-file 1 guard_iss_checked "$t8"
+  mk8 "$t8" $'      - run: echo\n' "$pw8"
+  expect iss-ci-missing 1 guard_iss_checked "$t8"
+  mk8 "$t8" "$ci8" $'  "$iscc" "/DAppVersion=$ver"\n'
+  expect iss-package-no-check 1 guard_iss_checked "$t8"
+  mk8 "$t8" "$ci8" $'# bash scripts/release/check-iss.sh "$iss"\n  "$iscc" "/DAppVersion=$ver"\n'
+  expect iss-package-only-comment 1 guard_iss_checked "$t8"
+  mk8 "$t8" "$ci8" $'  "$iscc" "/DAppVersion=$ver"\nbash "$root/scripts/release/check-iss.sh" "$iss"\n'
+  expect iss-package-check-after-iscc 1 guard_iss_checked "$t8"
+  mk8 "$t8" "$ci8" $'bash "$root/scripts/release/check-iss.sh" "$iss"\n'
+  expect iss-package-no-iscc-line 1 guard_iss_checked "$t8"
+  expect iss-real-repo 0 guard_iss_checked "$(cd "$(dirname "$0")/.." && pwd)"
+  expect assemble-exact-real-repo 0 guard_assemble_exact "$(cd "$(dirname "$0")/.." && pwd)/.github/workflows/release.yml"
 
   if [[ $SELF_FAIL -eq 0 ]]; then
     echo "self-test: ok"

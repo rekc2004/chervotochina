@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Stage 19b: collects the release directory and builds the unsigned manifest.
 #   bash scripts/release/assemble.sh <dist-dir> <release-dir>
-# <dist-dir> holds the binaries of all targets (artifacts of `build`); this script
+# <dist-dir> holds the binaries of all targets (artifacts of `build`) and the installers (artifacts of
+# `installers`, stage 19e): 12 files of the white list, with the 3 generated ones below; this script
 #   1. makes the SBOMs (cargo-cyclonedx 0.5.9, must be installed) for chervo-cli and chervo-gui,
 #      and the third-party licence file (cargo-about =0.9.2, must be installed),
 #   2. checks the white list (exactly the expected names; any extra file fails),
@@ -85,9 +86,13 @@ cargo run --locked -p chervo-update --bin chervo-make-manifest -- \
   --version "$ver" --commit "$commit" --out "$release/chervo-release.txt" \
   --artifact linux-x86_64 "$release/chervo-$ver-linux-x86_64" \
   --artifact linux-x86_64 "$release/chervotochina-$ver-linux-x86_64" \
+  --artifact linux-x86_64 "$release/chervotochina-$ver-linux-x86_64.deb" \
   --artifact macos-aarch64 "$release/chervotochina-$ver-macos-aarch64.zip" \
+  --artifact macos-aarch64 "$release/chervotochina-$ver-macos-aarch64.dmg" \
   --artifact macos-x86_64 "$release/chervotochina-$ver-macos-x86_64.zip" \
+  --artifact macos-x86_64 "$release/chervotochina-$ver-macos-x86_64.dmg" \
   --artifact windows-x86_64 "$release/chervotochina-$ver-windows-x86_64.exe" \
+  --artifact windows-x86_64 "$release/chervotochina-$ver-windows-x86_64-setup.exe" \
   --artifact any "$release/chervo-$ver-sbom.cdx.json" \
   --artifact any "$release/chervotochina-$ver-sbom.cdx.json" \
   --artifact any "$release/chervo-$ver-third-party-licenses.txt"

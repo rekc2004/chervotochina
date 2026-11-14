@@ -154,8 +154,157 @@ jobs:
             echo "Bitwise reproducibility is not claimed; the result is recorded only."
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
-  assemble:
+  # Stage 19e: the installers. They pack the ALREADY BUILT files of `build` (the same bytes that are signed as single
+  # files), nothing is rebuilt. Inno Setup (a foreign program) runs only here, in a job with `contents: read`; its
+  # artifacts are named inst-* and are taken by `assemble` by EXACT name (guard rule 9). Logs of tools are not
+  # inst-* and not bin-*: they never reach the release.
+  installers:
     needs: [gate, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-22.04, kind: linux }
+          - { os: windows-2025, kind: windows }
+          - { os: macos-15, kind: macos }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.99.1 --profile minimal
+      - id: ver
+        run: echo "ver=$(bash scripts/release/version.sh)" >> "$GITHUB_OUTPUT"
+      # Linux: .deb
+      - if: matrix.kind == 'linux'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: bin-linux-x86_64
+          path: in
+      - if: matrix.kind == 'linux'
+        name: Build the .deb (twice, cmp) and check it
+        env:
+          VER: ${{ steps.ver.outputs.ver }}
+        run: |
+          set -euo pipefail
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          bash scripts/release/package-deb.sh "in/chervotochina-$VER-linux-x86_64" "in/chervo-$VER-linux-x86_64" "$VER" inst
+      - if: matrix.kind == 'linux'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: inst-linux-x86_64
+          path: inst/*
+          if-no-files-found: error
+          retention-days: 14
+      # Windows: Inno Setup, pinned by version, URL, SHA-256 and size in packaging/tools.lock (stage 19e-2)
+      - if: matrix.kind == 'windows'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: bin-windows-x86_64
+          path: in
+      - if: matrix.kind == 'windows'
+        name: Fetch Inno Setup (size and SHA-256 are checked before anything is run; nothing is run here)
+        run: |
+          set -euo pipefail
+          bash scripts/release/fetch-tool.sh inno-setup "$RUNNER_TEMP/inno-dl"
+          {
+            echo "INNO_FILE=$RUNNER_TEMP/inno-dl/$(bash scripts/release/fetch-tool.sh --get inno-setup file)"
+            echo "INNO_SIGNER=$(bash scripts/release/fetch-tool.sh --get inno-setup signer)"
+            echo "INNO_VERSION=$(bash scripts/release/fetch-tool.sh --get inno-setup version)"
+          } >> "$GITHUB_ENV"
+      - if: matrix.kind == 'windows'
+        name: Authenticode check and silent installation of Inno Setup (new empty directory)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sig = Get-AuthenticodeSignature -LiteralPath $env:INNO_FILE
+          "- Authenticode status: $($sig.Status)" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "- signer subject: $($sig.SignerCertificate.Subject)" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "- issuer: $($sig.SignerCertificate.Issuer)" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          if ($sig.Status -ne 'Valid') { "Authenticode status is not Valid: stop"; exit 1 }
+          $have = @($sig.SignerCertificate.Subject -split ',\s*(?=[A-Za-z]+=)')
+          foreach ($rdn in @($env:INNO_SIGNER -split ',\s*')) {
+            if ($have -cnotcontains $rdn) { "signer check failed: '$rdn' is not among the subject parts: stop"; exit 1 }
+          }
+          "- signer matches packaging/tools.lock: $env:INNO_SIGNER" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          $dir = Join-Path $env:RUNNER_TEMP 'inno'
+          if (Test-Path -LiteralPath $dir) { "directory exists: $dir"; exit 1 }
+          $logs = Join-Path $env:RUNNER_TEMP 'tool-logs'
+          New-Item -ItemType Directory -Force -Path $logs | Out-Null
+          $log = Join-Path $logs 'inno-install.log'
+          $p = Start-Process -FilePath $env:INNO_FILE -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/DIR=`"$dir`"", "/LOG=`"$log`"") -Wait -PassThru
+          "- Inno Setup installer exit code: $($p.ExitCode)" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          if ($p.ExitCode -ne 0) { exit 1 }
+          $iscc = Join-Path $dir 'ISCC.exe'
+          if (-not (Test-Path -LiteralPath $iscc)) { "no ISCC.exe in $dir"; exit 1 }
+          $vi = (Get-Item -LiteralPath $iscc).VersionInfo
+          "- ISCC.exe FileVersion: $($vi.FileVersion), ProductVersion: $($vi.ProductVersion) (pinned version: $env:INNO_VERSION)" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          if (-not ($vi.FileVersion -like "$($env:INNO_VERSION)*" -or $vi.ProductVersion -like "$($env:INNO_VERSION)*")) { "ISCC.exe version does not start with $env:INNO_VERSION: stop"; exit 1 }
+          "ISCC=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - if: matrix.kind == 'windows'
+        name: Build the installer (twice) and check the script
+        env:
+          VER: ${{ steps.ver.outputs.ver }}
+        run: |
+          set -euo pipefail
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          bash scripts/release/package-windows.sh "in/chervotochina-$VER-windows-x86_64.exe" "$VER" inst "$ISCC"
+      - if: matrix.kind == 'windows'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: inst-windows-x86_64
+          path: inst/*
+          if-no-files-found: error
+          retention-days: 14
+      # the Inno installation log (not bin-*, not inst-*: it never reaches the release)
+      - if: always() && matrix.kind == 'windows'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tool-logs-windows
+          path: ${{ runner.temp }}/tool-logs/*
+          if-no-files-found: error
+          retention-days: 14
+      # macOS: .dmg for both targets, from the .zip of the same target
+      - if: matrix.kind == 'macos'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: bin-macos-aarch64
+          path: in-aarch64
+      - if: matrix.kind == 'macos'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: bin-macos-x86_64
+          path: in-x86_64
+      - if: matrix.kind == 'macos'
+        name: Build the .dmg for both targets and check them
+        env:
+          VER: ${{ steps.ver.outputs.ver }}
+        run: |
+          set -euo pipefail
+          bash scripts/release/package-dmg.sh "in-aarch64/chervotochina-$VER-macos-aarch64.zip" "$VER" macos-aarch64 inst-aarch64
+          bash scripts/release/package-dmg.sh "in-x86_64/chervotochina-$VER-macos-x86_64.zip" "$VER" macos-x86_64 inst-x86_64
+      - if: matrix.kind == 'macos'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: inst-macos-aarch64
+          path: inst-aarch64/*
+          if-no-files-found: error
+          retention-days: 14
+      - if: matrix.kind == 'macos'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: inst-macos-x86_64
+          path: inst-x86_64/*
+          if-no-files-found: error
+          retention-days: 14
+
+  # Stage 19e (guard rule 9): the files come by EXACT names, not by a pattern: the job `installers` runs a foreign
+  # program and could upload an extra artifact (bin-zzz); a pattern would take it into the release.
+  assemble:
+    needs: [gate, build, installers]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -167,8 +316,35 @@ jobs:
       - run: rustup toolchain install 1.99.1 --profile minimal
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          pattern: bin-*
-          merge-multiple: true
+          name: bin-linux-x86_64
+          path: dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: bin-macos-aarch64
+          path: dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: bin-macos-x86_64
+          path: dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: bin-windows-x86_64
+          path: dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: inst-linux-x86_64
+          path: dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: inst-macos-aarch64
+          path: dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: inst-macos-x86_64
+          path: dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: inst-windows-x86_64
           path: dist
       - run: cargo install --locked --version =0.5.9 cargo-cyclonedx
       - run: cargo install --locked --version =0.9.2 --features cli cargo-about
@@ -244,16 +420,66 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $f = @(Get-ChildItem -Path rel -Filter 'chervotochina-*-windows-x86_64.exe')
-          if ($f.Count -ne 1) { "expected exactly one window file, found $($f.Count)"; exit 1 }
+          # Stage 19e: the EXACT name from the manifest (a -Filter would also match chervotochina-<v>-windows-x86_64-setup.exe).
+          $lines = Get-Content -LiteralPath rel/chervo-release.txt
+          $ver = (($lines | Where-Object { $_ -match '^version ' } | Select-Object -First 1) -split ' ')[1].Trim()
+          if ($ver -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') { "bad version in the manifest: $ver"; exit 1 }
+          $name = "chervotochina-$ver-windows-x86_64.exe"
+          $f = @(Get-ChildItem -Path rel | Where-Object { $_.Name -ceq $name })
+          if ($f.Count -ne 1) { "expected exactly one window file $name, found $($f.Count)"; exit 1 }
           $p = Start-Process -FilePath $f[0].FullName -ArgumentList '--render-check' -Wait -PassThru
           "- render-check exit code: $($p.ExitCode)" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
           exit $p.ExitCode
 
+  # Stage 19e: the installers are installed quietly and removed again, on the files of `release-files` only (as the
+  # owner gets them). Each job first compares the SHA-256 of the installer with the manifest line of its own target.
+  installer-smoke:
+    needs: [gate, assemble]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-22.04, kind: linux, label: linux-x86_64 }
+          - { os: ubuntu-24.04, kind: linux, label: linux-x86_64 }
+          - { os: windows-2025, kind: windows, label: windows-x86_64 }
+          - { os: macos-15, kind: macos, label: macos-aarch64 }
+          - { os: macos-15-intel, kind: macos, label: macos-x86_64 }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-files
+          path: rel
+      # apt is used in CI only (the .deb itself pulls in nothing but its Depends)
+      - if: matrix.kind == 'linux'
+        name: Smoke test of the .deb
+        run: bash scripts/release/smoke-deb.sh rel
+      - if: matrix.kind == 'windows'
+        name: Smoke test of the installer (silent install, checks, silent uninstall)
+        run: pwsh -NoProfile -File scripts/release/smoke-installer-windows.ps1 rel "$RUNNER_TEMP/installer-logs"
+      - if: always() && matrix.kind == 'windows'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: installer-logs-windows
+          path: ${{ runner.temp }}/installer-logs/*
+          if-no-files-found: error
+          retention-days: 14
+      - if: matrix.kind == 'macos'
+        name: Smoke test of the .dmg
+        env:
+          LABEL: ${{ matrix.label }}
+        run: bash scripts/release/smoke-dmg.sh rel "$LABEL"
+
   # Only for a pushed tag. Creates a DRAFT; publishing is done by the owner by hand.
   draft:
     if: github.event_name == 'push' && github.ref_type == 'tag'
-    needs: [ci, gate, build, assemble, smoke]
+    needs: [ci, gate, build, installers, assemble, smoke, installer-smoke]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:

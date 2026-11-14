@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Stage 19b/19g: release directory must contain EXACTLY the expected files (white list, 8 names: the CLI
-# for Linux only (Q5 b), the window for 4 targets, 2 SBOMs, the third-party licence file). Any extra
-# file (node13, ..., the CLI of another OS, a verifier, .dmg), any subdirectory (Chervotochina.app) or any missing expected file fails.
+# Stage 19b/19g/19e: release directory must contain EXACTLY the expected files (white list, 12 names: the CLI
+# for Linux only (Q5 b), the window for 4 targets, 4 installers (.deb, 2 x .dmg, -setup.exe), 2 SBOMs, the
+# third-party licence file). Any extra file (node13, ..., the CLI of another OS, a verifier, .msi, .AppImage, a .deb
+# with another name, .pkg), any subdirectory (Chervotochina.app) or any missing expected file fails.
 #   bash scripts/release/check-whitelist.sh <dir> <version>
 #   bash scripts/release/check-whitelist.sh --self-test
 set -euo pipefail
@@ -11,9 +12,13 @@ expected_names() {
   printf '%s\n' \
     "chervo-$v-linux-x86_64" \
     "chervotochina-$v-linux-x86_64" \
+    "chervotochina-$v-linux-x86_64.deb" \
     "chervotochina-$v-macos-aarch64.zip" \
+    "chervotochina-$v-macos-aarch64.dmg" \
     "chervotochina-$v-macos-x86_64.zip" \
+    "chervotochina-$v-macos-x86_64.dmg" \
     "chervotochina-$v-windows-x86_64.exe" \
+    "chervotochina-$v-windows-x86_64-setup.exe" \
     "chervo-$v-sbom.cdx.json" \
     "chervotochina-$v-sbom.cdx.json" \
     "chervo-$v-third-party-licenses.txt"
@@ -55,7 +60,9 @@ if [[ "${1:-}" == "--self-test" ]]; then
   for extra in node13 node14 node15 node16 netcheck upnp_probe knockflood chervo-1.2.3-linux-x86_64.minisig \
                "chervo-$ver-windows-x86_64.exe" "chervo-$ver-macos-aarch64" "chervo-$ver-macos-x86_64" \
                "chervo-verifier-$ver-windows-x86_64.exe" "chervo-verifier-$ver-macos-aarch64" \
-               "chervotochina-$ver-macos-aarch64.dmg" chervo-release.txt; do
+               "chervotochina-$ver-windows-x86_64.msi" "chervotochina-$ver-linux-x86_64.AppImage" "chervotochina_${ver}_amd64.deb" \
+               "chervotochina-$ver-macos-aarch64.pkg" "chervotochina-$ver-macos-x86_64.pkg" "chervotochina-$ver-linux-x86_64.rpm" \
+               "chervotochina-$ver-windows-x86_64-setup.exe.minisig" "chervotochina-$ver-linux-x86_64.deb.sig" chervo-release.txt; do
     rm -rf "$tmp/x"; cp -r "$tmp/ok" "$tmp/x"; : > "$tmp/x/$extra"
     rc=0; check "$tmp/x" "$ver" 2>/dev/null || rc=$?
     [[ $rc -ne 0 ]] || { echo "self-test: FAILED (extra '$extra' accepted)" >&2; fail=1; }
@@ -66,15 +73,17 @@ if [[ "${1:-}" == "--self-test" ]]; then
   rm -rf "$tmp/x"; cp -r "$tmp/ok" "$tmp/x"; mkdir "$tmp/x/Chervotochina.app"
   rc=0; check "$tmp/x" "$ver" 2>/dev/null || rc=$?
   [[ $rc -ne 0 ]] || { echo "self-test: FAILED (Chervotochina.app directory accepted)" >&2; fail=1; }
-  for gone in "chervo-$ver-linux-x86_64" "chervotochina-$ver-linux-x86_64" "chervotochina-$ver-macos-aarch64.zip" \
-              "chervotochina-$ver-macos-x86_64.zip" "chervotochina-$ver-windows-x86_64.exe" \
+  for gone in "chervo-$ver-linux-x86_64" "chervotochina-$ver-linux-x86_64" "chervotochina-$ver-linux-x86_64.deb" \
+              "chervotochina-$ver-macos-aarch64.zip" "chervotochina-$ver-macos-aarch64.dmg" \
+              "chervotochina-$ver-macos-x86_64.zip" "chervotochina-$ver-macos-x86_64.dmg" \
+              "chervotochina-$ver-windows-x86_64.exe" "chervotochina-$ver-windows-x86_64-setup.exe" \
               "chervo-$ver-sbom.cdx.json" "chervotochina-$ver-sbom.cdx.json" \
               "chervo-$ver-third-party-licenses.txt"; do
     rm -rf "$tmp/x"; cp -r "$tmp/ok" "$tmp/x"; rm "$tmp/x/$gone"
     rc=0; check "$tmp/x" "$ver" 2>/dev/null || rc=$?
     [[ $rc -ne 0 ]] || { echo "self-test: FAILED (missing '$gone' accepted)" >&2; fail=1; }
   done
-  [[ "$(expected_names "$ver" | wc -l | tr -d '[:space:]')" == 8 ]] || { echo "self-test: FAILED (not 8 names)" >&2; fail=1; }
+  [[ "$(expected_names "$ver" | wc -l | tr -d '[:space:]')" == 12 ]] || { echo "self-test: FAILED (not 12 names)" >&2; fail=1; }
   rm -rf "$tmp/x"; cp -r "$tmp/ok" "$tmp/x"; : > "$tmp/x/chervo-9.9.9-linux-x86_64"
   rc=0; check "$tmp/x" "$ver" 2>/dev/null || rc=$?
   [[ $rc -ne 0 ]] || { echo "self-test: FAILED (wrong-version file accepted)" >&2; fail=1; }
