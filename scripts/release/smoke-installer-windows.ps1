@@ -101,8 +101,16 @@ if (Test-Path -LiteralPath $installedExe) {
 
 # 4. shortcut
 if (Test-Path -LiteralPath $lnk) {
-    $target = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk).TargetPath
-    Check ($target -ieq $installedExe) "shortcut target is the installed file ($target)"
+    # WScript.Shell returned an empty TargetPath on windows-2025 (run 43658283046), so the target is read
+    # three ways and printed; the Shell link API or the path stored in the .lnk itself must name the file.
+    $t1 = ''; $t2 = ''
+    try { $t1 = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk).TargetPath } catch { $t1 = "error: $($_.Exception.Message)" }
+    try { $t2 = (New-Object -ComObject Shell.Application).Namespace((Split-Path -Parent $lnk)).ParseName((Split-Path -Leaf $lnk)).GetLink.Path } catch { $t2 = "error: $($_.Exception.Message)" }
+    $bytes = [IO.File]::ReadAllBytes($lnk)
+    $inLnk = ([Text.Encoding]::Unicode.GetString($bytes).IndexOf($installedExe, [StringComparison]::OrdinalIgnoreCase) -ge 0) -or
+        ([Text.Encoding]::Default.GetString($bytes).IndexOf($installedExe, [StringComparison]::OrdinalIgnoreCase) -ge 0)
+    "- shortcut target: WScript.Shell [$t1], Shell.Application [$t2], path in .lnk bytes: $inLnk"
+    Check (($t1 -ieq $installedExe) -or ($t2 -ieq $installedExe) -or $inLnk) "shortcut target is the installed file"
 } else { Bad "no shortcut $lnk" }
 
 # 5. uninstall key in HKCU
