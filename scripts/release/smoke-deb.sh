@@ -50,6 +50,14 @@ good "SHA-256 of the .deb equals the manifest line"
 want_gui="$(manifest_sha "chervotochina-$ver-linux-x86_64")"
 want_cli="$(manifest_sha "chervo-$ver-linux-x86_64")"
 [[ -n "$want_gui" && -n "$want_cli" ]] || { bad "the manifest lacks the lines of the single files"; finish; }
+# The structure of the release .deb (no maintainer scripts, root:root, modes, exact file list) is checked again here,
+# before anything runs as root: the hash only proves it is the file the manifest names (review 19e, C2).
+if bash "$root/scripts/release/check-deb.sh" "$deb" "$rel/chervotochina-$ver-linux-x86_64" "$rel/chervo-$ver-linux-x86_64" "$ver"; then
+  good "check-deb.sh on the release .deb"
+else
+  bad "check-deb.sh failed on the release .deb; the package is NOT installed"
+  finish
+fi
 
 # 1. CI set for the window and desktop-file-utils (CI only; the package does not need them)
 sudo apt-get update -qq

@@ -52,7 +52,12 @@ for pair in "$dmg_name:$dmg" "$zip_name:$zip"; do
 done
 good "SHA-256 of the .dmg and of the .zip equal the manifest lines of $label"
 
-if bash "$root/scripts/release/check-dmg.sh" "$dmg" "$zip"; then good "check-dmg.sh"; else bad "check-dmg.sh failed"; fi
+if bash "$root/scripts/release/check-dmg.sh" "$dmg" "$zip"; then good "check-dmg.sh"; else
+  # SPEC 19e section 6: nothing from the image is mounted or run until it passed check-dmg (review 19e, C3)
+  bad "check-dmg.sh failed; the image is NOT mounted"
+  summary ""
+  exit 1
+fi
 
 base="${RUNNER_TEMP:-$(mktemp -d)}"
 dest="$base/Applications"

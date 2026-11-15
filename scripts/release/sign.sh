@@ -224,9 +224,9 @@ CHECKLIST before publishing $tag (the script publishes nothing):
       'installers: not verified on machines' in the release notes). Check minisign and Get-FileHash / sha256sum of the
       installer BEFORE running it:
       Windows 11, an ordinary (non-administrator) account if possible: run chervotochina-*-windows-x86_64-setup.exe
-        with /LOG="%USERPROFILE%\Desktop\chervo-setup.log"; NO UAC prompt; 'Червоточина' in the Start menu with an
-        icon; the window opens, the icon of the window and the taskbar is shown; 'Параметры -> Приложения' lists
-        'Червоточина <version>'; uninstall from there (log: unins000.exe /LOG="%USERPROFILE%\Desktop\chervo-uninstall.log"
+        with /LOG="%TEMP%\chervo-setup.log" (cmd; PowerShell form in docs/INSTALL.md); NO UAC prompt; 'Червоточина' in the Start menu
+        with an icon; the window opens with its icon (note whether the taskbar icon is the program's); 'Параметры ->
+        Приложения' lists 'Червоточина <version>'; uninstall from there (log: unins000.exe /LOG="%TEMP%\chervo-uninstall.log"
         in %LOCALAPPDATA%\Programs\Chervotochina); after the removal %LOCALAPPDATA%\Chervotochina and the Credential
         Manager entries are still there. Keep both logs, %TEMP%\Setup Log *.txt and a screenshot of the list of apps;
       Ubuntu 24.04 with a desktop: sudo apt install ./chervotochina-*-linux-x86_64.deb 2>&1 | tee ~/apt-install.log;

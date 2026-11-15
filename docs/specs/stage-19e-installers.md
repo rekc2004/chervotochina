@@ -132,8 +132,9 @@ Icon=io.github.rekc2004.chervotochina
 Terminal=false
 Categories=Network;FileTransfer;
 StartupNotify=true
-StartupWMClass=io.github.rekc2004.chervotochina
+StartupWMClass=chervotochina
 ```
+(Дополнение 2: на X11 winit ставит WM_CLASS по имени бинаря; на Wayland окно сопоставляется по app_id = имени .desktop.)
 В `Exec` нет кодов полей (`%f`, `%u`): файловый менеджер ничего не передаёт программе. `desktop-file-validate` без ошибок.
 
 ### 3.3. Windows: `packaging/windows/chervotochina.iss` (UTF-8 **с BOM** [НП])
@@ -380,10 +381,10 @@ StartupWMClass=io.github.rekc2004.chervotochina
 ### 9.2. Чек-лист (одним заходом с прочими ручными, OWNER_DECISIONS «Ручные проверки (2026-10-28)»)
 1. Windows 11, по возможности обычная учётная запись:
    - сначала `minisign` и `Get-FileHash`;
-   - запуск `chervotochina-<v>-windows-x86_64-setup.exe /LOG="%USERPROFILE%\Desktop\chervo-setup.log"`;
+   - запуск (PowerShell) `.\chervotochina-<v>-windows-x86_64-setup.exe /LOG="$env:TEMP\chervo-setup.log"` (cmd: `/LOG="%TEMP%\chervo-setup.log"`; Дополнение 2);
    - UAC не появился; в «Пуске» «Червоточина» со значком; окно открывается, значок окна и панели задач (Q3);
    - в «Параметры → Приложения» есть «Червоточина <v>»;
-   - удаление оттуда; для журнала: `"%LOCALAPPDATA%\Programs\Chervotochina\unins000.exe" /LOG="%USERPROFILE%\Desktop\chervo-uninstall.log"`;
+   - удаление оттуда; для журнала: `"%LOCALAPPDATA%\Programs\Chervotochina\unins000.exe" /LOG="%TEMP%\chervo-uninstall.log"` (cmd);
    - после удаления на месте `%LOCALAPPDATA%\Chervotochina` и записи Credential Manager.
    Сохранить: оба журнала, `%TEMP%\Setup Log *.txt`, снимок «Приложений».
 2. Ubuntu 24.04 с рабочим столом:
@@ -473,3 +474,12 @@ StartupWMClass=io.github.rekc2004.chervotochina
 7. **eframe/egui 0.37.0** [П docs.rs]: `ViewportBuilder::with_icon(impl Into<Arc<IconData>>)`, `IconData { rgba: Vec<u8>, width: u32, height: u32 }`; `with_app_id` действует только на Wayland и задаёт место persistence корневого окна. Если смена app_id меняет путь сохранённых настроек eframe — **стоп-условие** (доложить, не мигрировать молча).
 8. **dpkg 1.21.1 на ubuntu-22.04** [П]: `--root-owner-group`, `-Zxz`, `SOURCE_DATE_EPOCH` поддержаны.
 9. [НП] до запуска в CI: работает ли job `windows-2025` от администратора (UAC на образе выключен). Поэтому доказательство «без администратора» в CI: запись удаления в HKCU, отсутствие записи в HKLM, каталог под `%LOCALAPPDATA%`; окончательно — ручная установка владельцем под обычной учётной записью.
+
+## Дополнение 2. Правки по ревью перед ручной установкой (2026-11-16)
+Ревью: `docs/reviews/REVIEW-STAGE19E.md` в ветке `claude/stage-19e-review`.
+1. К1: журналы Windows пишутся в `%TEMP%` (`$env:TEMP`), команды даны для PowerShell и cmd; `%USERPROFILE%\Desktop` при OneDrive может не существовать.
+2. К2: `StartupWMClass=chervotochina` (WM_CLASS winit на X11 = имя бинаря; на Wayland сопоставление по app_id не меняется).
+3. К3: значок панели задач Windows не обещается, проверяется вручную.
+4. К4/К5: в INSTALL разд. 3 шаг удаления и «закройте программу перед удалением».
+5. С2: smoke-deb вызывает `check-deb.sh` до `apt-get install`; при провале пакет не ставится.
+6. С3: smoke-dmg при провале `check-dmg.sh` завершается до монтирования и запуска.

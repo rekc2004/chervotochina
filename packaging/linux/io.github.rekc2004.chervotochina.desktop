@@ -8,4 +8,4 @@ Icon=io.github.rekc2004.chervotochina
 Terminal=false
 Categories=Network;FileTransfer;
 StartupNotify=true
-StartupWMClass=io.github.rekc2004.chervotochina
+StartupWMClass=chervotochina
