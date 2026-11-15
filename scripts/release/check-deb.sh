@@ -53,8 +53,13 @@ dep_re='^libc6 \(>= 2\.[0-9]+\)(, libgcc-s1)?$'
 desc="$(field Description)"
 desc="${desc%%$'\n'*}"
 [[ "$desc" == "$DESC1" ]] || err "Description (first line) is '$desc'"
-for f in Pre-Depends Recommends Enhances Conflicts Breaks Provides Replaces Essential Depends-extra; do
-  [[ -z "$(field "$f")" ]] || err "forbidden field $f"
+# By the NAME of a field at the start of a control line (the list above is already exact; this names the cause).
+# NOT by `dpkg-deb -f <Field>`: for Essential it prints a default ("no") even when the field is absent (trial run:
+# "forbidden field Essential" on a good package).
+for f in Pre-Depends Recommends Enhances Conflicts Breaks Provides Replaces Essential Conffiles Triggers; do
+  if awk -v want="$f" '/^[^ \t]/ { n = $0; sub(/:.*/, "", n); if (tolower(n) == tolower(want)) found = 1 } END { exit !found }' <<<"$ctrl"; then
+    err "forbidden field $f"
+  fi
 done
 
 # --- tar listings -------------------------------------------------------------------------------------

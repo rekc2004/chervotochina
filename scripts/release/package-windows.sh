@@ -24,8 +24,29 @@ valid_version() { [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
 epoch_date() { date -u -d "@$1" +%Y-%m-%d; }
 epoch_time() { date -u -d "@$1" +%H:%M:%S; }
 
+# engine_version_ok LOG VERSION -> 0 if the ISCC log has the line `Compiler engine version: <title> <version...>` whose
+# text holds VERSION as a whole number group (6.7.4 yes; 6.7.40, 6.7.4.1, 16.7.4 no). ISCC.exe itself carries no
+# version in its resources (0.0.0.0, trial run 43656526221), this line comes from the compiler engine.
+engine_version_ok() {
+  local line
+  line="$(grep -m1 '^Compiler engine version:' "$1" | tr -d '\r' || true)"
+  [[ -n "$line" ]] || return 1
+  local re="(^|[^0-9.])${2//./\\.}([^0-9.]|\$)"
+  [[ "${line#Compiler engine version:}" =~ $re ]]
+}
+
 if [[ "${1:-}" == "--self-test" ]]; then
   fail=0
+  tl="$(mktemp)"
+  for ok in 'Compiler engine version: Inno Setup 6.7.4' 'Compiler engine version: Inno Setup 6.7.4 (u)' $'Compiler engine version: Inno Setup 6.7.4\r'; do
+    printf '%s\n' "$ok" > "$tl"; engine_version_ok "$tl" 6.7.4 || { echo "self-test: FAILED (engine line rejected: $ok)" >&2; fail=1; }
+  done
+  for bad in 'Compiler engine version: Inno Setup 6.7.40' 'Compiler engine version: Inno Setup 6.7.4.1' 'Compiler engine version: Inno Setup 16.7.4' \
+             'Compiler engine version: Inno Setup 6.7.3' 'Compiler engine version: Inno Setup' 'Inno Setup 6.7.4' ''; do
+    printf '%s\n' "$bad" > "$tl"; if engine_version_ok "$tl" 6.7.4; then echo "self-test: FAILED (engine line accepted: $bad)" >&2; fail=1; fi
+  done
+  : > "$tl"; if engine_version_ok "$tl" 6.7.4; then echo "self-test: FAILED (empty log accepted)" >&2; fail=1; fi
+  rm -f "$tl"
   for v in 1.2.3 0.0.0 10.20.30; do valid_version "$v" || { echo "self-test: FAILED (rejected version $v)" >&2; fail=1; }; done
   for v in 1.2 1.2.3.4 1.2.3-rc1 v1.2.3 '' '1.2.3 ' '$(id)' '1.2.3;x' $'1.2.3\n'; do
     if valid_version "$v"; then echo "self-test: FAILED (accepted version '$v')" >&2; fail=1; fi
@@ -66,6 +87,7 @@ cp -- "$ico" "$src/chervotochina.ico"
 touch -d "@$SOURCE_DATE_EPOCH" "$src/chervotochina.exe" "$src/chervotochina.ico"
 
 bash "$root/scripts/release/check-iss.sh" "$iss"
+inno_version="$(bash "$root/scripts/release/fetch-tool.sh" --get inno-setup version)"
 
 tdate="$(epoch_date "$SOURCE_DATE_EPOCH")"
 ttime="$(epoch_time "$SOURCE_DATE_EPOCH")"
@@ -77,6 +99,10 @@ build() { # N -> $work/oN/<name>
   "$iscc" "/DAppVersion=$ver" "/DSrcDir=$(native_path "$src")" "/DTouchDate=$tdate" "/DTouchTime=$ttime" \
     "/O$(native_path "$d")" "$(native_path "$iss")" > "$work/iscc$1.log" 2>&1 || {
     echo "package-windows: ISCC failed (build $1); log tail:" >&2; tail -n 40 "$work/iscc$1.log" >&2; return 1; }
+  summary "- build $1 (ISCC): $(grep -m1 '^Compiler engine version:' "$work/iscc$1.log" | tr -d '\r' || echo 'no engine version line')"
+  engine_version_ok "$work/iscc$1.log" "$inno_version" || {
+    echo "package-windows: the ISCC log has no 'Compiler engine version: ... $inno_version' line (pinned in packaging/tools.lock); log head:" >&2
+    head -n 8 "$work/iscc$1.log" >&2; return 1; }
   local found=( "$d"/* )
   [[ ${#found[@]} -eq 1 && "${found[0]##*/}" == "$name" && -f "${found[0]}" ]] || {
     echo "package-windows: ISCC output is not exactly $name: ${found[*]}" >&2; return 1; }

@@ -237,7 +237,7 @@ jobs:
           foreach ($rdn in @($env:INNO_SIGNER -split ',\s*')) {
             if ($have -cnotcontains $rdn) { "signer check failed: '$rdn' is not among the subject parts: stop"; exit 1 }
           }
-          "- signer matches packaging/tools.lock: $env:INNO_SIGNER" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "- signer matches packaging/tools.lock: $($env:INNO_SIGNER)" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
           $dir = Join-Path $env:RUNNER_TEMP 'inno'
           if (Test-Path -LiteralPath $dir) { "directory exists: $dir"; exit 1 }
           $logs = Join-Path $env:RUNNER_TEMP 'tool-logs'
@@ -249,10 +249,11 @@ jobs:
           $iscc = Join-Path $dir 'ISCC.exe'
           if (-not (Test-Path -LiteralPath $iscc)) { "no ISCC.exe in $dir"; exit 1 }
           $vi = (Get-Item -LiteralPath $iscc).VersionInfo
-          "- ISCC.exe FileVersion: $($vi.FileVersion), ProductVersion: $($vi.ProductVersion) (pinned version: $env:INNO_VERSION)" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
-          # exact version: 6.7.4, or 6.7.4.0 (trailing zero parts only); 6.7.40 or 6.7.4.1 do not pass
-          $vre = '^' + [regex]::Escape($env:INNO_VERSION) + '(\.0+)*$'
-          if (-not (($vi.FileVersion -match $vre) -or ($vi.ProductVersion -match $vre))) { "ISCC.exe version is not exactly $env:INNO_VERSION: stop"; exit 1 }
+          # The resources of ISCC.exe carry no version (FileVersion and ProductVersion are 0.0.0.0 in 6.7.4; trial run
+          # 43656526221): printed for the record only, NOT a gate. The version is guaranteed by the pinned SHA-256 of the
+          # installer; as a second check package-windows.sh requires the line `Compiler engine version: ... <version>`
+          # that ISCC prints on every compilation (the version comes from packaging/tools.lock, see the next step).
+          "- ISCC.exe FileVersion: $($vi.FileVersion), ProductVersion: $($vi.ProductVersion) (pinned version: $($env:INNO_VERSION); record only)" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
           # on success the installation log is required (the upload step keeps if-no-files-found: error)
           if (-not (Test-Path -LiteralPath $log)) { "the Inno installation log $log was not written: stop"; exit 1 }
           "ISCC=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
@@ -263,6 +264,7 @@ jobs:
         run: |
           set -euo pipefail
           export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          # package-windows.sh reads the Inno version from packaging/tools.lock and checks the engine version line of ISCC
           bash scripts/release/package-windows.sh "in/chervotochina-$VER-windows-x86_64.exe" "$VER" inst "$ISCC"
       - if: matrix.kind == 'windows'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
