@@ -247,16 +247,21 @@ guard_no_verifier_in_release() { # release.yml
 # --- 9 --- (stage 19e, R19e-8) `assemble` takes the files by EXACT artifact names, never by a pattern: the job
 # `installers` runs a foreign program (Inno Setup) and could upload an extra artifact (bin-zzz) or replace one.
 # In the job: no `pattern:` anywhere; exactly 8 download-artifact steps, each with `name:` from the closed list below
-# (each name exactly once) and `path: dist`. The upload step (name: release-files) is not a download and is not counted.
+# (each name exactly once) and `path: art/<its own name>` (review 19e B4: every artifact in its OWN directory, then
+# `collect-dist.sh art dist` BEFORE assemble.sh checks the file names and copies; no shared directory where one artifact
+# could overwrite a file of another). The upload step (name: release-files) is not a download and is not counted.
 assemble_names='bin-linux-x86_64 bin-macos-aarch64 bin-macos-x86_64 bin-windows-x86_64 inst-linux-x86_64 inst-macos-aarch64 inst-macos-x86_64 inst-windows-x86_64'
 guard_assemble_exact() { # release.yml
-  local f="$1" block line t ctx="" downloads=0 bad=0 n seen="" paths=0
+  local f="$1" block line t ctx="" downloads=0 bad=0 n seen="" pseen="" idx=0 collect_n="" asm_n=""
   [[ -f "$f" ]] || { echo "missing file: $f" >&2; return 1; }
   block="$(job_block "$f" assemble)"
   [[ -n "$block" ]] || { echo "$f: job assemble not found" >&2; return 1; }
   while IFS= read -r line; do
     t="${line#"${line%%[![:space:]]*}"}"
     t="${t%"${t##*[![:space:]]}"}"
+    idx=$((idx + 1))
+    [[ "$t" == *'scripts/release/collect-dist.sh art dist'* && -z "$collect_n" ]] && collect_n=$idx
+    [[ "$t" == *'scripts/release/assemble.sh'* && -z "$asm_n" ]] && asm_n=$idx
     if [[ "$t" =~ ^(-[[:space:]]+)?pattern: ]]; then
       echo "$f: job assemble must not use 'pattern:' (exact names only): $t" >&2; bad=1
     fi
@@ -277,7 +282,7 @@ guard_assemble_exact() { # release.yml
         fi
         seen="$seen $n"
       fi
-      [[ "$t" == 'path: dist' ]] && paths=$((paths + 1))
+      if [[ "$t" =~ ^path:[[:space:]]*(.*)$ ]]; then pseen="$pseen ${BASH_REMATCH[1]}"; fi
       if [[ "$t" =~ ^merge-multiple: ]]; then
         echo "$f: job assemble must not use merge-multiple (exact names only): $t" >&2; bad=1
       fi
@@ -289,8 +294,17 @@ guard_assemble_exact() { # release.yml
   for n in $assemble_names; do
     [[ " $seen " == *" $n "* ]] || { echo "$f: job assemble does not download '$n'" >&2; bad=1; }
   done
-  if [[ "$paths" -ne 8 ]]; then
-    echo "$f: every download of job assemble must have 'path: dist' (found $paths of 8)" >&2; bad=1
+  # the paths are exactly art/<name> of the 8 names, each once, and nothing else (no shared `dist`)
+  for n in $assemble_names; do
+    [[ " $pseen " == *" art/$n "* ]] || { echo "$f: the download of '$n' must have 'path: art/$n'" >&2; bad=1; }
+  done
+  if [[ "$(wc -w <<<"$pseen" | tr -d '[:space:]')" -ne 8 ]]; then
+    echo "$f: every download of job assemble must have its own path art/<name> (paths found:$pseen)" >&2; bad=1
+  fi
+  if [[ -z "$collect_n" ]]; then
+    echo "$f: job assemble does not run 'scripts/release/collect-dist.sh art dist'" >&2; bad=1
+  elif [[ -z "$asm_n" || "$collect_n" -ge "$asm_n" ]]; then
+    echo "$f: collect-dist.sh must run BEFORE assemble.sh in job assemble" >&2; bad=1
   fi
   return "$bad"
 }
@@ -312,6 +326,17 @@ guard_iss_checked() { # repo-root
   elif [[ "$chk" -ge "$run" ]]; then
     echo "$pw: check-iss.sh must be called BEFORE ISCC" >&2; bad=1
   fi
+  # review 19e B6: the SAME script is checked and compiled: one variable `iss`, assigned once to the real path, is the
+  # argument of check-iss.sh and of ISCC (no second path, no literal path in either call)
+  local lines
+  lines="$(logical_lines "$pw")"
+  if [[ "$(grep -cE '^iss=' <<<"$lines" || true)" -ne 1 ]] || ! grep -qxF 'iss="$root/packaging/windows/chervotochina.iss"' <<<"$lines"; then
+    echo "$pw: 'iss' must be assigned exactly once, to \"\$root/packaging/windows/chervotochina.iss\"" >&2; bad=1
+  fi
+  grep -E 'scripts/release/check-iss\.sh' <<<"$lines" | grep -qE 'check-iss\.sh" "\$iss"[[:space:]]*$' ||
+    { echo "$pw: check-iss.sh must be called with the argument \"\$iss\" and nothing after it" >&2; bad=1; }
+  grep -E '^[[:space:]]*"\$iscc"' <<<"$lines" | grep -qF '"$(native_path "$iss")"' ||
+    { echo "$pw: ISCC must get the script as \"\$(native_path \"\$iss\")\" (the same variable as check-iss.sh)" >&2; bad=1; }
   return "$bad"
 }
 
@@ -790,7 +815,7 @@ jobs:
   local dl='      - uses: actions/download-artifact@0123456789abcdef0123456789abcdef01234567 # v4.3.0
         with:
           name: NAME
-          path: dist
+          path: art/NAME
 '
   local a9="jobs:
   installers:
@@ -806,8 +831,9 @@ jobs:
           persist-credentials: false
 "
   local n9
-  for n9 in $assemble_names; do a9+="${dl/NAME/$n9}"; done
-  a9+='      - run: bash scripts/release/assemble.sh dist release
+  for n9 in $assemble_names; do a9+="${dl//NAME/$n9}"; done
+  a9+='      - run: bash scripts/release/collect-dist.sh art dist
+      - run: bash scripts/release/assemble.sh dist release
       - uses: actions/upload-artifact@0123456789abcdef0123456789abcdef01234567 # v4.6.2
         with:
           name: release-files
@@ -828,13 +854,13 @@ jobs:
   expect assemble-tool-logs-name 1 guard_assemble_exact "$f"
   f="$tmp/e4.yml"; subst "$a9" 'name: inst-macos-x86_64' 'name: inst-macos-aarch64' > "$f"
   expect assemble-duplicate-name 1 guard_assemble_exact "$f"
-  f="$tmp/e5.yml"; subst "$a9" "${dl/NAME/inst-macos-x86_64}" '' > "$f"
+  f="$tmp/e5.yml"; subst "$a9" "${dl//NAME/inst-macos-x86_64}" '' > "$f"
   expect assemble-only-7-downloads 1 guard_assemble_exact "$f"
-  f="$tmp/e6.yml"; subst "$a9" '      - run: bash scripts/release/assemble.sh' "${dl/NAME/bin-zzz}      - run: bash scripts/release/assemble.sh" > "$f"
+  f="$tmp/e6.yml"; subst "$a9" '      - run: bash scripts/release/assemble.sh' "${dl//NAME/bin-zzz}      - run: bash scripts/release/assemble.sh" > "$f"
   expect assemble-9th-download 1 guard_assemble_exact "$f"
-  f="$tmp/e7.yml"; subst "$a9" $'name: inst-linux-x86_64\n          path: dist' $'name: inst-linux-x86_64\n          path: other' > "$f"
+  f="$tmp/e7.yml"; subst "$a9" $'name: inst-linux-x86_64\n          path: art/inst-linux-x86_64' $'name: inst-linux-x86_64\n          path: dist' > "$f"
   expect assemble-path-not-dist 1 guard_assemble_exact "$f"
-  f="$tmp/e8.yml"; subst "$a9" 'path: dist' $'path: dist\n          merge-multiple: true' > "$f"
+  f="$tmp/e8.yml"; subst "$a9" 'path: art/bin-linux-x86_64' $'path: art/bin-linux-x86_64\n          merge-multiple: true' > "$f"
   expect assemble-merge-multiple 1 guard_assemble_exact "$f"
   f="$tmp/e9.yml"; subst "$a9" '      - run: bash scripts/release/assemble.sh' $'      - run: echo\n        with:\n          pattern: bin-*\n      - run: bash scripts/release/assemble.sh' > "$f"
   expect assemble-pattern-anywhere 1 guard_assemble_exact "$f"
@@ -853,7 +879,10 @@ jobs:
     printf '%s' "$3" > "$1/scripts/release/package-windows.sh"
   }
   local ci8=$'      - run: bash scripts/release/check-iss.sh --self-test\n      - run: bash scripts/release/check-iss.sh packaging/windows/chervotochina.iss\n'
-  local pw8=$'bash "$root/scripts/release/check-iss.sh" "$iss"\n  "$iscc" "/DAppVersion=$ver" \\\n    "/Ox"\n'
+  local iss8='iss="$root/packaging/windows/chervotochina.iss"'
+  local chk8='bash "$root/scripts/release/check-iss.sh" "$iss"'
+  local run8='  "$iscc" "/DAppVersion=$ver" "$(native_path "$iss")"'
+  local pw8="$iss8"$'\n'"$chk8"$'\n'"$run8"$'\n'
   local t8="$tmp/t8"
   mk8 "$t8" "$ci8" "$pw8"
   expect iss-checked-ok 0 guard_iss_checked "$t8"
@@ -863,14 +892,34 @@ jobs:
   expect iss-ci-not-on-real-file 1 guard_iss_checked "$t8"
   mk8 "$t8" $'      - run: echo\n' "$pw8"
   expect iss-ci-missing 1 guard_iss_checked "$t8"
-  mk8 "$t8" "$ci8" $'  "$iscc" "/DAppVersion=$ver"\n'
+  mk8 "$t8" "$ci8" "$iss8"$'\n'"$run8"$'\n'
   expect iss-package-no-check 1 guard_iss_checked "$t8"
-  mk8 "$t8" "$ci8" $'# bash scripts/release/check-iss.sh "$iss"\n  "$iscc" "/DAppVersion=$ver"\n'
+  mk8 "$t8" "$ci8" "$iss8"$'\n# '"$chk8"$'\n'"$run8"$'\n'
   expect iss-package-only-comment 1 guard_iss_checked "$t8"
-  mk8 "$t8" "$ci8" $'  "$iscc" "/DAppVersion=$ver"\nbash "$root/scripts/release/check-iss.sh" "$iss"\n'
+  mk8 "$t8" "$ci8" "$iss8"$'\n'"$run8"$'\n'"$chk8"$'\n'
   expect iss-package-check-after-iscc 1 guard_iss_checked "$t8"
-  mk8 "$t8" "$ci8" $'bash "$root/scripts/release/check-iss.sh" "$iss"\n'
+  mk8 "$t8" "$ci8" "$iss8"$'\n'"$chk8"$'\n'
   expect iss-package-no-iscc-line 1 guard_iss_checked "$t8"
+  # review 19e B6: check-iss.sh and ISCC must get the SAME variable, assigned once to the real path
+  mk8 "$t8" "$ci8" "$iss8"$'\n'"$chk8"$'\n'"${run8/\"\$iss\"/\"\$iss2\"}"$'\n'
+  expect iss-iscc-other-variable 1 guard_iss_checked "$t8"
+  mk8 "$t8" "$ci8" "$iss8"$'\n'"${chk8/\"\$iss\"/\"\$iss2\"}"$'\n'"$run8"$'\n'
+  expect iss-check-other-variable 1 guard_iss_checked "$t8"
+  mk8 "$t8" "$ci8" "$iss8"$'\n'"${chk8/\"\$iss\"/packaging/windows/chervotochina.iss}"$'\n'"$run8"$'\n'
+  expect iss-check-literal-path 1 guard_iss_checked "$t8"
+  mk8 "$t8" "$ci8" "$iss8"$'\n'"$chk8"$'\n''  "$iscc" "/DAppVersion=$ver" "C:/other.iss"'$'\n'
+  expect iss-iscc-literal-path 1 guard_iss_checked "$t8"
+  mk8 "$t8" "$ci8" "$iss8"$'\n'"$iss8"$'\n'"$chk8"$'\n'"$run8"$'\n'
+  expect iss-assigned-twice 1 guard_iss_checked "$t8"
+  mk8 "$t8" "$ci8" 'iss="$root/other.iss"'$'\n'"$chk8"$'\n'"$run8"$'\n'
+  expect iss-assigned-other-path 1 guard_iss_checked "$t8"
+  # review 19e B4: collect-dist.sh runs before assemble.sh; a missing or late collect step, or two artifacts in one directory, fail
+  f="$tmp/e13.yml"; subst "$a9" $'      - run: bash scripts/release/collect-dist.sh art dist\n' '' > "$f"
+  expect assemble-no-collect-step 1 guard_assemble_exact "$f"
+  f="$tmp/e14.yml"; subst "$a9" $'      - run: bash scripts/release/collect-dist.sh art dist\n      - run: bash scripts/release/assemble.sh dist release\n' $'      - run: bash scripts/release/assemble.sh dist release\n      - run: bash scripts/release/collect-dist.sh art dist\n' > "$f"
+  expect assemble-collect-after-assemble 1 guard_assemble_exact "$f"
+  f="$tmp/e15.yml"; subst "$a9" 'path: art/inst-windows-x86_64' 'path: art/bin-linux-x86_64' > "$f"
+  expect assemble-two-artifacts-one-directory 1 guard_assemble_exact "$f"
   expect iss-real-repo 0 guard_iss_checked "$(cd "$(dirname "$0")/.." && pwd)"
   expect assemble-exact-real-repo 0 guard_assemble_exact "$(cd "$(dirname "$0")/.." && pwd)/.github/workflows/release.yml"
 

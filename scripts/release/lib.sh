@@ -1,15 +1,25 @@
 #!/usr/bin/env bash
 # Shared helpers for scripts/release/*.sh (sourced, not executed).
 
-# sha256_of FILE -> 64 lowercase hex on stdout (sha256sum on Linux/Git Bash, shasum on macOS).
+# hash_field LINE -> the hash of a `sha256sum`/`shasum` output line: the first field, without the leading
+# backslash that GNU sha256sum puts in front of the line when the FILE NAME holds a backslash or a newline
+# (Git Bash on Windows: `D:\a\_temp\x` gives `\<hash>  D:\\a\\_temp\\x`).
+hash_field() {
+  local out="$1"
+  out="${out#\\}"
+  printf '%s\n' "${out%% *}"
+}
+
+# sha256_of FILE -> 64 lowercase hex on stdout (sha256sum on Linux/Git Bash, shasum on macOS). The file is read from
+# stdin, so its name never appears in the output (no escaping, review 19e A1); the hash field is cut by hash_field.
 sha256_of() {
   local out
   if command -v sha256sum >/dev/null 2>&1; then
-    out="$(sha256sum -- "$1")"
+    out="$(sha256sum < "$1")"
   else
-    out="$(shasum -a 256 -- "$1")"
+    out="$(shasum -a 256 < "$1")"
   fi
-  printf '%s\n' "${out%% *}"
+  hash_field "$out"
 }
 
 # size_of FILE -> size in bytes.

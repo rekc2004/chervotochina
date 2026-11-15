@@ -245,6 +245,9 @@ self_test() {
   m_world_writable() { chmod 0666 "$1/usr/share/applications/$APP_ID.desktop"; }
   m_conffiles() { echo /etc/x > "$1/DEBIAN/conffiles"; }
   m_desktop() { echo '# x' >> "$1/usr/share/applications/$APP_ID.desktop"; }
+  # review 19e B7: Exec must be the absolute path (check-deb also fails on the byte comparison; both are in force)
+  m_exec_relative() { sed -i 's#^Exec=.*#Exec=chervotochina#' "$1/usr/share/applications/$APP_ID.desktop"; }
+  m_exec_fields() { sed -i 's#^Exec=.*#Exec=/usr/bin/chervotochina %f#' "$1/usr/share/applications/$APP_ID.desktop"; }
   m_md5() { sed -i -e '1s/^a/b/' -e '1t' -e '1s/^./a/' "$1/DEBIAN/md5sums"; }  # always changes the first hash
   neg baseline 0 m_none
   neg postinst 0 m_postinst
@@ -262,6 +265,8 @@ self_test() {
   neg conffiles 0 m_conffiles
   neg changed-desktop 0 m_desktop
   neg bad-md5sums 0 m_md5
+  neg exec-relative 0 m_exec_relative
+  neg exec-with-field-code 0 m_exec_fields
   [[ $fail -eq 0 ]] && echo "self-test: ok"
   return "$fail"
 }

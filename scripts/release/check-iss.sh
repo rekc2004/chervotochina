@@ -90,7 +90,15 @@ check_iss() {
     [[ $lineno -eq 1 ]] && line="${line#$'\xEF\xBB\xBF'}"
     t="${line#"${line%%[![:space:]]*}"}"
     t="${t%"${t##*[![:space:]]}"}"
-    [[ -z "$t" || "$t" == \;* ]] && continue
+    if [[ "$t" == \;* ]]; then
+      # a comment line runs nothing in Inno, but ISPP expands inline `{#...}` in it too: no inline constructs
+      # (review 19e B5, Low).
+      if [[ "$t" == *'{#'* ]]; then
+        echo "check-iss: line $lineno: ISPP inline construct {# in a comment: $t" >&2; bad=1
+      fi
+      continue
+    fi
+    [[ -z "$t" ]] && continue
     if [[ "$t" == '#'* ]]; then
       case "$t" in
         '#ifndef AppVersion'|'#ifndef SrcDir'|'#ifndef TouchDate'|'#ifndef TouchTime'|'#endif') ;;
@@ -166,6 +174,13 @@ self_test() {
     [[ "$rc" == "$2" ]] || { echo "self-test: FAILED ($1: rc=$rc, expected $2)" >&2; fail=1; }
   }
   expect real-file 0 "$iss"
+  # review 19e A3: the file on disk is CRLF (.gitattributes `*.iss eol=crlf`) on one OS and LF on another. The sed
+  # mutations below work on an LF copy that KEEPS the BOM, so they behave the same everywhere; the checker itself
+  # is tested on both LF and CRLF forms.
+  tr -d '\r' < "$iss" > "$tmp/base.iss"
+  [[ "$(head -c 3 "$tmp/base.iss" | od -An -tx1 | tr -d ' \n')" == efbbbf ]] || { echo "self-test: FAILED (the LF copy lost the BOM)" >&2; fail=1; }
+  iss="$tmp/base.iss"
+  expect lf-ok 0 "$iss"
   # CRLF line endings are fine (git checks the file out with CRLF on Windows)
   sed 's/$/\r/' "$iss" > "$tmp/crlf.iss"; expect crlf-ok 0 "$tmp/crlf.iss"
   # mutate NAME SED-EXPRESSION: a copy of the real file with one change must be rejected
@@ -175,6 +190,8 @@ self_test() {
     expect "$1" 1 "$tmp/m.iss"
   }
   append() { { cat "$iss"; printf '%s\n' "${@:2}"; } > "$tmp/a.iss"; expect "$1" 1 "$tmp/a.iss"; }
+  append comment-inline-ispp '; {#emit "x"}'
+  mutate comment-inline-ispp-first-line '2s/^;/; {#SrcDir}/'
   append section-code '' '[Code]' 'function InitializeSetup(): Boolean;'
   append section-uninstalldelete '' '[UninstallDelete]' 'Type: filesandordirs; Name: "{app}"'
   append section-registry '' '[Registry]' 'Root: HKCU; Subkey: "Software\X"'

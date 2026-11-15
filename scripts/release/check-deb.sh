@@ -112,6 +112,10 @@ if dpkg-deb -x "$deb" "$tmp/x" && dpkg-deb -e "$deb" "$tmp/c"; then
   for s in "${SIZES[@]}"; do
     cmp -s -- "$root/packaging/icons/chervotochina-$s.png" "$tmp/x/usr/share/icons/hicolor/${s}x${s}/apps/$APP_ID.png" || err "icon $s differs from packaging/icons"
   done
+  # review 19e B7: the launcher calls the binary of THIS package by its absolute path, without field codes
+  [[ "$(grep -c '^Exec=' "$tmp/x/usr/share/applications/$APP_ID.desktop" || true)" == 1 ]] &&
+    grep -qxF 'Exec=/usr/bin/chervotochina' "$tmp/x/usr/share/applications/$APP_ID.desktop" ||
+    err "the .desktop file must have exactly one line 'Exec=/usr/bin/chervotochina'"
   [[ -s "$tmp/x/usr/share/doc/chervotochina/copyright" ]] || err "copyright is empty"
   grep -qF "chervo-$ver-third-party-licenses.txt" "$tmp/x/usr/share/doc/chervotochina/copyright" || err "copyright does not name the third-party licences file"
   if [[ -f "$tmp/c/md5sums" ]]; then

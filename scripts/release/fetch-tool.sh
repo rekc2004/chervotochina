@@ -178,6 +178,29 @@ self_test() {
   [[ "$msg" == *"expected sha256: $sha64"* && "$msg" == *"actual   sha256: "* && "$msg" == *"actual   size:"* ]] ||
     { echo "self-test: FAILED (the failure message lacks expected/actual values)" >&2; fail=1; }
 
+  # review 19e A1: sha256sum puts a backslash in front of the line when the file name holds a backslash
+  # (Git Bash on Windows). The hash must not depend on the name.
+  [[ "$(hash_field "\\$good_sha  D:\\\\a\\\\_temp/x.bin")" == "$good_sha" ]] || { echo "self-test: FAILED (hash_field with a leading backslash)" >&2; fail=1; }
+  [[ "$(hash_field "$good_sha  x.bin")" == "$good_sha" ]] || { echo "self-test: FAILED (hash_field plain line)" >&2; fail=1; }
+  [[ "$(hash_field "$good_sha *x.bin")" == "$good_sha" ]] || { echo "self-test: FAILED (hash_field binary-mode line)" >&2; fail=1; }
+  printf 'hello tool' > "$tmp/plain.bin"
+  # Windows form of the path (D:\a\_temp\...), as in the CI failure: exists only under Git Bash (cygpath)
+  if command -v cygpath >/dev/null 2>&1; then
+    local winp
+    winp="$(cygpath -w "$tmp/plain.bin")"
+    [[ "$(sha256_of "$winp")" == "$good_sha" ]] || { echo "self-test: FAILED (sha256_of of a Windows path with backslashes)" >&2; fail=1; }
+    printf 'hello tool' > "$tmp/win.bin"
+    expect verify-windows-path 0 verify_file "$(cygpath -w "$tmp/win.bin")" "$good_sha" "$good_size"
+  fi
+  # a real file name with a backslash or a newline (Linux only: on Windows the shell cannot create them)
+  if { printf 'hello tool' > "$tmp/with\\back.bin"; } 2>/dev/null && [[ -f "$tmp/with\\back.bin" ]]; then
+    [[ "$(sha256_of "$tmp/with\\back.bin")" == "$good_sha" ]] || { echo "self-test: FAILED (sha256_of of a file name with a backslash)" >&2; fail=1; }
+    expect verify-name-with-backslash 0 verify_file "$tmp/with\\back.bin" "$good_sha" "$good_size"
+  fi
+  if { printf 'hello tool' > "$tmp/nl"$'\n'"x.bin"; } 2>/dev/null && [[ -f "$tmp/nl"$'\n'"x.bin" ]]; then
+    [[ "$(sha256_of "$tmp/nl"$'\n'"x.bin")" == "$good_sha" ]] || { echo "self-test: FAILED (sha256_of of a file name with a newline)" >&2; fail=1; }
+  fi
+
   # target directory: absent or empty only
   expect dir-absent 0 check_new_dir "$tmp/newdir"
   mkdir "$tmp/empty"; expect dir-empty 0 check_new_dir "$tmp/empty"

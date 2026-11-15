@@ -35,6 +35,7 @@ jobs:
       - run: bash scripts/release/package-deb.sh --self-test
       - run: bash scripts/release/package-dmg.sh --self-test
       - run: bash scripts/release/package-windows.sh --self-test
+      - run: bash scripts/release/collect-dist.sh --self-test
       # Stage 18b (DECISION 2.9): the Linux tree of the GUI has no zbus 5 / zvariant / accesskit_unix.
       - run: bash scripts/check-gui-linux-tree.sh --self-test
       - run: bash scripts/check-gui-linux-tree.sh

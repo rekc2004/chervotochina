@@ -205,6 +205,14 @@ jobs:
         with:
           name: bin-windows-x86_64
           path: in
+      # The log directory always holds a note, so the log upload below cannot fail with "no files" after an early
+      # error (the Inno installation log is added later; on success it is required, see the check after the install).
+      - if: matrix.kind == 'windows'
+        name: Create the tool log directory
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/tool-logs"
+          echo "installers (windows): run $GITHUB_RUN_ID, started; the Inno installation log inno-install.log follows if the installation ran" > "$RUNNER_TEMP/tool-logs/steps.txt"
       - if: matrix.kind == 'windows'
         name: Fetch Inno Setup (size and SHA-256 are checked before anything is run; nothing is run here)
         run: |
@@ -233,7 +241,7 @@ jobs:
           $dir = Join-Path $env:RUNNER_TEMP 'inno'
           if (Test-Path -LiteralPath $dir) { "directory exists: $dir"; exit 1 }
           $logs = Join-Path $env:RUNNER_TEMP 'tool-logs'
-          New-Item -ItemType Directory -Force -Path $logs | Out-Null
+          New-Item -ItemType Directory -Force -Path $logs | Out-Null  # already made by the earlier step
           $log = Join-Path $logs 'inno-install.log'
           $p = Start-Process -FilePath $env:INNO_FILE -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/DIR=`"$dir`"", "/LOG=`"$log`"") -Wait -PassThru
           "- Inno Setup installer exit code: $($p.ExitCode)" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
@@ -242,7 +250,11 @@ jobs:
           if (-not (Test-Path -LiteralPath $iscc)) { "no ISCC.exe in $dir"; exit 1 }
           $vi = (Get-Item -LiteralPath $iscc).VersionInfo
           "- ISCC.exe FileVersion: $($vi.FileVersion), ProductVersion: $($vi.ProductVersion) (pinned version: $env:INNO_VERSION)" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
-          if (-not ($vi.FileVersion -like "$($env:INNO_VERSION)*" -or $vi.ProductVersion -like "$($env:INNO_VERSION)*")) { "ISCC.exe version does not start with $env:INNO_VERSION: stop"; exit 1 }
+          # exact version: 6.7.4, or 6.7.4.0 (trailing zero parts only); 6.7.40 or 6.7.4.1 do not pass
+          $vre = '^' + [regex]::Escape($env:INNO_VERSION) + '(\.0+)*$'
+          if (-not (($vi.FileVersion -match $vre) -or ($vi.ProductVersion -match $vre))) { "ISCC.exe version is not exactly $env:INNO_VERSION: stop"; exit 1 }
+          # on success the installation log is required (the upload step keeps if-no-files-found: error)
+          if (-not (Test-Path -LiteralPath $log)) { "the Inno installation log $log was not written: stop"; exit 1 }
           "ISCC=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - if: matrix.kind == 'windows'
         name: Build the installer (twice) and check the script
@@ -317,35 +329,39 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: bin-linux-x86_64
-          path: dist
+          path: art/bin-linux-x86_64
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: bin-macos-aarch64
-          path: dist
+          path: art/bin-macos-aarch64
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: bin-macos-x86_64
-          path: dist
+          path: art/bin-macos-x86_64
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: bin-windows-x86_64
-          path: dist
+          path: art/bin-windows-x86_64
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: inst-linux-x86_64
-          path: dist
+          path: art/inst-linux-x86_64
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: inst-macos-aarch64
-          path: dist
+          path: art/inst-macos-aarch64
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: inst-macos-x86_64
-          path: dist
+          path: art/inst-macos-x86_64
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: inst-windows-x86_64
-          path: dist
+          path: art/inst-windows-x86_64
+      # Each artifact lies in its OWN directory; collect-dist.sh checks that it holds exactly the names it may carry
+      # and copies them into dist, refusing an existing file (review 19e B4: a foreign program in `installers` must
+      # not replace a file of another artifact).
+      - run: bash scripts/release/collect-dist.sh art dist
       - run: cargo install --locked --version =0.5.9 cargo-cyclonedx
       - run: cargo install --locked --version =0.9.2 --features cli cargo-about
       - run: bash scripts/release/assemble.sh dist release
@@ -462,7 +478,13 @@ jobs:
         run: bash scripts/release/smoke-deb.sh rel
       - if: matrix.kind == 'windows'
         name: Smoke test of the installer (silent install, checks, silent uninstall)
-        run: pwsh -NoProfile -File scripts/release/smoke-installer-windows.ps1 rel "$RUNNER_TEMP/installer-logs"
+        run: |
+          set -euo pipefail
+          # a note first: the log upload cannot fail with "no files" if the script stops early (the two Inno logs
+          # install.log and uninstall.log are written by the script itself)
+          mkdir -p "$RUNNER_TEMP/installer-logs"
+          echo "installer-smoke (windows): run $GITHUB_RUN_ID, started" > "$RUNNER_TEMP/installer-logs/steps.txt"
+          pwsh -NoProfile -File scripts/release/smoke-installer-windows.ps1 rel "$RUNNER_TEMP/installer-logs"
       - if: always() && matrix.kind == 'windows'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
