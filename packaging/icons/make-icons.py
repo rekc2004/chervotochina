@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage 19e-1: deterministic procedural icon ("wormhole": concentric rings sinking into a dark core).
+"""Stage 19e-1: deterministic procedural icon (bridge with a spiral and a file; v2, see docs/specs/stage-19e-icon-v2.md).
 
   python3 -I packaging/icons/make-icons.py --out <dir> [--rgba <file>]
   python3 -I packaging/icons/make-icons.py --check <dir> [--rgba <file>]
@@ -32,88 +32,314 @@ RGBA_SIZE = 64
 PNG_SIG = b"\x89PNG\r\n\x1a\n"
 
 # --------------------------------------------------------------------------- drawing
+# Geometry lives on a 100x100 canvas (y down). Every shape is rasterised on a supersampled grid of
+# size*SS samples per side into a "layer" (dict: sample index -> colour); layers are then composited
+# in order with an opacity into a premultiplied canvas, and the canvas is box-filtered down.
+# Only + - * / and math.sqrt/ceil/floor are used (no trigonometry, no exp, no fractional powers).
 
-CORE = 0.16  # normalised radius of the dark core
-GAP = 0.28  # share of a ring band taken by the dark line between rings
-BLACK = (6.0, 4.0, 20.0)
-GAP_COLOR = (10.0, 8.0, 30.0)
-RING_A = (70.0, 205.0, 255.0)  # cyan
-RING_B = (150.0, 95.0, 255.0)  # violet
-
-
-def ring_count(size):
-    """Fewer rings on small sizes so that 16x16 stays readable (2-3 rings)."""
-    if size <= 16:
-        return 3
-    if size <= 32:
-        return 4
-    if size <= 48:
-        return 5
-    return 6
+BG_COLOR = (27.0, 27.0, 31.0)  # #1b1b1f
+BG_RADIUS = 22.0
+C_IN = (79.0, 163.0, 255.0)  # #4fa3ff, entrance (t = 0)
+C_OUT = (142.0, 124.0, 255.0)  # #8e7cff, exit (t = 1)
+LEAF_COLOR = (232.0, 232.0, 236.0)  # #e8e8ec
+FOLD_COLOR = (169.0, 169.0, 182.0)  # #a9a9b6
+LINE_COLOR = (142.0, 142.0, 156.0)  # #8e8e9c
+LEAF = ((39.0, 3.0), (53.0, 3.0), (61.0, 11.0), (61.0, 31.0), (39.0, 31.0))
+FOLD = ((53.0, 3.0), (53.0, 11.0), (61.0, 11.0))
+LEAF_LINES = (((43.0, 17.0), (57.0, 17.0)), ((43.0, 22.0), (57.0, 22.0)))
+LEAF_PIVOT = (50.0, 18.0)
+ROT_COS = 0.984807753012208  # rotation by -10 degrees, constants (no trigonometry at run time)
+ROT_SIN = -0.17364817766693033
+TWO_PI = 6.283185307179586
+# bridge side curve: cubic Bezier P0..P3 (left side; the right one is mirrored x -> 100 - x)
+BEZ_X = (20.0, 44.0, 44.0, 20.0)
+BEZ_Y = (24.0, 38.0, 66.0, 80.0)
+SS = {16: 8, 32: 8, 48: 6, 64: 6, 128: 4, 256: 4, 512: 3}
+SPIRAL_TURNS = {48: 8, 64: 10, 128: 25, 256: 25, 512: 30}
+STEPS_PER_TURN = 48
 
 
 def supersample(size):
-    if size <= 128:
-        return 4
-    return 2
+    return SS[size]
 
 
-def shade_at(d, rings):
-    """Colour (r, g, b) of the point at normalised distance d (0..1) from the centre."""
-    if d < CORE:
-        # near-black core with a faint glow towards the rim of the core
-        t = d / CORE
-        k = t * t * 0.35
-        return (
-            BLACK[0] + (RING_B[0] - BLACK[0]) * k * 0.4,
-            BLACK[1] + (RING_B[1] - BLACK[1]) * k * 0.4,
-            BLACK[2] + (RING_B[2] - BLACK[2]) * k * 0.4,
-        )
-    u = (d - CORE) / (1.0 - CORE)  # 0 at the core, 1 at the rim
-    w = math.sqrt(u)  # steep near the core: rings get denser towards the vanishing point
-    p = rings * (1.0 - w)
-    k = int(p)  # p >= 0, so int() is floor
-    f = p - k
-    if f < GAP:
-        return GAP_COLOR
-    base = RING_A if k % 2 == 0 else RING_B
-    g = (f - GAP) / (1.0 - GAP)
-    lit = 1.0 - 0.35 * g  # each band is lit on its outer side
-    depth = 0.25 + 0.75 * u  # darker towards the core
-    m = lit * depth
-    return (base[0] * m, base[1] * m, base[2] * m)
+def bez(p, t):
+    m = 1.0 - t
+    return m * m * m * p[0] + 3.0 * m * m * t * p[1] + 3.0 * m * t * t * p[2] + t * t * t * p[3]
+
+
+def bridge_at(t):
+    """(yc, rx, ry) of the bridge at parameter t: ring centre height and half axes."""
+    rx = 50.0 - bez(BEZ_X, t)
+    return bez(BEZ_Y, t), rx, rx * 8.0 / 30.0
+
+
+def lerp_color(t):
+    return tuple(C_IN[i] + (C_OUT[i] - C_IN[i]) * t for i in range(3))
+
+
+def width_g(d):
+    """g(d) approximates d^1.8 on 0..1 without a fractional power: g(d) = d*d*(1.3 - 0.3*d)
+    (g(0)=0, g(1)=1, g(0.5)=0.2875 against 0.2872)."""
+    return d * d * (1.3 - 0.3 * d)
+
+
+def rot_step(m):
+    """(cos, sin) of 2*pi/m from the Taylor series (only + - * /, fixed number of terms)."""
+    x = TWO_PI / m
+    x2 = x * x
+    c = 1.0
+    term = 1.0
+    for k in range(1, 10):
+        term = term * (-x2) / ((2 * k - 1) * (2 * k))
+        c += term
+    s = x
+    term = x
+    for k in range(1, 10):
+        term = term * (-x2) / ((2 * k) * (2 * k + 1))
+        s += term
+    return c, s
+
+
+def leaf_pt(p):
+    dx = p[0] - LEAF_PIVOT[0]
+    dy = p[1] - LEAF_PIVOT[1]
+    return (
+        LEAF_PIVOT[0] + dx * ROT_COS - dy * ROT_SIN,
+        LEAF_PIVOT[1] + dx * ROT_SIN + dy * ROT_COS,
+    )
+
+
+class Canvas:
+    def __init__(self, size):
+        self.size = size
+        self.n = supersample(size)
+        self.s = size * self.n
+        self.k = self.s / 100.0
+        cnt = self.s * self.s
+        self.pr = [0.0] * cnt
+        self.pg = [0.0] * cnt
+        self.pb = [0.0] * cnt
+        self.pa = [0.0] * cnt
+
+    def background(self):
+        s, k = self.s, self.k
+        r = BG_RADIUS * k
+        full = float(s)
+        for j in range(s):
+            py = j + 0.5
+            if py < r:
+                dy = r - py
+            elif py > full - r:
+                dy = py - (full - r)
+            else:
+                dy = 0.0
+            inset = 0.0
+            if dy > 0.0:
+                inset = r - math.sqrt(r * r - dy * dy)
+            x0 = int(math.ceil(inset - 0.5))
+            x1 = int(math.floor(full - inset - 0.5))
+            if x1 < x0:
+                continue
+            o = j * s
+            m = x1 - x0 + 1
+            self.pr[o + x0:o + x1 + 1] = [BG_COLOR[0]] * m
+            self.pg[o + x0:o + x1 + 1] = [BG_COLOR[1]] * m
+            self.pb[o + x0:o + x1 + 1] = [BG_COLOR[2]] * m
+            self.pa[o + x0:o + x1 + 1] = [1.0] * m
+
+    def composite(self, layer, opacity=1.0):
+        keep = 1.0 - opacity
+        pr, pg, pb, pa = self.pr, self.pg, self.pb, self.pa
+        for i, c in layer.items():
+            pr[i] = c[0] * opacity + pr[i] * keep
+            pg[i] = c[1] * opacity + pg[i] * keep
+            pb[i] = c[2] * opacity + pb[i] * keep
+            pa[i] = opacity + pa[i] * keep
+
+    def to_rgba(self):
+        size, n, s = self.size, self.n, self.s
+        out = bytearray(size * size * 4)
+        inv = 1.0 / (n * n)
+        for j in range(size):
+            for i in range(size):
+                ar = ag = ab = aa = 0.0
+                for b in range(n):
+                    o = (j * n + b) * s + i * n
+                    for q in range(o, o + n):  # explicit loop: fixed summation order
+                        ar += self.pr[q]
+                        ag += self.pg[q]
+                        ab += self.pb[q]
+                        aa += self.pa[q]
+                if aa > 0.0:
+                    p = (j * size + i) * 4
+                    out[p] = int(ar / aa + 0.5)
+                    out[p + 1] = int(ag / aa + 0.5)
+                    out[p + 2] = int(ab / aa + 0.5)
+                    out[p + 3] = int(255.0 * aa * inv + 0.5)
+        return bytes(out)
+
+
+def fill_poly(cv, layer, pts, color):
+    """Convex polygon (canvas units), filled row by row (analytic span per sample row)."""
+    k, s = cv.k, cv.s
+    q = [(x * k, y * k) for x, y in pts]
+    area = 0.0
+    for i in range(len(q)):
+        x1, y1 = q[i]
+        x2, y2 = q[(i + 1) % len(q)]
+        area += x1 * y2 - x2 * y1
+    o = 1.0 if area > 0.0 else -1.0
+    edges = []
+    for i in range(len(q)):
+        x1, y1 = q[i]
+        x2, y2 = q[(i + 1) % len(q)]
+        a = -(y2 - y1) * o
+        b = (x2 - x1) * o
+        edges.append((a, b, -a * x1 - b * y1))
+    ymin = max(0, int(math.floor(min(p[1] for p in q))))
+    ymax = min(s - 1, int(math.ceil(max(p[1] for p in q))))
+    for j in range(ymin, ymax + 1):
+        py = j + 0.5
+        lo, hi = -1.0e18, 1.0e18
+        ok = True
+        for a, b, c0 in edges:
+            c = b * py + c0
+            if a > 0.0:
+                v = -c / a
+                if v > lo:
+                    lo = v
+            elif a < 0.0:
+                v = -c / a
+                if v < hi:
+                    hi = v
+            elif c < 0.0:
+                ok = False
+                break
+        if not ok:
+            continue
+        x0 = max(0, int(math.ceil(lo - 0.5)))
+        x1 = min(s - 1, int(math.floor(hi - 0.5)))
+        for x in range(x0, x1 + 1):
+            layer[j * s + x] = color
+
+
+def capsule(cv, layer, a, b, r, color):
+    """Line segment a-b (canvas units) with round caps and radius r (canvas units)."""
+    k, s = cv.k, cv.s
+    ax, ay, bx, by, rr = a[0] * k, a[1] * k, b[0] * k, b[1] * k, r * k
+    dx, dy = bx - ax, by - ay
+    l2 = dx * dx + dy * dy
+    inv = 1.0 / l2 if l2 > 0.0 else 0.0
+    r2 = rr * rr
+    x0 = max(0, int(math.floor(min(ax, bx) - rr)))
+    x1 = min(s - 1, int(math.ceil(max(ax, bx) + rr)))
+    y0 = max(0, int(math.floor(min(ay, by) - rr)))
+    y1 = min(s - 1, int(math.ceil(max(ay, by) + rr)))
+    for j in range(y0, y1 + 1):
+        ey = j + 0.5 - ay
+        for x in range(x0, x1 + 1):
+            ex = x + 0.5 - ax
+            t = (ex * dx + ey * dy) * inv
+            if t < 0.0:
+                t = 0.0
+            elif t > 1.0:
+                t = 1.0
+            vx = ex - t * dx
+            vy = ey - t * dy
+            if vx * vx + vy * vy <= r2:
+                layer[j * s + x] = color
+
+
+def ellipse_stroke(cv, layer, cx, cy, a, b, hw, color, half=0):
+    """Elliptic outline, half-width hw (canvas units). half: 0 whole, -1 y <= cy, +1 y >= cy.
+    Distance to the curve ~ |f| / |grad f| with f = (x/a)^2 + (y/b)^2 - 1."""
+    k, s = cv.k, cv.s
+    cx, cy, a, b, hw = cx * k, cy * k, a * k, b * k, hw * k
+    a2, b2 = a * a, b * b
+    x0 = max(0, int(math.floor(cx - a - hw)))
+    x1 = min(s - 1, int(math.ceil(cx + a + hw)))
+    y0 = max(0, int(math.floor(cy - b - hw)))
+    y1 = min(s - 1, int(math.ceil(cy + b + hw)))
+    for j in range(y0, y1 + 1):
+        dy = j + 0.5 - cy
+        if half < 0 and dy > 0.0:
+            continue
+        if half > 0 and dy < 0.0:
+            continue
+        for x in range(x0, x1 + 1):
+            dx = x + 0.5 - cx
+            f = dx * dx / a2 + dy * dy / b2 - 1.0
+            gx = dx / a2
+            gy = dy / b2
+            g = 2.0 * math.sqrt(gx * gx + gy * gy)
+            if g > 0.0 and (f if f >= 0.0 else -f) <= hw * g:
+                layer[j * s + x] = color
+
+
+def bridge_polyline(side, count):
+    """Points of the bridge side curve (side 0 left, 1 right), count segments."""
+    pts = []
+    for i in range(count + 1):
+        t = i / count
+        x = bez(BEZ_X, t)
+        pts.append((x if side == 0 else 100.0 - x, bez(BEZ_Y, t)))
+    return pts
 
 
 def render(size):
     """RGBA bytes (size*size*4, straight alpha) of the icon at `size`."""
-    rings = ring_count(size)
-    n = supersample(size)
-    half = size * 0.47  # radius of the disc in pixels
-    centre = size / 2.0
-    out = bytearray(size * size * 4)
-    inv = 1.0 / (n * n)
-    for j in range(size):
-        for i in range(size):
-            cnt = 0
-            sr = sg = sb = 0.0
-            for b in range(n):
-                y = j + (b + 0.5) / n - centre
-                for a in range(n):
-                    x = i + (a + 0.5) / n - centre
-                    d = math.sqrt(x * x + y * y) / half
-                    if d <= 1.0:
-                        c = shade_at(d, rings)
-                        cnt += 1
-                        sr += c[0]
-                        sg += c[1]
-                        sb += c[2]
-            o = (j * size + i) * 4
-            if cnt:
-                out[o] = int(sr / cnt + 0.5)
-                out[o + 1] = int(sg / cnt + 0.5)
-                out[o + 2] = int(sb / cnt + 0.5)
-                out[o + 3] = int(255.0 * cnt * inv + 0.5)
-    return bytes(out)
+    cv = Canvas(size)
+    cv.background()
+    small = size <= 32
+    back = {}
+    front = {}
+    spiral_n = SPIRAL_TURNS.get(size, 0)
+    if spiral_n:
+        steps = spiral_n * STEPS_PER_TURN
+        cd, sd = rot_step(STEPS_PER_TURN)
+        mn = 0.6 * 18.0 / spiral_n
+        c, sn = 1.0, 0.0
+        prev = None
+        for kk in range(steps + 1):
+            t = kk / steps
+            yc, rx, ry = bridge_at(t)
+            pt = (50.0 + rx * c, yc + ry * sn)
+            d = 2.0 * t - 1.0
+            if d < 0.0:
+                d = -d
+            w = mn + (2.0 - mn) * width_g(d)
+            if prev is not None:
+                col = lerp_color((prev[3] + t) / 2.0)
+                tgt = front if (prev[1] + sn) >= 0.0 else back
+                capsule(cv, tgt, prev[0], pt, (prev[2] + w) / 4.0, col)
+            prev = (pt, sn, w, t)
+            c, sn = c * cd - sn * sd, sn * cd + c * sd
+    elif small:
+        for side, col in ((0, C_IN), (1, C_OUT)):
+            pts = bridge_polyline(side, 48)
+            for i in range(48):
+                capsule(cv, back, pts[i], pts[i + 1], 2.0, col)
+    ehw = 2.0 if small else 1.0
+    exit_l = {}
+    ellipse_stroke(cv, exit_l, 50.0, 80.0, 30.0, 8.0, ehw, C_OUT)
+    in_back = {}
+    ellipse_stroke(cv, in_back, 50.0, 24.0, 30.0, 8.0, ehw, C_IN, -1)
+    in_front = {}
+    ellipse_stroke(cv, in_front, 50.0, 24.0, 30.0, 8.0, ehw, C_IN, 1)
+    leaf = {}
+    fill_poly(cv, leaf, [leaf_pt(p) for p in LEAF], LEAF_COLOR)
+    fill_poly(cv, leaf, [leaf_pt(p) for p in FOLD], FOLD_COLOR)
+    if size >= 128:
+        for p, q in LEAF_LINES:
+            capsule(cv, leaf, leaf_pt(p), leaf_pt(q), 1.0, LINE_COLOR)
+    cv.composite(back, 0.28 if spiral_n else 1.0)
+    cv.composite(exit_l)
+    cv.composite(in_back)
+    cv.composite(leaf)
+    cv.composite(front)
+    cv.composite(in_front)
+    return cv.to_rgba()
 
 
 # --------------------------------------------------------------------------- PNG
