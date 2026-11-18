@@ -14,6 +14,9 @@ use chervo_core::{
     TransferResult, TransferState,
 };
 
+use crate::access_model::{
+    AccessStage, AccessUi, CheckResult, CheckUi, GetIpMark, GetIpResult, GetIpUi, InviteExt,
+};
 use crate::main_model::{
     AddFriend, AddStage, AddrTokenDialog, Dialog, MainIntent, OfferUi, PasteDialog,
     RevocationDialog,
@@ -25,6 +28,7 @@ use crate::rows::{
 };
 use crate::settings_model::{ClockUi, SettingsIntent, UpnpUi};
 use crate::update_model::{KeyRow, UpdateIntent};
+use chervo_core::ForwardHelp;
 
 fn friend(id: u32, name: &str, status: FriendStatus, online: bool) -> FriendRow {
     FriendRow {
@@ -185,6 +189,7 @@ fn open_model(page: Page) -> Model {
                 std::net::Ipv4Addr::new(192, 168, 1, 10),
             ],
         },
+        echo_server: Some("203.0.113.5:45900".to_owned()),
     });
     m.snapshot.nat = Some(NatView::BehindCgnat);
     m.snapshot.mapping = Some(MapStatus::Mapped);
@@ -199,12 +204,14 @@ fn open_model(page: Page) -> Model {
             text: chervo_core::texts::CGNAT_TEXT,
             could_help: true,
             lan_hint: true,
+            open_access: true,
         },
         DiagRow {
             friend: Id(6),
             text: chervo_core::texts::UNKNOWN_TEXT,
             could_help: false,
             lan_hint: false,
+            open_access: false,
         },
     ];
     m
@@ -487,9 +494,19 @@ pub fn all() -> Vec<Model> {
     v.push(open_model(Page::AddFriend));
     m.add = AddFriend {
         same_network: true,
-        manual_addr: "203.0.113.5:50000".to_owned(),
-        error: Some(crate::texts::BAD_MANUAL_ADDR),
+        error: Some(chervo_core::texts::NO_ADDRESS_TEXT),
+        no_addresses: true,
+        get_ip: GetIpUi::Result(GetIpResult::Address {
+            addr: "198.51.100.7:50000".parse().expect("addr"),
+            mark: GetIpMark::MaybeVpn,
+        }),
         ..AddFriend::default()
+    };
+    v.push(m);
+    // похоже на VPN: приглашения ещё нет
+    let mut m = open_model(Page::AddFriend);
+    m.add.stage = AddStage::VpnAsk {
+        addrs: vec!["198.51.100.7:50000".parse().expect("addr")],
     };
     v.push(m);
     // поле «Друг прислал мне текст» на вкладке «Добавить друга»
@@ -506,6 +523,18 @@ pub fn all() -> Vec<Model> {
         Id(1),
         "CHERVO1-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
             .to_owned(),
+        InviteExt::Added {
+            addr: "198.51.100.7:50000".parse().expect("addr"),
+            vpn_on: true,
+        },
+    ))));
+    m.on_outcome(Outcome::InviteAddrChanged(Id(1)));
+    v.push(m);
+    let mut m = open_model(Page::AddFriend);
+    m.on_outcome(Outcome::InviteCreated(Ok((
+        Id(1),
+        "CHERVO1-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".to_owned(),
+        InviteExt::NotSet,
     ))));
     v.push(m);
     let mut m = open_model(Page::AddFriend);
@@ -514,8 +543,37 @@ pub fn all() -> Vec<Model> {
         token: None,
         qr: None,
         valid: None,
+        ext: InviteExt::Plain,
+        addr_changed: false,
     };
     v.push(m);
+    // помощник «Разрешить входящие подключения»: вопрос о роутере, ручные шаги, проверка
+    for stage in [
+        AccessStage::Idle,
+        AccessStage::Asking,
+        AccessStage::Failed(Some(chervo_core::texts::NO_ADDRESS_TEXT)),
+    ] {
+        let mut m = open_model(Page::Settings);
+        m.access = AccessUi {
+            open: true,
+            stage,
+            help: Some(ForwardHelp {
+                port: 50_000,
+                home: vec![
+                    std::net::Ipv4Addr::new(192, 168, 1, 10),
+                    std::net::Ipv4Addr::new(10, 0, 0, 5),
+                ],
+                gw: Some(std::net::Ipv4Addr::new(192, 168, 1, 1)),
+                gw_exact: false,
+                vpn: true,
+                cgnat: false,
+            }),
+            check: CheckUi::Done(CheckResult::NotReachable(50_000)),
+            done: false,
+            error: None,
+        };
+        v.push(m);
+    }
     let mut m = open_model(Page::AddFriend);
     m.on_outcome(Outcome::InviteSas {
         invite: Id(1),
@@ -536,6 +594,8 @@ pub fn all() -> Vec<Model> {
             token: None,
             qr: None,
             valid: None,
+            ext: InviteExt::Plain,
+            addr_changed: false,
         };
         m.on_outcome(Outcome::InviteFinished(o));
         v.push(m);

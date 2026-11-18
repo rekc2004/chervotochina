@@ -4,7 +4,9 @@ use eframe::egui;
 
 use crate::main_model::MainIntent;
 use crate::model::{Intent, Model, Page};
-use crate::screens::{add_friend, diagnosis, friends, offers, send, settings, transfers, update};
+use crate::screens::{
+    access, add_friend, diagnosis, friends, offers, send, settings, transfers, update,
+};
 use crate::texts;
 
 const PAGES: [(Page, &str); 7] = [
@@ -51,6 +53,11 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
             out.push(Intent::Main(MainIntent::DismissNotices));
         }
         ui.separator();
+    }
+    // помощник «Разрешить входящие подключения» занимает место вкладки, пока открыт
+    if model.access.open {
+        out.extend(access::show(ui, model));
+        return out;
     }
     match model.page {
         Page::Friends => out.extend(friends::show(ui, model)),

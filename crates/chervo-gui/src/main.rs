@@ -2,6 +2,7 @@
 //! совсем: всё, что нужно пользователю, показывается в окне.
 #![windows_subsystem = "windows"]
 
+mod access_model;
 mod app;
 mod fixtures;
 mod main_model;

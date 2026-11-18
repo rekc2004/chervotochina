@@ -51,7 +51,6 @@ pub const CLOSING: &str = "Закрываем программу…";
 
 // Друзья, приглашения, отправка, входящие, передачи (экраны 2-6)
 pub const PASTE_EMPTY: &str = "Вставьте текст.";
-pub const BAD_MANUAL_ADDR: &str = "Адрес должен быть вида 203.0.113.5:50000 (IP и порт).";
 pub const SAS_NAME_EMPTY: &str = "Введите имя друга.";
 pub const SEND_NO_FRIEND: &str = "Выберите друга.";
 pub const SEND_NO_FILES: &str = "Выберите файлы или папки.";
@@ -126,7 +125,6 @@ pub const REKEY_PARTIAL: &str = "Для некоторых друзей ключ
 pub const ADDR_TOKEN_TITLE: &str = "Мой новый адрес для этого друга";
 pub const FRIEND_TEXT_TITLE: &str = "Друг прислал мне текст";
 
-pub const ADD_MANUAL_LABEL: &str = "Свой адрес с пробросом порта (необязательно), IP:порт";
 pub const BTN_CREATE_INVITE: &str = "Создать приглашение";
 pub const INVITE_WAIT: &str = "Скопируйте приглашение и отправьте другу в мессенджер (или покажите QR). Пусть он откроет «Добавить друга», затем «Друг прислал мне текст» и вставит его.";
 pub const INVITE_ACCEPT_WAIT: &str =
@@ -216,11 +214,9 @@ pub const SET_CURRENT: &str = "Сейчас";
 pub const SET_EXTRA_FOLDERS: &str = "Дополнительные папки (недокачанные передачи)";
 pub const SET_MIN_FREE: &str = "Запас свободного места, % диска";
 pub const SET_PORT: &str = "Номер порта программы (обычно не трогать; меняется после перезапуска)";
-pub const SET_FORWARD: &str =
-    "Если вы сами открыли порт на роутере, укажите его номер (иначе оставьте пустым)";
 pub const SET_RESTART: &str = "Есть изменения, которые вступят в силу после перезапуска программы.";
 pub const SET_TITLE_LAN: &str = "Локальная сеть";
-pub const SET_TITLE_UPNP: &str = "Разрешить роутеру пропускать друзей";
+pub const SET_TITLE_UPNP: &str = "Входящие подключения";
 pub const BTN_FIND_ROUTER: &str = "Найти мой роутер";
 pub const BTN_YES: &str = "Да";
 pub const SET_ROUTERS: &str = "Разрешённые роутеры";
@@ -252,6 +248,91 @@ pub const BTN_FORGET_RETIRED: &str = "Друг получил, убрать";
 pub const SET_TITLE_ABOUT: &str = "О программе";
 pub const ABOUT_VERSION: &str = "Версия";
 pub const ABOUT_LICENCES: &str = "В программе используются свободные библиотеки. Их лицензии и авторы перечислены в файле chervo-{ver}-third-party-licenses.txt на странице выпусков; файл подписан вместе с программой.";
+
+// Этап 13д: адрес в интернете, «Получить свой IP», помощник «Разрешить входящие подключения».
+// Пояснения у новых пунктов показываются во всплывающей подсказке значка «?» (Р7, дополнение
+// владельца 2026-11-18); предупреждения, без которых действие небезопасно, остаются на виду.
+
+/// Значок рядом с подписью: описание всплывает при наведении.
+pub const HELP_MARK: &str = "?";
+
+pub const SET_TITLE_EXTERNAL: &str = "Связь через интернет";
+pub const EXT_SERVER_LABEL: &str = "Адрес вашего сервера, например 203.0.113.5:45900";
+pub const BTN_CLEAR: &str = "Очистить";
+pub const EXT_SERVER_HINT: &str = "Нужен, когда друг подключается не из вашей домашней сети. Сервер подсказывает программе ваш адрес в интернете, и программа сама впишет его в приглашение. Сервер — это программа chervo-rendezvous на компьютере, который всегда доступен из интернета (ваш или знакомого). Адрес для этой строки даст тот, кто запустил сервер. Пока строка пустая, программа ни к какому серверу не обращается.";
+pub const EXT_SERVER_SAVED: &str =
+    "Сохранено. Теперь «Создать приглашение» само впишет ваш адрес в интернете.";
+pub const EXT_SERVER_CLEARED: &str =
+    "Адрес сервера удалён. Приглашения создаются без адреса в интернете.";
+
+pub const BTN_GET_IP: &str = "Получить свой IP";
+pub const GETIP_RESULT: &str = "Ваш адрес в интернете (IP и порт):";
+pub const GETIP_NO_SERVER: &str = "Чтобы узнать адрес, впишите адрес своего сервера: вкладка «Настройки», раздел «Связь через интернет», строка «Адрес вашего сервера».";
+pub const GETIP_NO_ANSWER: &str = "Сервер не ответил. Проверьте, что он включён и что адрес на вкладке «Настройки», раздел «Связь через интернет», верный. Затем снова нажмите «Получить свой IP».";
+pub const GETIP_MAYBE_VPN: &str = "Похоже, включён VPN: это может быть адрес VPN, а не ваш. Выключите VPN или добавьте Червоточину в исключения VPN и снова нажмите «Получить свой IP».";
+pub const GETIP_VPN_ON: &str =
+    "Включён VPN. Это ваш настоящий адрес, но, пока VPN работает, друг по нему не подключится.";
+pub const INV_EXT_CHECKING: &str = "Узнаём ваш адрес в интернете…";
+pub const INV_EXT_ADDED: &str = "В приглашение вписан ваш адрес в интернете: {addr}";
+pub const INV_EXT_FRIEND_TIP: &str = "Если друг не подключится за минуту, нажмите «Разрешить входящие подключения»: программа поможет настроить роутер.";
+/// Короткая подпись, рядом с которой стоит «?» с текстом `INV_EXT_NOT_SET`.
+pub const INV_EXT_NOT_SET_LABEL: &str = "Адрес в интернете в приглашение не вписан";
+pub const INV_EXT_NOT_SET: &str = "Друг в другой сети? Впишите адрес своего сервера: вкладка «Настройки», раздел «Связь через интернет». Тогда программа сама добавит в приглашение ваш адрес в интернете. Без этого приглашение сработает, только если друг в той же сети, что и вы, или ваш компьютер уже доступен из интернета.";
+pub const INV_EXT_NO_ANSWER: &str = "Сервер не ответил, поэтому ваш адрес в интернете в приглашение не вписан. Проверьте, что сервер включён и адрес на вкладке «Настройки», раздел «Связь через интернет», верный, затем снова нажмите «Создать приглашение».";
+pub const INV_EXT_SERVER_LOCAL: &str = "Сервер стоит в той же сети, что и вы, поэтому ваш адрес в интернете не узнать. Нужен сервер вне вашей сети.";
+pub const INV_EXT_SYMMETRIC: &str = "Ваш роутер выдаёт каждому собеседнику свой адрес, поэтому адрес от сервера другу не подойдёт и не вписан. Нажмите «Разрешить входящие подключения»: программа поможет настроить роутер.";
+pub const INV_MAYBE_VPN_TITLE: &str = "Похоже, включён VPN";
+pub const INV_MAYBE_VPN_TEXT: &str = "Программа узнала адрес, но, возможно, это адрес VPN, а не ваш. По адресу VPN друг к вам не подключится. Выключите VPN или добавьте Червоточину в исключения VPN (в настройках VPN это называется «исключения» или «раздельное туннелирование»), затем снова нажмите «Создать приглашение».";
+pub const BTN_INV_WITHOUT_ADDR: &str = "Создать приглашение без этого адреса";
+pub const BTN_INV_WITH_ADDR: &str = "VPN выключен, вписать адрес";
+pub const INV_VPN_ON_TITLE: &str = "Включён VPN";
+pub const INV_VPN_ON_TEXT: &str = "Ваш настоящий адрес вписан в приглашение, но, пока VPN включён, друг к вам не подключится. Выключите VPN или добавьте Червоточину в исключения VPN.";
+pub const INV_ADDR_CHANGED: &str = "Ваш адрес в интернете изменился. Это приглашение может не сработать: нажмите «Отмена» и создайте новое.";
+
+pub const BTN_OPEN_ACCESS: &str = "Разрешить входящие подключения";
+pub const ACC_TITLE: &str = "Доступ к этому компьютеру из интернета";
+pub const ACC_INTRO: &str = "Чтобы друг из другой сети мог подключиться, роутер должен пропускать его к этому компьютеру. Сначала программа попробует договориться с роутером сама.";
+pub const ACC_VPN: &str = "Включён VPN: пока он работает, настройка роутера другу не поможет. Выключите VPN или добавьте Червоточину в исключения VPN.";
+pub const ACC_CGNAT: &str = "Ваш провайдер выдаёт один адрес в интернете сразу многим абонентам, поэтому настройка роутера не поможет. Можно попросить у провайдера «белый» (постоянный) IP-адрес.";
+pub const BTN_ACC_AUTO: &str = "Попробовать автоматически";
+pub const ACC_SEARCHING: &str = "Ищем роутер…";
+pub const ACC_ASK_ROUTER: &str = "Найден роутер. Разрешить программе открывать на нём доступ для Червоточины? Делайте это только дома: в чужой сети (гостиница, офис) другое устройство может выдать себя за роутер. Ответ запомнится для этого роутера; при выходе из программы доступ закрывается.";
+pub const BTN_ACC_ALLOW: &str = "Разрешить";
+pub const BTN_ACC_DENY: &str = "Не разрешать";
+pub const ACC_AUTO_WAIT: &str = "Договариваемся с роутером…";
+pub const ACC_AUTO_OK: &str = "Готово: роутер открыл доступ.";
+pub const ACC_AUTO_FAILED: &str = "Автоматически не получилось: роутер не ответил или не разрешил. Это можно сделать вручную за несколько минут — по шагам ниже.";
+pub const ACC_MANUAL_TITLE: &str = "Как открыть доступ вручную";
+pub const ACC_STEP1: &str = "1. Откройте в браузере страницу роутера:";
+pub const ACC_GW_FOUND: &str = "Этот адрес сообщил сам роутер.";
+pub const ACC_GW_GUESS: &str = "Обычно страница роутера открывается по этому адресу. Если не открывается, посмотрите адрес на наклейке снизу роутера.";
+pub const ACC_STEP2: &str = "2. Войдите. Логин и пароль часто написаны на той же наклейке.";
+pub const ACC_STEP3: &str = "3. Найдите раздел «Переадресация портов». Он может называться «Port Forwarding», «Виртуальный сервер» или «Virtual Server»; обычно он лежит в разделе «Интернет», «WAN» или «Дополнительно».";
+pub const ACC_STEP4: &str =
+    "4. Добавьте правило и перенесите в него эти значения (кнопка «Копировать» у каждого):";
+pub const ACC_F_NAME: &str = "Название (если спрашивают)";
+pub const ACC_V_NAME: &str = "Chervotochina";
+pub const ACC_F_PROTO: &str = "Протокол";
+pub const ACC_V_PROTO: &str = "UDP";
+pub const ACC_F_EXT_PORT: &str = "Внешний порт (может называться «порт WAN»)";
+pub const ACC_F_INT_IP: &str = "Внутренний IP-адрес (адрес этого компьютера)";
+pub const ACC_F_INT_PORT: &str = "Внутренний порт";
+pub const ACC_RANGE_NOTE: &str =
+    "Если роутер просит начальный и конечный порт, впишите одно и то же число в оба поля.";
+pub const ACC_INT_IP_MANY: &str = "У компьютера несколько адресов в домашней сети. Нужен тот, у которого первые три числа совпадают с адресом страницы роутера из шага 1.";
+pub const ACC_STEP5: &str = "5. Сохраните правило и нажмите «Проверить».";
+pub const ACC_KEEP_NOTE: &str = "Если после перезагрузки роутера доступ пропадёт, закрепите в настройках роутера адрес за этим компьютером (часто называется «Резервирование адреса» или «Static DHCP») и повторите проверку.";
+pub const ACC_PORT_NOTE: &str = "Не меняйте после этого номер в строке «Порт» на вкладке «Настройки»: правило в роутере перестанет подходить.";
+pub const BTN_ACC_CHECK: &str = "Проверить";
+pub const ACC_CHECKING: &str = "Проверяем…";
+pub const ACC_CHECK_OK: &str = "Похоже, работает: проверочный ответ сервера дошёл через роутер до этого компьютера. Программа будет вписывать этот доступ в приглашения.";
+pub const ACC_CHECK_FAIL: &str = "Проверочный ответ не дошёл. Проверьте в правиле: протокол UDP, оба порта {port}, адрес компьютера {ip}, правило сохранено и включено. Затем снова нажмите «Проверить».";
+pub const ACC_CHECK_LIMIT: &str = "Проверка не даёт полной гарантии: некоторые роутеры пропускают ответ сервера, но не пропускают других. Окончательная проверка — подключение друга.";
+pub const ACC_CHECK_NO_SERVER: &str = "Проверить автоматически можно только с вашим сервером, если он поддерживает проверку доступа (вкладка «Настройки», раздел «Связь через интернет»). Без этого нажмите «Правило создано» и попросите друга подключиться.";
+pub const BTN_ACC_DONE: &str = "Правило создано";
+pub const ACC_DONE: &str = "Запомнили. Программа будет вписывать этот доступ в приглашения.";
+pub const ACC_MANUAL_FORWARD_LABEL: &str =
+    "Внешний номер, если правило в роутере вы создали сами с другим числом (обычно не нужно)";
 
 // Обновления (этап 19г-2, SPEC 19г разд. 6; дословно)
 pub const UPD_CONSENT_TITLE: &str = "Проверять, не вышла ли новая версия?";
@@ -397,6 +478,133 @@ pub fn invite_valid_text(secs_left: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{human_size, invite_valid_text};
+    use crate::texts;
+
+    /// Новые тексты 13д (Р8), которые видит человек.
+    fn new_texts() -> Vec<(&'static str, &'static str)> {
+        use super::*;
+        vec![
+            ("SET_TITLE_EXTERNAL", SET_TITLE_EXTERNAL),
+            ("EXT_SERVER_LABEL", EXT_SERVER_LABEL),
+            ("EXT_SERVER_HINT", EXT_SERVER_HINT),
+            ("EXT_SERVER_SAVED", EXT_SERVER_SAVED),
+            ("EXT_SERVER_CLEARED", EXT_SERVER_CLEARED),
+            ("BTN_GET_IP", BTN_GET_IP),
+            ("GETIP_RESULT", GETIP_RESULT),
+            ("GETIP_NO_SERVER", GETIP_NO_SERVER),
+            ("GETIP_NO_ANSWER", GETIP_NO_ANSWER),
+            ("GETIP_MAYBE_VPN", GETIP_MAYBE_VPN),
+            ("GETIP_VPN_ON", GETIP_VPN_ON),
+            ("INV_EXT_CHECKING", INV_EXT_CHECKING),
+            ("INV_EXT_ADDED", INV_EXT_ADDED),
+            ("INV_EXT_FRIEND_TIP", INV_EXT_FRIEND_TIP),
+            ("INV_EXT_NOT_SET_LABEL", INV_EXT_NOT_SET_LABEL),
+            ("INV_EXT_NOT_SET", INV_EXT_NOT_SET),
+            ("INV_EXT_NO_ANSWER", INV_EXT_NO_ANSWER),
+            ("INV_EXT_SERVER_LOCAL", INV_EXT_SERVER_LOCAL),
+            ("INV_EXT_SYMMETRIC", INV_EXT_SYMMETRIC),
+            ("INV_MAYBE_VPN_TITLE", INV_MAYBE_VPN_TITLE),
+            ("INV_MAYBE_VPN_TEXT", INV_MAYBE_VPN_TEXT),
+            ("BTN_INV_WITHOUT_ADDR", BTN_INV_WITHOUT_ADDR),
+            ("BTN_INV_WITH_ADDR", BTN_INV_WITH_ADDR),
+            ("INV_VPN_ON_TITLE", INV_VPN_ON_TITLE),
+            ("INV_VPN_ON_TEXT", INV_VPN_ON_TEXT),
+            ("INV_ADDR_CHANGED", INV_ADDR_CHANGED),
+            ("BTN_OPEN_ACCESS", BTN_OPEN_ACCESS),
+            ("ACC_TITLE", ACC_TITLE),
+            ("ACC_INTRO", ACC_INTRO),
+            ("ACC_VPN", ACC_VPN),
+            ("ACC_CGNAT", ACC_CGNAT),
+            ("BTN_ACC_AUTO", BTN_ACC_AUTO),
+            ("ACC_SEARCHING", ACC_SEARCHING),
+            ("ACC_ASK_ROUTER", ACC_ASK_ROUTER),
+            ("ACC_AUTO_WAIT", ACC_AUTO_WAIT),
+            ("ACC_AUTO_OK", ACC_AUTO_OK),
+            ("ACC_AUTO_FAILED", ACC_AUTO_FAILED),
+            ("ACC_MANUAL_TITLE", ACC_MANUAL_TITLE),
+            ("ACC_STEP1", ACC_STEP1),
+            ("ACC_GW_FOUND", ACC_GW_FOUND),
+            ("ACC_GW_GUESS", ACC_GW_GUESS),
+            ("ACC_STEP2", ACC_STEP2),
+            ("ACC_STEP3", ACC_STEP3),
+            ("ACC_STEP4", ACC_STEP4),
+            ("ACC_F_NAME", ACC_F_NAME),
+            ("ACC_F_PROTO", ACC_F_PROTO),
+            ("ACC_F_EXT_PORT", ACC_F_EXT_PORT),
+            ("ACC_F_INT_IP", ACC_F_INT_IP),
+            ("ACC_F_INT_PORT", ACC_F_INT_PORT),
+            ("ACC_RANGE_NOTE", ACC_RANGE_NOTE),
+            ("ACC_INT_IP_MANY", ACC_INT_IP_MANY),
+            ("ACC_STEP5", ACC_STEP5),
+            ("ACC_KEEP_NOTE", ACC_KEEP_NOTE),
+            ("ACC_PORT_NOTE", ACC_PORT_NOTE),
+            ("BTN_ACC_CHECK", BTN_ACC_CHECK),
+            ("ACC_CHECKING", ACC_CHECKING),
+            ("ACC_CHECK_OK", ACC_CHECK_OK),
+            ("ACC_CHECK_FAIL", ACC_CHECK_FAIL),
+            ("ACC_CHECK_LIMIT", ACC_CHECK_LIMIT),
+            ("ACC_CHECK_NO_SERVER", ACC_CHECK_NO_SERVER),
+            ("BTN_ACC_DONE", BTN_ACC_DONE),
+            ("ACC_DONE", ACC_DONE),
+            ("ACC_MANUAL_FORWARD_LABEL", ACC_MANUAL_FORWARD_LABEL),
+            ("SET_TITLE_UPNP", SET_TITLE_UPNP),
+        ]
+    }
+
+    /// Каждый текст 13д с действием называет вкладку, раздел или кнопку; жаргона нет, слова
+    /// «порт» и «UDP» только в тексте помощника и в подписи адреса с портом.
+    #[test]
+    fn texts_name_tab_and_button() {
+        let named: [(&str, &[&str]); 13] = [
+            ("GETIP_NO_SERVER", &["Настройки", "Связь через интернет"]),
+            ("GETIP_NO_ANSWER", &["Настройки", "Связь через интернет"]),
+            ("GETIP_MAYBE_VPN", &["Получить свой IP"]),
+            ("INV_EXT_FRIEND_TIP", &["Разрешить входящие подключения"]),
+            ("INV_EXT_NOT_SET", &["Настройки", "Связь через интернет"]),
+            ("INV_EXT_NO_ANSWER", &["Настройки", "Создать приглашение"]),
+            ("INV_EXT_SYMMETRIC", &["Разрешить входящие подключения"]),
+            ("INV_MAYBE_VPN_TEXT", &["Создать приглашение"]),
+            ("ACC_STEP5", &["Проверить"]),
+            ("ACC_CHECK_FAIL", &["Проверить"]),
+            ("ACC_CHECK_NO_SERVER", &["Настройки", "Правило создано"]),
+            ("ACC_PORT_NOTE", &["Настройки"]),
+            ("EXT_SERVER_SAVED", &["Создать приглашение"]),
+        ];
+        let all = new_texts();
+        for (name, parts) in named {
+            let text = all
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map_or_else(|| panic!("нет текста {name}"), |(_, t)| *t);
+            for part in parts {
+                assert!(text.contains(part), "{name}: нет «{part}»");
+            }
+        }
+        for (name, text) in &all {
+            // слово «ток-ен» собрано из частей: охрана 18б ищет его в этом файле
+            let jargon = [
+                ["то", "кен"].concat(),
+                ["То", "кен"].concat(),
+                "NAT".into(),
+                "эхо".into(),
+                "Эхо".into(),
+                "UPnP".into(),
+                "SSDP".into(),
+            ];
+            for bad in jargon.iter().map(String::as_str) {
+                assert!(!text.contains(bad), "{name}: слово {bad}");
+            }
+            let lower = text.to_lowercase();
+            if lower.contains("порт") || text.contains("UDP") {
+                assert!(
+                    name.starts_with("ACC_") || *name == "GETIP_RESULT",
+                    "{name}: «порт» или «UDP» вне помощника"
+                );
+            }
+        }
+        // пример адреса сервера только документационный (RFC 5737)
+        assert!(texts::EXT_SERVER_LABEL.contains("203.0.113.5"));
+    }
 
     #[test]
     fn human_sizes() {

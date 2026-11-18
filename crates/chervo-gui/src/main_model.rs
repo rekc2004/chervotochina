@@ -10,6 +10,7 @@ use std::time::Instant;
 
 use chervo_core::{FriendStatus, InviteOutcome};
 
+use crate::access_model::{AccessIntent, ExternalMode, GetIpUi, InviteExt};
 use crate::model::{Command, FriendTextOutcome, Model, Outcome, Page};
 use crate::qr::{self, QrMatrix};
 use crate::redact::redacted_debug_enum;
@@ -69,8 +70,15 @@ pub enum MainIntent {
     DismissNotices,
     // добавление друга
     AddSameNetwork(bool),
-    AddManualEdited(String),
     AddCreate,
+    /// «Получить свой IP».
+    GetIp,
+    /// Ответ «VPN выключен, вписать адрес» на вопрос о VPN при создании приглашения.
+    AddVpnWithAddr,
+    /// Ответ «Создать приглашение без этого адреса».
+    AddVpnWithout,
+    /// Помощник «Разрешить входящие подключения» (этап 13д).
+    Access(AccessIntent),
     AddCancel,
     AddDone,
     SasNameEdited(String),
@@ -160,6 +168,14 @@ pub enum AddStage {
         qr: Option<QrMatrix>,
         /// Только у созданного приглашения: когда оно создано и сколько секунд действует.
         valid: Option<(Instant, u64)>,
+        /// Что стало с адресом от сервера (только у созданного приглашения).
+        ext: InviteExt,
+        /// Адрес в интернете изменился, пока приглашение ждёт: оно может не сработать.
+        addr_changed: bool,
+    },
+    /// Похоже на VPN: приглашения ещё нет, ждём ответа человека (адреса от сервера).
+    VpnAsk {
+        addrs: Vec<SocketAddr>,
     },
     Sas(SasState),
     Finished(&'static str),
@@ -167,8 +183,11 @@ pub enum AddStage {
 
 pub struct AddFriend {
     pub same_network: bool,
-    pub manual_addr: String,
     pub error: Option<&'static str>,
+    /// Ошибка «нет адреса для приглашения» (В4): рядом кнопка «Разрешить входящие подключения».
+    pub no_addresses: bool,
+    /// Итог кнопки «Получить свой IP».
+    pub get_ip: GetIpUi,
     pub stage: AddStage,
 }
 
@@ -176,8 +195,9 @@ impl Default for AddFriend {
     fn default() -> Self {
         Self {
             same_network: false,
-            manual_addr: String::new(),
             error: None,
+            no_addresses: false,
+            get_ip: GetIpUi::Idle,
             stage: AddStage::Form { busy: false },
         }
     }
@@ -447,6 +467,7 @@ impl Model {
             }
             I::Settings(s) => self.update_settings(s),
             I::Update(u) => self.update_updates(u),
+            I::Access(a) => self.update_access(a),
             other => self.update_add_send(other),
         }
     }
@@ -458,38 +479,63 @@ impl Model {
                 self.add.same_network = v;
                 Vec::new()
             }
-            I::AddManualEdited(t) => {
-                self.add.manual_addr = t;
-                self.add.error = None;
-                Vec::new()
-            }
+            // «Создать приглашение»: единственное место, где появляется проба адреса у сервера
+            // (`ExternalMode::Probe`); есть ли сервер и что вписывать, решает узел
             I::AddCreate => {
                 if !matches!(self.add.stage, AddStage::Form { busy: false }) {
                     return Vec::new();
                 }
-                let manual_text = self.add.manual_addr.trim();
-                let manual = if manual_text.is_empty() {
-                    None
-                } else {
-                    match manual_text.parse::<SocketAddr>() {
-                        Ok(a) => Some(a),
-                        Err(_) => {
-                            self.add.error = Some(texts::BAD_MANUAL_ADDR);
-                            return Vec::new();
-                        }
-                    }
-                };
                 self.add.error = None;
+                self.add.no_addresses = false;
                 self.add.stage = AddStage::Form { busy: true };
                 vec![Command::CreateInvite {
                     same_network: self.add.same_network,
-                    manual,
+                    external: ExternalMode::Probe,
+                }]
+            }
+            // «Получить свой IP»: единственное место, где появляется `Command::EchoProbe`
+            I::GetIp => {
+                if !matches!(self.add.stage, AddStage::Form { busy: false })
+                    || !self.get_ip_enabled()
+                {
+                    return Vec::new();
+                }
+                self.add.get_ip = GetIpUi::Busy;
+                vec![Command::EchoProbe]
+            }
+            // «VPN выключен, вписать адрес»: только после явного ответа на вопрос о VPN
+            I::AddVpnWithAddr => {
+                let AddStage::VpnAsk { addrs } = &mut self.add.stage else {
+                    return Vec::new();
+                };
+                let addrs = std::mem::take(addrs);
+                self.add.stage = AddStage::Form { busy: true };
+                vec![Command::CreateInvite {
+                    same_network: self.add.same_network,
+                    external: ExternalMode::Use(addrs),
+                }]
+            }
+            I::AddVpnWithout => {
+                if !matches!(self.add.stage, AddStage::VpnAsk { .. }) {
+                    return Vec::new();
+                }
+                self.add.stage = AddStage::Form { busy: true };
+                vec![Command::CreateInvite {
+                    same_network: self.add.same_network,
+                    external: ExternalMode::Without,
                 }]
             }
             I::AddCancel => {
-                if let AddStage::Waiting { invite, .. } = self.add.stage {
-                    self.add.stage = AddStage::Form { busy: false };
-                    return vec![Command::CancelInvite(invite)];
+                match self.add.stage {
+                    AddStage::Waiting { invite, .. } => {
+                        self.add.stage = AddStage::Form { busy: false };
+                        return vec![Command::CancelInvite(invite)];
+                    }
+                    // вопрос о VPN снят: приглашения не было, отменять нечего
+                    AddStage::VpnAsk { .. } => {
+                        self.add.stage = AddStage::Form { busy: false };
+                    }
+                    _ => {}
                 }
                 Vec::new()
             }
@@ -661,7 +707,7 @@ impl Model {
     /// Ответы фонового потока на команды главного окна.
     pub fn outcome_main(&mut self, outcome: Outcome) {
         match outcome {
-            Outcome::InviteCreated(Ok((invite, token))) => {
+            Outcome::InviteCreated(Ok((invite, token, ext))) => {
                 let qr = qr::encode(&token);
                 let ttl = self
                     .snapshot
@@ -673,11 +719,33 @@ impl Model {
                     token: Some(token),
                     qr,
                     valid: Some((Instant::now(), ttl)),
+                    ext,
+                    addr_changed: false,
                 };
             }
             Outcome::InviteCreated(Err(e)) => {
                 self.add.stage = AddStage::Form { busy: false };
-                self.add.error = Some(e.user_text());
+                let text = e.user_text();
+                self.add.error = Some(text);
+                // В4: «нет адреса» отправляет к помощнику «Разрешить входящие подключения»
+                self.add.no_addresses = text == chervo_core::texts::NO_ADDRESS_TEXT;
+            }
+            Outcome::InviteVpnAsk(addrs) => {
+                if matches!(self.add.stage, AddStage::Form { busy: true }) {
+                    self.add.stage = AddStage::VpnAsk { addrs };
+                }
+            }
+            Outcome::GetIp(r) => self.add.get_ip = GetIpUi::Result(r),
+            Outcome::InviteAddrChanged(id) => {
+                if let AddStage::Waiting {
+                    invite,
+                    addr_changed,
+                    ..
+                } = &mut self.add.stage
+                    && *invite == id
+                {
+                    *addr_changed = true;
+                }
             }
             // текст от друга: ошибка остаётся в окне вставки, остальное по виду текста
             Outcome::FriendText(Err(e)) => {
@@ -701,6 +769,8 @@ impl Model {
                                 token: None,
                                 qr: None,
                                 valid: None,
+                                ext: InviteExt::Plain,
+                                addr_changed: false,
                             };
                         }
                     }
@@ -1261,22 +1331,15 @@ mod tests {
     }
 
     #[test]
-    fn manual_addr_must_parse() {
+    fn create_invite_goes_through_probe_once() {
         let mut m = model();
-        ask(&mut m, MainIntent::AddManualEdited("не адрес".to_owned()));
-        assert!(ask(&mut m, MainIntent::AddCreate).is_empty());
-        assert_eq!(m.add.error, Some(texts::BAD_MANUAL_ADDR));
-        ask(
-            &mut m,
-            MainIntent::AddManualEdited("203.0.113.5:50000".to_owned()),
-        );
         ask(&mut m, MainIntent::AddSameNetwork(true));
         let cmds = ask(&mut m, MainIntent::AddCreate);
         assert_eq!(
             cmds,
             vec![Command::CreateInvite {
                 same_network: true,
-                manual: Some("203.0.113.5:50000".parse().expect("addr"))
+                external: ExternalMode::Probe
             }]
         );
         // пока создаётся, повторное нажатие ничего не делает

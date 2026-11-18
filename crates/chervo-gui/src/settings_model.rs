@@ -59,6 +59,8 @@ pub struct SettingsUi {
     pub min_free: NumEdit,
     pub port: NumEdit,
     pub forward: NumEdit,
+    /// Строка «Адрес вашего сервера» (этап 13д).
+    pub echo: NumEdit,
     pub upnp: UpnpUi,
     pub clock: ClockUi,
 }
@@ -74,6 +76,10 @@ pub enum SettingsIntent {
     PortSubmit,
     ForwardEdited(String),
     ForwardSubmit,
+    /// Правка строки «Адрес вашего сервера».
+    EchoEdited(String),
+    EchoSave,
+    EchoClear,
     UpnpFind,
     UpnpAllowYes,
     UpnpDecline,
@@ -196,6 +202,30 @@ impl Model {
                         Vec::new()
                     }
                 }
+            }
+            S::EchoEdited(t) => {
+                self.settings_ui.echo = NumEdit {
+                    text: Some(cap_paste(t).0),
+                    error: None,
+                };
+                Vec::new()
+            }
+            // запись адреса сервера сети не трогает; пустая строка то же, что «Очистить»
+            S::EchoSave => {
+                let text = self
+                    .settings_ui
+                    .echo
+                    .text
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim()
+                    .to_owned();
+                let server = (!text.is_empty()).then_some(text);
+                vec![Command::SetEchoServer(server)]
+            }
+            S::EchoClear => {
+                self.settings_ui.echo = NumEdit::default();
+                vec![Command::SetEchoServer(None)]
             }
             // «Найти роутер»: единственное место, где появляется `Command::UpnpIdentify`
             S::UpnpFind => {
@@ -321,7 +351,18 @@ impl Model {
                     r.outside_warning = true;
                 }
             }
-            Outcome::UpnpFound(Ok(())) => self.settings_ui.upnp = UpnpUi::Found,
+            Outcome::EchoServerSet { cleared, result } => match result {
+                Ok(()) => {
+                    self.settings_ui.echo = NumEdit::default();
+                    self.push_notice(if cleared {
+                        texts::EXT_SERVER_CLEARED
+                    } else {
+                        texts::EXT_SERVER_SAVED
+                    });
+                }
+                Err(e) => self.settings_ui.echo.error = Some(e.user_text()),
+            },
+            Outcome::UpnpFound(Ok(_)) => self.settings_ui.upnp = UpnpUi::Found,
             Outcome::UpnpFound(Err(e)) => {
                 self.settings_ui.upnp = UpnpUi::Message(e.user_text());
             }
@@ -393,6 +434,7 @@ mod tests {
             restart_needed: false,
             update_consent: chervo_core::update::UpdateConsent::NotAsked,
             lan: crate::rows::LanRow::default(),
+            echo_server: None,
         }
     }
 
@@ -490,12 +532,12 @@ mod tests {
         );
         assert!(ask(&mut m, SettingsIntent::UpnpFind).is_empty());
         // найден: вопрос; без «да» разрешения нет
-        m.on_outcome(Outcome::UpnpFound(Ok(())));
+        m.on_outcome(Outcome::UpnpFound(Ok(false)));
         assert!(m.settings_ui.upnp == UpnpUi::Found);
         ask(&mut m, SettingsIntent::UpnpDecline);
         assert!(ask(&mut m, SettingsIntent::UpnpAllowYes).is_empty());
         ask(&mut m, SettingsIntent::UpnpFind);
-        m.on_outcome(Outcome::UpnpFound(Ok(())));
+        m.on_outcome(Outcome::UpnpFound(Ok(false)));
         assert_eq!(
             ask(&mut m, SettingsIntent::UpnpAllowYes),
             vec![Command::UpnpAllow {
@@ -597,6 +639,58 @@ mod tests {
         assert_eq!(
             ask(&mut m, SettingsIntent::ForwardSubmit),
             vec![Command::SetManualForward(None)]
+        );
+    }
+
+    #[test]
+    fn echo_server_save_and_clear() {
+        let mut m = model();
+        // без правки сохранять нечего: пустая строка это «убрать», сеть не трогается
+        assert_eq!(
+            ask(&mut m, SettingsIntent::EchoSave),
+            vec![Command::SetEchoServer(None)]
+        );
+        ask(
+            &mut m,
+            SettingsIntent::EchoEdited("  203.0.113.5:45900 ".to_owned()),
+        );
+        assert_eq!(
+            ask(&mut m, SettingsIntent::EchoSave),
+            vec![Command::SetEchoServer(Some("203.0.113.5:45900".to_owned()))]
+        );
+        // узел принял: строка сброшена, уведомление называет итог
+        m.on_outcome(Outcome::EchoServerSet {
+            cleared: false,
+            result: Ok(()),
+        });
+        assert!(m.settings_ui.echo.text.is_none());
+        assert_eq!(
+            m.notices.last().map(String::as_str),
+            Some(texts::EXT_SERVER_SAVED)
+        );
+        // узел отверг: текст ошибки остаётся у строки, правка не теряется
+        ask(&mut m, SettingsIntent::EchoEdited("не адрес".to_owned()));
+        m.on_outcome(Outcome::EchoServerSet {
+            cleared: false,
+            result: Err(NodeError::Echo(chervo_core::EchoFailure::BadAddress)),
+        });
+        assert_eq!(
+            m.settings_ui.echo.error,
+            Some(chervo_core::texts::ECHO_BAD_ADDRESS_TEXT)
+        );
+        assert!(m.settings_ui.echo.text.is_some());
+        // «Очистить»
+        assert_eq!(
+            ask(&mut m, SettingsIntent::EchoClear),
+            vec![Command::SetEchoServer(None)]
+        );
+        m.on_outcome(Outcome::EchoServerSet {
+            cleared: true,
+            result: Ok(()),
+        });
+        assert_eq!(
+            m.notices.last().map(String::as_str),
+            Some(texts::EXT_SERVER_CLEARED)
         );
     }
 

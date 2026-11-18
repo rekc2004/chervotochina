@@ -6,6 +6,7 @@ use chervo_core::texts as core_texts;
 use chervo_core::{FriendStatus, MapStatus, NatView};
 use eframe::egui;
 
+use crate::access_model::AccessIntent;
 use crate::main_model::MainIntent;
 use crate::model::{Intent, Model};
 use crate::screens::common::warn;
@@ -106,6 +107,10 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
                     if d.could_help {
                         // посредника в этой версии нет: ни кнопки, ни поля, только текст
                         ui.label(texts::MEDIATOR_LATER);
+                    }
+                    // причина в роутере или адресе: помощник ведёт к настройке (С8)
+                    if d.open_access && ui.button(texts::BTN_OPEN_ACCESS).clicked() {
+                        out.push(main(MainIntent::Access(AccessIntent::Open)));
                     }
                 } else {
                     ui.label(texts::DIAG_NO_REASON);

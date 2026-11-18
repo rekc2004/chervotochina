@@ -126,6 +126,29 @@ pub fn enclosing_arm<'a>(lines: &[&'a str], idx: usize) -> Option<&'a str> {
     None
 }
 
+/// Строки ветки `match`, чей заголовок начинается с `arm` (первая такая строка): от заголовка
+/// (в том числе многострочного, до строки с `=>`) до конца тела, то есть до первой строки с
+/// отступом не больше отступа заголовка. `None`, если такой ветки нет.
+pub fn arm_block<'a>(lines: &[&'a str], arm: &str) -> Option<Vec<&'a str>> {
+    let indent = |l: &str| l.len() - l.trim_start().len();
+    let start = lines.iter().position(|l| l.trim_start().starts_with(arm))?;
+    let base = indent(lines[start]);
+    let mut head_end = start;
+    while head_end < lines.len() && !lines[head_end].contains("=>") {
+        head_end += 1;
+    }
+    let mut end = (head_end + 1).min(lines.len());
+    while end < lines.len() && (lines[end].trim().is_empty() || indent(lines[end]) > base) {
+        end += 1;
+    }
+    Some(lines[start..end].to_vec())
+}
+
+/// Сколько раз `needle` встречается в строках.
+pub fn count_in(lines: &[&str], needle: &str) -> usize {
+    lines.iter().map(|l| l.matches(needle).count()).sum()
+}
+
 /// Файлы `files`, чей код содержит любой из `needles`: `(файл, номер строки, строка)`.
 pub fn hits(files: &[(String, String)], needles: &[&str]) -> Vec<String> {
     let mut out = Vec::new();

@@ -6,11 +6,12 @@ use std::collections::HashMap;
 use std::hash::Hash;
 
 use chervo_core::{
-    ClockProposal, ClockSync, FriendRef, FriendStatus, FriendText, FriendsError, InviteRef,
-    NoDirectPath, Node, NodeError, NodeEvent, PathKind, RouterCandidate, Side, TransferRef,
-    TransferState, TrustConfirmation,
+    ClockProposal, ClockSync, EchoFailure, ExternalPlan, FriendRef, FriendStatus, FriendText,
+    FriendsError, InviteRef, NoDirectPath, Node, NodeError, NodeEvent, PathKind, RouterCandidate,
+    Side, TransferRef, TransferState, TrustConfirmation, plan_invite_external,
 };
 
+use crate::access_model::{ExternalMode, GetIpResult, InviteExt};
 use crate::model::{ClockResult, Command, FriendEventKind, FriendTextOutcome, Outcome, Snapshot};
 use crate::rows::{
     DiagRow, FileRow, FriendRow, Id, LanRow, OfferRow, RetiredRow, RouterRow, SettingsRow,
@@ -244,6 +245,7 @@ pub fn snapshot(node: &Node, refs: &mut Refs) -> Snapshot {
             status: node.lan_status(),
             addrs: node.lan_addrs(),
         },
+        echo_server: sv.echo_server,
     };
     Snapshot {
         friends,
@@ -274,6 +276,7 @@ fn diagnoses(node: &Node, refs: &Refs, friends: &[FriendRow]) -> Vec<DiagRow> {
                 text: d.text,
                 could_help: d.rendezvous_could_help,
                 lan_hint: lan_hint(f.path, d.reason),
+                open_access: open_access_hint(d.reason),
             });
         }
     }
@@ -288,6 +291,19 @@ pub fn lan_hint(last_path: Option<PathKind>, reason: NoDirectPath) -> bool {
             reason,
             NoDirectPath::NoKnownAddress | NoDirectPath::NeedToken | NoDirectPath::Unknown
         )
+}
+
+/// Причина в роутере или адресе (сеть провайдера, нужен адрес): рядом с ней показывается кнопка
+/// «Разрешить входящие подключения» (этап 13д, С8).
+pub fn open_access_hint(reason: NoDirectPath) -> bool {
+    matches!(
+        reason,
+        NoDirectPath::NoKnownAddress
+            | NoDirectPath::NeedToken
+            | NoDirectPath::BehindCgnat
+            | NoDirectPath::DoubleNat
+            | NoDirectPath::SymmetricNat
+    )
 }
 
 /// Событие узла -> ответ окну. `None`: событие только повод обновить снимок.
@@ -321,6 +337,9 @@ pub fn event_outcome(node: Option<&Node>, refs: &mut Refs, ev: NodeEvent) -> Out
             spoken: sas.spoken(),
         },
         NodeEvent::InviteFinished { outcome, .. } => Outcome::InviteFinished(outcome),
+        NodeEvent::InviteAddressChanged { invite } => {
+            Outcome::InviteAddrChanged(refs.invites.id(invite))
+        }
         NodeEvent::OfferIncoming { .. } => Outcome::OfferIncoming,
         NodeEvent::OfferAutoAccepted { .. } => Outcome::AutoAccepted,
         other => Outcome::Event(other),
@@ -361,13 +380,74 @@ pub fn exec(node: &Node, refs: &mut Refs, cmd: Command) -> Option<Outcome> {
     match cmd {
         Command::CreateInvite {
             same_network,
-            manual,
+            external,
         } => {
+            // адрес от сервера: `echo_probe` только под `Probe`; без сервера узел сети не трогает
+            let (extra, ext) = match external {
+                ExternalMode::Without => (Vec::new(), InviteExt::Plain),
+                ExternalMode::Use(addrs) => {
+                    let ext = addrs
+                        .first()
+                        .map_or(InviteExt::Plain, |a| InviteExt::Added {
+                            addr: *a,
+                            vpn_on: false,
+                        });
+                    (addrs, ext)
+                }
+                ExternalMode::Probe => {
+                    let probed = node.echo_probe();
+                    match probed {
+                        Err(NodeError::Echo(EchoFailure::NotConfigured)) => {
+                            (Vec::new(), InviteExt::NotSet)
+                        }
+                        Err(e) => (Vec::new(), InviteExt::Failed(e.user_text())),
+                        Ok(report) => {
+                            let manual = node.settings().manual_forward;
+                            match plan_invite_external(&report, node.nat_view(), manual) {
+                                ExternalPlan::Add { addrs, vpn_on } => match addrs.first() {
+                                    Some(a) => {
+                                        let ext = InviteExt::Added { addr: *a, vpn_on };
+                                        (addrs, ext)
+                                    }
+                                    None => (Vec::new(), InviteExt::Plain),
+                                },
+                                ExternalPlan::AskVpn { addrs } => {
+                                    return Some(Outcome::InviteVpnAsk(addrs));
+                                }
+                                ExternalPlan::Skip(r) => (Vec::new(), InviteExt::Skipped(r)),
+                            }
+                        }
+                    }
+                }
+            };
             let r = node
-                .create_invite(same_network, manual)
-                .map(|(i, t)| (refs.invites.id(i), t.as_str().to_owned()));
+                .create_invite_ext(same_network, &extra)
+                .map(|(i, t)| (refs.invites.id(i), t.as_str().to_owned(), ext));
             Some(Outcome::InviteCreated(r))
         }
+        // кнопка «Получить свой IP»: адрес у сервера узнаётся только по ней
+        Command::EchoProbe => {
+            let r = match node.echo_probe() {
+                Ok(report) => {
+                    let manual = node.settings().manual_forward;
+                    GetIpResult::from_plan(&plan_invite_external(&report, node.nat_view(), manual))
+                }
+                Err(e) => GetIpResult::Failed(e.user_text()),
+            };
+            Some(Outcome::GetIp(r))
+        }
+        // запись адреса сервера сети не трогает
+        Command::SetEchoServer(server) => {
+            let cleared = server.is_none();
+            let result = node.set_echo_server(server.as_deref());
+            Some(Outcome::EchoServerSet { cleared, result })
+        }
+        // помощник: кнопка «Проверить» (сервер присылает проверочный ответ)
+        Command::ReachCheck => Some(Outcome::Reach(node.reach_check())),
+        // помощник: кнопка «Правило создано»
+        Command::ConfirmForward => Some(Outcome::ForwardConfirmed(node.confirm_manual_forward())),
+        // значения для ручных шагов: сети не трогает
+        Command::ForwardHelp => Some(Outcome::ForwardHelp(Box::new(node.forward_help()))),
         // любой текст от друга: вид определяет узел, дальше его обычный путь (для приглашения
         // обязательна сверка кода)
         Command::ApplyFriendText(text) => {
@@ -521,7 +601,10 @@ pub fn exec(node: &Node, refs: &mut Refs, cmd: Command) -> Option<Outcome> {
         // кнопка «Найти роутер»: сам узел это не делает
         Command::UpnpIdentify => {
             let r = node.upnp_identify().map(|c| {
+                // уже разрешённый роутер второй раз не спрашивается (помощник, Р10.1)
+                let already = node.settings().routers.iter().any(|a| a.router == c);
                 refs.found_router = Some(c);
+                already
             });
             Some(Outcome::UpnpFound(r))
         }

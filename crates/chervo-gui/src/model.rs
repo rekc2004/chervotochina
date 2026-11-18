@@ -10,8 +10,12 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use chervo_core::{InviteOutcome, LanMode, MapStatus, NatView, NodeError, NodeEvent, RootError};
+use chervo_core::{
+    ForwardHelp, InviteOutcome, LanMode, MapStatus, NatView, NodeError, NodeEvent, ReachResult,
+    RootError,
+};
 
+use crate::access_model::{AccessUi, ExternalMode, GetIpResult, InviteExt};
 use crate::main_model::{AddFriend, Dialog, MainIntent, OfferUi, SendUi};
 use crate::redact::{redacted_debug_enum, redacted_debug_struct};
 use crate::rows::{DiagRow, FriendRow, Id, OfferRow, RetiredRow, SettingsRow, TransferRow};
@@ -46,10 +50,23 @@ pub enum Command {
     RequestUnlock,
     Shutdown,
     // друзья и приглашения (экраны 2-3)
+    /// `external`: что делать с адресом от сервера (этап 13д). `Probe` только из ветки
+    /// `I::AddCreate`, `Use` и `Without` только из веток ответа о VPN (охрана
+    /// `gated_node_actions`).
     CreateInvite {
         same_network: bool,
-        manual: Option<SocketAddr>,
+        external: ExternalMode,
     },
+    /// Только из ветки `I::GetIp` (охрана `gated_node_actions`): узнаёт адрес у сервера.
+    EchoProbe,
+    /// Адрес сервера для подсказки «ваш адрес в интернете»; `None`: убрать. Сети не трогает.
+    SetEchoServer(Option<String>),
+    /// Только из ветки `A::AccessCheck` (охрана `gated_node_actions`).
+    ReachCheck,
+    /// Только из ветки `A::AccessDone` (охрана `gated_node_actions`).
+    ConfirmForward,
+    /// Значения для ручных шагов помощника (сети не трогает).
+    ForwardHelp,
     /// Любой текст, который прислал друг (приглашение, новый адрес или уведомление об
     /// удалении): вид определяет узел. Только из ветки `MainIntent::FriendTextSubmit`
     /// (охрана `gated_node_actions`).
@@ -102,7 +119,8 @@ pub enum Command {
     SetMinFree(u8),
     SetPort(u16),
     SetManualForward(Option<u16>),
-    /// Только из обработчика кнопки «Найти роутер» (охрана `gated_node_actions`).
+    /// Только из обработчика кнопки «Найти роутер» и из ветки «Попробовать автоматически»
+    /// (охрана `gated_node_actions`).
     UpnpIdentify,
     /// `router`: `None` значит найденный только что, иначе позиция в списке разрешённых.
     UpnpAllow {
@@ -195,7 +213,21 @@ pub enum Outcome {
     Event(NodeEvent),
     Stopped,
     // ответы на команды экранов 2-6
-    InviteCreated(Result<(Id, String), NodeError>),
+    InviteCreated(Result<(Id, String, InviteExt), NodeError>),
+    /// Похоже на VPN: приглашение ещё не создано, человек должен ответить (адреса от сервера).
+    InviteVpnAsk(Vec<SocketAddr>),
+    /// Итог кнопки «Получить свой IP».
+    GetIp(GetIpResult),
+    /// Адрес в интернете у ждущего приглашения изменился.
+    InviteAddrChanged(Id),
+    /// Итог записи адреса сервера (`cleared`: это была очистка).
+    EchoServerSet {
+        cleared: bool,
+        result: Result<(), NodeError>,
+    },
+    ForwardHelp(Box<ForwardHelp>),
+    Reach(Result<ReachResult, NodeError>),
+    ForwardConfirmed(Result<(), NodeError>),
     /// Итог вставки текста от друга (`Command::ApplyFriendText`).
     FriendText(Result<FriendTextOutcome, NodeError>),
     /// Итог кнопки «Открыть папку».
@@ -226,7 +258,8 @@ pub enum Outcome {
     },
     /// Итог смены папки приёма (нужен отдельно: `OutsideProfile` ведёт к вопросу).
     RootSet(Result<(), NodeError>),
-    UpnpFound(Result<(), NodeError>),
+    /// `Ok(true)`: найденный роутер уже разрешён раньше.
+    UpnpFound(Result<bool, NodeError>),
     ClockSynced(Result<ClockResult, NodeError>),
     OfferIncoming,
     AutoAccepted,
@@ -354,6 +387,8 @@ pub struct Model {
     /// Предложить «Сверить часы» рядом с уведомлениями (`ClockSkewSuspected`).
     pub clock_hint: bool,
     pub settings_ui: SettingsUi,
+    /// Помощник «Разрешить входящие подключения» (этап 13д).
+    pub access: AccessUi,
     /// Состояние страницы «Обновления» и карточек (этап 19г-2).
     pub update: UpdateUi,
     pub close: Close,
@@ -381,6 +416,7 @@ impl Model {
             notices: Vec::new(),
             clock_hint: false,
             settings_ui: SettingsUi::default(),
+            access: AccessUi::default(),
             update: UpdateUi::default(),
             close: Close::None,
             dialog: Dialog::None,
@@ -411,6 +447,7 @@ impl Model {
             notices: Vec::new(),
             clock_hint: false,
             settings_ui: SettingsUi::default(),
+            access: AccessUi::default(),
             update: UpdateUi::default(),
             close: Close::None,
             dialog: Dialog::None,
@@ -489,6 +526,7 @@ impl Model {
             Intent::Go(page) => {
                 if self.node_open {
                     self.page = page;
+                    self.access.open = false;
                     // адреса поиска в локальной сети меняются без событий: при открытии
                     // настроек состояние перечитывается
                     if page == Page::Settings {
@@ -723,7 +761,8 @@ impl Model {
                 let friends = &self.snapshot.friends;
                 self.connecting
                     .retain(|id| friends.iter().any(|f| f.id == *id && !f.online));
-                Vec::new()
+                // помощник ждёт открытия проброса: новый снимок может его закончить
+                self.access_progress()
             }
             Outcome::Event(ev) => {
                 match ev {
@@ -748,6 +787,10 @@ impl Model {
                 self.close = Close::Done;
                 Vec::new()
             }
+            o @ (Outcome::UpnpFound(_)
+            | Outcome::ForwardHelp(_)
+            | Outcome::Reach(_)
+            | Outcome::ForwardConfirmed(_)) => self.outcome_access(o),
             o @ (Outcome::UpdateConsentSet { .. }
             | Outcome::UpdateCheckStarted { .. }
             | Outcome::UpdateSkipped

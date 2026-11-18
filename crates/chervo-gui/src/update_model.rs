@@ -411,6 +411,7 @@ mod tests {
             restart_needed: false,
             update_consent: consent,
             lan: crate::rows::LanRow::default(),
+            echo_server: None,
         }
     }
 

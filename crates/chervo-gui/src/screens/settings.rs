@@ -7,11 +7,12 @@ use chervo_core::update::RELEASES_PAGE;
 use chervo_core::{KeyStoreKind, LanMode, LanStatus};
 use eframe::egui;
 
+use crate::access_model::AccessIntent;
 use crate::main_model::MainIntent;
 use crate::model::{Intent, Model, Page};
 use crate::picker;
 use crate::rows::SettingsRow;
-use crate::screens::common::{copy_box, warn};
+use crate::screens::common::{copy_box, label_with_help, warn};
 use crate::settings_model::{ClockUi, NumEdit, SettingsIntent as S, SettingsUi, UpnpUi};
 use crate::texts;
 
@@ -31,6 +32,8 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
             numbers(ui, set, &model.settings_ui, &mut out);
             ui.separator();
             lan(ui, set, &mut out);
+            ui.separator();
+            external(ui, set, &model.settings_ui, &mut out);
             ui.separator();
             upnp(ui, model, set, &mut out);
             ui.separator();
@@ -146,7 +149,7 @@ fn numbers(ui: &mut egui::Ui, set: &SettingsRow, st: &SettingsUi, out: &mut Vec<
     );
     num_row(
         ui,
-        texts::SET_FORWARD,
+        texts::ACC_MANUAL_FORWARD_LABEL,
         &st.forward,
         set.manual_forward
             .map(|p| p.to_string())
@@ -207,8 +210,49 @@ fn lan(ui: &mut egui::Ui, set: &SettingsRow, out: &mut Vec<Intent>) {
         });
 }
 
+/// «Связь через интернет»: адрес своего сервера, который подсказывает ваш адрес в интернете.
+/// Пустая строка: ни одного пакета к серверу.
+fn external(ui: &mut egui::Ui, set: &SettingsRow, st: &SettingsUi, out: &mut Vec<Intent>) {
+    ui.heading(texts::SET_TITLE_EXTERNAL);
+    label_with_help(ui, texts::EXT_SERVER_LABEL, texts::EXT_SERVER_HINT);
+    let mut text = st
+        .echo
+        .text
+        .clone()
+        .unwrap_or_else(|| set.echo_server.clone().unwrap_or_default());
+    if ui
+        .add(egui::TextEdit::singleline(&mut text).desired_width(360.0))
+        .changed()
+    {
+        out.push(s(S::EchoEdited(text)));
+    }
+    if let Some(e) = st.echo.error {
+        warn(ui, e);
+    }
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(st.echo.text.is_some(), egui::Button::new(texts::BTN_SAVE))
+            .clicked()
+        {
+            out.push(s(S::EchoSave));
+        }
+        if ui
+            .add_enabled(
+                set.echo_server.is_some() || st.echo.text.is_some(),
+                egui::Button::new(texts::BTN_CLEAR),
+            )
+            .clicked()
+        {
+            out.push(s(S::EchoClear));
+        }
+    });
+}
+
 fn upnp(ui: &mut egui::Ui, model: &Model, set: &SettingsRow, out: &mut Vec<Intent>) {
     ui.heading(texts::SET_TITLE_UPNP);
+    if ui.button(texts::BTN_OPEN_ACCESS).clicked() {
+        out.push(Intent::Main(MainIntent::Access(AccessIntent::Open)));
+    }
     if let Some(m) = model.snapshot.mapping {
         ui.label(core_texts::mapping_text(m));
     }

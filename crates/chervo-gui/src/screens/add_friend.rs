@@ -6,10 +6,13 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, FontId, RichText, Role, Sense, WidgetInfo};
 
+use chervo_core::SkipReason;
+
+use crate::access_model::{AccessIntent, GetIpMark, GetIpResult, GetIpUi, InviteExt};
 use crate::main_model::{AddFriend, AddStage, Dialog, MainIntent, SasState};
 use crate::model::{Intent, Model};
 use crate::qr::QrMatrix;
-use crate::screens::common::{copy_box, warn};
+use crate::screens::common::{copy_box, help_mark, warn};
 use crate::screens::friends::friend_text_dialog;
 use crate::texts;
 
@@ -29,10 +32,25 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
         return out;
     }
     match &a.stage {
-        AddStage::Form { busy } => form(ui, a, *busy, &mut out),
+        AddStage::Form { busy } => form(ui, model, *busy, &mut out),
+        AddStage::VpnAsk { .. } => vpn_ask(ui, &mut out),
         AddStage::Waiting {
-            token, qr, valid, ..
-        } => waiting(ui, token.as_deref(), qr.as_ref(), *valid, &mut out),
+            token,
+            qr,
+            valid,
+            ext,
+            addr_changed,
+            ..
+        } => {
+            let w = Waiting {
+                token: token.as_deref(),
+                qr: qr.as_ref(),
+                valid: *valid,
+                ext: *ext,
+                addr_changed: *addr_changed,
+            };
+            waiting(ui, &w, &mut out);
+        }
         AddStage::Sas(s) => sas(ui, s, &mut out),
         AddStage::Finished(text) => {
             ui.label(*text);
@@ -45,7 +63,26 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
     out
 }
 
-fn form(ui: &mut egui::Ui, a: &AddFriend, busy: bool, out: &mut Vec<Intent>) {
+/// Причина, по которой адрес от сервера в приглашение не вписан (или проба не удалась); `None`:
+/// нечего сказать. Общая для экрана и проверок.
+pub fn invite_ext_note(ext: InviteExt) -> Option<&'static str> {
+    match ext {
+        InviteExt::Skipped(SkipReason::NoAnswer) => Some(texts::INV_EXT_NO_ANSWER),
+        InviteExt::Skipped(SkipReason::ServerLocal) => Some(texts::INV_EXT_SERVER_LOCAL),
+        InviteExt::Skipped(SkipReason::Symmetric) => Some(texts::INV_EXT_SYMMETRIC),
+        InviteExt::Failed(text) => Some(text),
+        InviteExt::Plain | InviteExt::NotSet | InviteExt::Added { .. } => None,
+    }
+}
+
+fn open_access_button(ui: &mut egui::Ui, out: &mut Vec<Intent>) {
+    if ui.button(texts::BTN_OPEN_ACCESS).clicked() {
+        out.push(main(MainIntent::Access(AccessIntent::Open)));
+    }
+}
+
+fn form(ui: &mut egui::Ui, model: &Model, busy: bool, out: &mut Vec<Intent>) {
+    let a: &AddFriend = &model.add;
     // друг уже прислал текст: приглашение, новый адрес или уведомление об удалении
     if ui
         .add_enabled(!busy, egui::Button::new(texts::BTN_FRIEND_TEXT))
@@ -65,38 +102,131 @@ fn form(ui: &mut egui::Ui, a: &AddFriend, busy: bool, out: &mut Vec<Intent>) {
         out.push(main(MainIntent::AddSameNetwork(same)));
     }
     ui.add_space(6.0);
-    ui.label(texts::ADD_MANUAL_LABEL);
-    let mut manual = a.manual_addr.clone();
-    if ui
-        .add_enabled(!busy, egui::TextEdit::singleline(&mut manual))
-        .changed()
-    {
-        out.push(main(MainIntent::AddManualEdited(manual)));
-    }
     warn(ui, texts::IP_WARNING);
     if let Some(e) = a.error {
         warn(ui, e);
+        if a.no_addresses {
+            open_access_button(ui, out);
+        }
     }
     ui.add_space(8.0);
-    if ui
-        .add_enabled(!busy, egui::Button::new(texts::BTN_CREATE_INVITE))
-        .clicked()
-    {
-        out.push(main(MainIntent::AddCreate));
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(!busy, egui::Button::new(texts::BTN_CREATE_INVITE))
+            .clicked()
+        {
+            out.push(main(MainIntent::AddCreate));
+        }
+        // «Получить свой IP»: без сервера недоступна, рядом «?» с подсказкой, куда его вписать
+        let enabled = !busy && model.get_ip_enabled();
+        if ui
+            .add_enabled(enabled, egui::Button::new(texts::BTN_GET_IP))
+            .clicked()
+        {
+            out.push(main(MainIntent::GetIp));
+        }
+        if !model.echo_server_set() {
+            help_mark(ui, texts::GETIP_NO_SERVER);
+        }
+    });
+    if busy && model.echo_server_set() {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(texts::INV_EXT_CHECKING);
+        });
+    }
+    get_ip_result(ui, &a.get_ip);
+    ui.add_space(4.0);
+    open_access_button(ui, out);
+}
+
+/// Итог «Получить свой IP»: адрес с «Копировать» и заметные пометки про VPN.
+fn get_ip_result(ui: &mut egui::Ui, g: &GetIpUi) {
+    match g {
+        GetIpUi::Idle => {}
+        GetIpUi::Busy => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(texts::INV_EXT_CHECKING);
+            });
+        }
+        GetIpUi::Result(GetIpResult::Address { addr, mark }) => {
+            ui.label(texts::GETIP_RESULT);
+            crate::screens::common::copy_line(ui, "", &addr.to_string());
+            match mark {
+                GetIpMark::Clean => {}
+                GetIpMark::MaybeVpn => warn(ui, texts::GETIP_MAYBE_VPN),
+                GetIpMark::VpnOn => warn(ui, texts::GETIP_VPN_ON),
+            }
+        }
+        GetIpUi::Result(GetIpResult::NoAnswer) => warn(ui, texts::GETIP_NO_ANSWER),
+        GetIpUi::Result(GetIpResult::ServerLocal) => warn(ui, texts::INV_EXT_SERVER_LOCAL),
+        GetIpUi::Result(GetIpResult::Symmetric) => warn(ui, texts::INV_EXT_SYMMETRIC),
+        GetIpUi::Result(GetIpResult::Failed(text)) => warn(ui, text),
     }
 }
 
-fn waiting(
-    ui: &mut egui::Ui,
-    token: Option<&str>,
-    qr: Option<&QrMatrix>,
+/// Похоже на VPN: приглашения ещё нет, адрес вписывается только по явной кнопке.
+fn vpn_ask(ui: &mut egui::Ui, out: &mut Vec<Intent>) {
+    ui.heading(texts::INV_MAYBE_VPN_TITLE);
+    warn(ui, texts::INV_MAYBE_VPN_TEXT);
+    ui.add_space(8.0);
+    if ui.button(texts::BTN_INV_WITHOUT_ADDR).clicked() {
+        out.push(main(MainIntent::AddVpnWithout));
+    }
+    if ui.button(texts::BTN_INV_WITH_ADDR).clicked() {
+        out.push(main(MainIntent::AddVpnWithAddr));
+    }
+    if ui.button(texts::BTN_CANCEL).clicked() {
+        out.push(main(MainIntent::AddCancel));
+    }
+}
+
+/// Что показывает экран ожидания.
+struct Waiting<'a> {
+    token: Option<&'a str>,
+    qr: Option<&'a QrMatrix>,
     valid: Option<(Instant, u64)>,
-    out: &mut Vec<Intent>,
-) {
-    match token {
+    ext: InviteExt,
+    addr_changed: bool,
+}
+
+/// Подписи про адрес в интернете под созданным приглашением.
+fn ext_notes(ui: &mut egui::Ui, ext: InviteExt, out: &mut Vec<Intent>) {
+    match ext {
+        InviteExt::Plain => {}
+        InviteExt::NotSet => {
+            ui.horizontal(|ui| {
+                ui.small(texts::INV_EXT_NOT_SET_LABEL);
+                help_mark(ui, texts::INV_EXT_NOT_SET);
+            });
+        }
+        InviteExt::Added { addr, vpn_on } => {
+            ui.small(texts::INV_EXT_ADDED.replace("{addr}", &addr.to_string()));
+            if vpn_on {
+                ui.strong(texts::INV_VPN_ON_TITLE);
+                warn(ui, texts::INV_VPN_ON_TEXT);
+            }
+            ui.label(texts::INV_EXT_FRIEND_TIP);
+            open_access_button(ui, out);
+        }
+        InviteExt::Skipped(SkipReason::Symmetric) => {
+            ui.label(texts::INV_EXT_SYMMETRIC);
+            open_access_button(ui, out);
+        }
+        other => {
+            if let Some(t) = invite_ext_note(other) {
+                ui.label(t);
+            }
+        }
+    }
+}
+
+fn waiting(ui: &mut egui::Ui, w: &Waiting<'_>, out: &mut Vec<Intent>) {
+    match w.token {
         Some(t) => {
             ui.label(texts::INVITE_WAIT);
-            if let Some((created, ttl)) = valid {
+            if let Some((created, ttl)) = w.valid {
                 let left = ttl.saturating_sub(created.elapsed().as_secs());
                 ui.label(texts::invite_valid_text(left));
                 if left > 0 {
@@ -105,7 +235,11 @@ fn waiting(
             }
             warn(ui, texts::IP_WARNING);
             copy_box(ui, t);
-            if let Some(q) = qr {
+            ext_notes(ui, w.ext, out);
+            if w.addr_changed {
+                warn(ui, texts::INV_ADDR_CHANGED);
+            }
+            if let Some(q) = w.qr {
                 ui.add_space(8.0);
                 draw_qr(ui, q);
             }
