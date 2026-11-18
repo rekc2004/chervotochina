@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, ToSocketAddrs};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -18,6 +19,7 @@ use chervo_addr::{AddrClass, MapStatus, NatView, classify, route_source_for};
 use chervo_connect::{InviteAddrs, RouteProbe as _};
 use chervo_transport::Transport as _;
 use chervo_transport_quinn::{ECHO_DEADLINE, EchoError, EchoPathResult, QuinnTransport};
+use chervo_upnp::RouterId;
 use tokio::sync::Notify;
 use tokio::time::Instant as TokioInstant;
 
@@ -296,6 +298,37 @@ pub fn plan_invite_external(
     }
 }
 
+/// Адрес роутера, которому человек нажал «Разрешить», с адресом нашего источника маршрута к нему
+/// на тот момент. Только по такому адресу помощник говорит «адрес сообщил сам роутер».
+pub(crate) struct AllowedAddr {
+    id: RouterId,
+    pub(crate) ip: Ipv4Addr,
+    source: Option<Ipv4Addr>,
+}
+
+impl AllowedAddr {
+    pub(crate) fn new(id: RouterId, ip: Ipv4Addr) -> Self {
+        let source = v4_of(route_source_for(SocketAddr::V4(SocketAddrV4::new(ip, 1))));
+        Self { id, ip, source }
+    }
+
+    pub(crate) fn is_router(&self, id: &RouterId) -> bool {
+        self.id == *id
+    }
+
+    /// Источник маршрута к роутеру тот же, что при «Разрешить» (сеть не менялась). Источник тогда
+    /// неизвестен: сказать нечего, считаем сеть другой.
+    pub(crate) fn same_network(&self, now: Option<Ipv4Addr>) -> bool {
+        self.source.is_some() && self.source == now
+    }
+
+    /// Запись с заданным источником маршрута (тесты без сети).
+    #[cfg(any(test, feature = "test-store"))]
+    pub(crate) fn with_source(id: RouterId, ip: Ipv4Addr, source: Option<Ipv4Addr>) -> Self {
+        Self { id, ip, source }
+    }
+}
+
 /// Исходные данные `forward_help` (собираются без сети; отдельно для проверки чистой логики).
 pub(crate) struct HelpInputs<'a> {
     pub port: u16,
@@ -380,6 +413,8 @@ pub(crate) struct ProbeState {
 pub(crate) struct EchoState {
     pub(crate) probe: Mutex<ProbeState>,
     pub(crate) keepalives: Mutex<HashMap<InviteRef, Arc<Notify>>>,
+    /// Идёт разрешение имени сервера (поток может пережить предел ожидания).
+    pub(crate) dns_busy: Arc<AtomicBool>,
     /// Только тесты: интервал поддержания вместо `KEEPALIVE_EVERY`.
     pub(crate) every_override: Mutex<Option<Duration>>,
 }
@@ -390,6 +425,15 @@ struct BusyGuard<'a>(&'a Mutex<ProbeState>);
 impl Drop for BusyGuard<'_> {
     fn drop(&mut self) {
         lock(self.0).busy = false;
+    }
+}
+
+/// Снимает флаг «разрешение имени идёт» при любом выходе потока DNS.
+struct FlagGuard(Arc<AtomicBool>);
+
+impl Drop for FlagGuard {
+    fn drop(&mut self) {
+        self.0.store(false, AtomicOrdering::Release);
     }
 }
 
@@ -408,21 +452,38 @@ fn map_transport_err(e: EchoError) -> NodeError {
 }
 
 /// Имя или литерал в адрес IPv4 сервера. DNS на отдельном потоке с пределом ожидания.
-fn resolve(host: EchoHost, port: u16) -> Result<SocketAddrV4, NodeError> {
+/// Не больше одного разрешения имени одновременно (`dns_busy`): поток, не уложившийся в
+/// `RESOLVE_LIMIT`, продолжает висеть, и новое разрешение до его конца отвечает `Busy`.
+pub(crate) fn resolve(
+    host: EchoHost,
+    port: u16,
+    dns_busy: &Arc<AtomicBool>,
+) -> Result<SocketAddrV4, NodeError> {
     let server = match host {
         EchoHost::Ip(ip) => SocketAddrV4::new(ip, port),
         EchoHost::Name(name) => {
+            if dns_busy.swap(true, AtomicOrdering::AcqRel) {
+                return Err(echo_err(EchoFailure::Busy));
+            }
             let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::Builder::new()
+            let flag = Arc::clone(dns_busy);
+            let spawned = std::thread::Builder::new()
                 .name("chervo-dns".to_owned())
                 .spawn(move || {
+                    // флаг снимается при любом выходе потока, в том числе при панике
+                    let free = FlagGuard(flag);
                     let found: Result<Vec<SocketAddr>, ()> = (name.as_str(), port)
                         .to_socket_addrs()
                         .map(|it| it.take(MAX_RESOLVED).collect())
                         .map_err(|_| ());
+                    // до отправки: получивший ответ уже видит снятый флаг
+                    drop(free);
                     let _ = tx.send(found);
-                })
-                .map_err(|_| echo_err(EchoFailure::Internal))?;
+                });
+            if spawned.is_err() {
+                dns_busy.store(false, AtomicOrdering::Release);
+                return Err(echo_err(EchoFailure::Internal));
+            }
             let list = match rx.recv_timeout(RESOLVE_LIMIT) {
                 Ok(Ok(list)) if !list.is_empty() => list,
                 _ => return Err(echo_err(EchoFailure::Resolve)),
@@ -472,11 +533,17 @@ impl Node {
                 Some(s.to_owned())
             }
         };
+        let mut changed = false;
         self.update_settings(|s| {
+            changed = s.echo_server != value;
             s.echo_server = value;
             Ok(())
         })?;
         lock(&self.core.echo.probe).last = None;
+        // Р9: без сохранённого сервера (или со сменой сервера) старое поддержание адреса не живёт
+        if changed {
+            self.core.stop_all_keepalives();
+        }
         Ok(())
     }
 
@@ -515,7 +582,7 @@ impl Node {
     fn run_probe(&self, text: &str) -> Result<(SocketAddrV4, EchoReport), NodeError> {
         let (host, port) =
             parse_echo_server(text).ok_or_else(|| echo_err(EchoFailure::BadAddress))?;
-        let server = resolve(host, port)?;
+        let server = resolve(host, port, &self.core.echo.dns_busy)?;
         let local_port = self
             .listen_port()
             .ok_or_else(|| echo_err(EchoFailure::Internal))?;
@@ -609,6 +676,13 @@ impl Node {
         let every = (*lock(&self.core.echo.every_override)).unwrap_or(KEEPALIVE_EVERY);
         let stop = Arc::new(Notify::new());
         lock(&self.core.echo.keepalives).insert(invite, stop.clone());
+        // Гонка с `set_echo_server`: настройки пишутся раньше, чем сбрасываются поддержания. Если
+        // сервер уже сменили или убрали, запись снимается здесь, иначе её снимет тот, кто пришёл
+        // позже нас.
+        if lock(&self.core.settings).echo_server.as_deref() != Some(cached.server_text.as_str()) {
+            self.core.stop_keepalive(&invite);
+            return;
+        }
         let job = KeepaliveJob {
             transport: self.core.transport.clone(),
             sink: self.core.sink.clone(),
@@ -630,15 +704,39 @@ impl Node {
         }));
     }
 
+    /// Адрес роутера, разрешённого человеком, и адрес нашего источника маршрута к нему. Если
+    /// источник маршрута с тех пор изменился (другая сеть), запись сбрасывается.
+    fn allowed_router_now(&self) -> (Option<Ipv4Addr>, Option<Ipv4Addr>) {
+        self.allowed_router_with(|ip| {
+            v4_of(route_source_for(SocketAddr::V4(SocketAddrV4::new(ip, 1))))
+        })
+    }
+
+    /// То же с подставляемым определением источника маршрута (тесты без сети).
+    pub(crate) fn allowed_router_with(
+        &self,
+        route: impl FnOnce(Ipv4Addr) -> Option<Ipv4Addr>,
+    ) -> (Option<Ipv4Addr>, Option<Ipv4Addr>) {
+        let mut slot = lock(&self.core.allowed_router);
+        let Some(a) = slot.as_ref() else {
+            return (None, None);
+        };
+        let now = route(a.ip);
+        if a.same_network(now) {
+            (Some(a.ip), now)
+        } else {
+            *slot = None;
+            (None, None)
+        }
+    }
+
     /// Значения для ручных шагов помощника. Сети не трогает (только опрос маршрутов без
     /// отправки пакетов).
     pub fn forward_help(&self) -> ForwardHelp {
         let port = self
             .listen_port()
             .unwrap_or_else(|| lock(&self.core.settings).port);
-        let lan_ip = *lock(&self.core.last_identify);
-        let lan_route_source =
-            lan_ip.and_then(|ip| v4_of(route_source_for(SocketAddr::V4(SocketAddrV4::new(ip, 1)))));
+        let (lan_ip, lan_route_source) = self.allowed_router_now();
         let report = lock(&self.core.echo.probe)
             .last
             .as_ref()
@@ -720,6 +818,17 @@ impl Core {
     pub(crate) fn stop_keepalive(&self, invite: &InviteRef) {
         let stop = lock(&self.echo.keepalives).remove(invite);
         if let Some(n) = stop {
+            n.notify_one();
+        }
+    }
+
+    /// Остановить все поддержания адреса (сервер эхо убран или заменён).
+    pub(crate) fn stop_all_keepalives(&self) {
+        let all: Vec<Arc<Notify>> = lock(&self.echo.keepalives)
+            .drain()
+            .map(|(_, n)| n)
+            .collect();
+        for n in all {
             n.notify_one();
         }
     }

@@ -569,7 +569,7 @@ fn build_core(cfg: &NodeConfig, p: Parts) -> Result<Built, NodeError> {
         lan: Mutex::new(lan),
         lan_blocked,
         echo: echo::EchoState::default(),
-        last_identify: Mutex::new(None),
+        allowed_router: Mutex::new(None),
     });
     Ok((core, events, tevents, warnings))
 }

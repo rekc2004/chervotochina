@@ -61,6 +61,67 @@ impl Node {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(every);
     }
 
+    /// Запомнить адрес разрешённого роутера с заданным источником маршрута, как это делает
+    /// `upnp_allow` (без сети и записи настроек; этап 13д, круг 1).
+    #[doc(hidden)]
+    pub fn set_allowed_router_for_tests(
+        &self,
+        ip: std::net::Ipv4Addr,
+        source: Option<std::net::Ipv4Addr>,
+    ) {
+        let Ok(id) = chervo_upnp::RouterId::from_setting("uuid:test-router") else {
+            return;
+        };
+        *self
+            .core
+            .allowed_router
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(super::echo::AllowedAddr::with_source(id, ip, source));
+    }
+
+    /// Найден роутер с данным UDN; `in_list`: он уже в списке разрешённых (только в памяти,
+    /// без записи настроек и сети). Возвращает, запомнился ли адрес (этап 13д, круг 1).
+    #[doc(hidden)]
+    pub fn note_identified_for_tests(
+        &self,
+        udn: &str,
+        ip: std::net::Ipv4Addr,
+        in_list: bool,
+    ) -> bool {
+        let Ok(id) = chervo_upnp::RouterId::from_setting(udn) else {
+            return false;
+        };
+        if in_list {
+            self.core
+                .settings
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .routers
+                .push(chervo_upnp::AllowedRouter {
+                    id: id.clone(),
+                    permanent_ok: false,
+                });
+        }
+        self.note_identified(&id, ip);
+        self.core
+            .allowed_router
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|a| a.is_router(&id))
+    }
+
+    /// Что помощник возьмёт за адрес роутера и источник маршрута, если сейчас источник
+    /// маршрута к роутеру равен `now` (этап 13д, круг 1).
+    #[doc(hidden)]
+    pub fn allowed_router_for_tests(
+        &self,
+        now: Option<std::net::Ipv4Addr>,
+    ) -> (Option<std::net::Ipv4Addr>, Option<std::net::Ipv4Addr>) {
+        self.allowed_router_with(|_| now)
+    }
+
     /// Сколько приглашений сейчас поддерживают адрес (этап 13д).
     #[doc(hidden)]
     pub fn keepalive_count_for_tests(&self) -> usize {

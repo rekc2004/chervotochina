@@ -128,8 +128,9 @@ pub(crate) struct Core {
     pub(crate) lan_blocked: bool,
     /// Эхо-сервер, внешний адрес в приглашении, помощник доступа (этап 13д, `node/echo.rs`).
     pub(crate) echo: super::echo::EchoState,
-    /// Адрес роутера из последнего «Найти роутер» (только читается помощником).
-    pub(crate) last_identify: Mutex<Option<std::net::Ipv4Addr>>,
+    /// Адрес роутера, которому человек нажал «Разрешить» (только читается помощником). Просто
+    /// найденный роутер сюда не попадает: ответить на SSDP может любое устройство сети.
+    pub(crate) allowed_router: Mutex<Option<super::echo::AllowedAddr>>,
 }
 
 impl Core {

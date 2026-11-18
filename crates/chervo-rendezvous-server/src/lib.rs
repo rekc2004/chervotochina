@@ -245,17 +245,42 @@ fn worker(l: &Listener, shared: &Shared, stop: &AtomicBool) {
                     }
                 }
             }
-            Err(e) => match e.kind() {
-                io::ErrorKind::WouldBlock
-                | io::ErrorKind::TimedOut
-                | io::ErrorKind::Interrupted => {}
-                _ => {
-                    // например, сброс соединения на Windows после ICMP: считаем и не крутимся вхолостую
+            Err(e) => match classify_recv_error(e.kind()) {
+                RecvErrorKind::Quiet => {}
+                RecvErrorKind::PeerReset => {
+                    // ICMP «порт недоступен» после нашего ответа поддельному источнику (Windows):
+                    // ошибка не про этот сокет, пауза дала бы атакующему способ тормозить приём
+                }
+                RecvErrorKind::Other => {
+                    // настоящая ошибка приёма: считаем и не крутимся вхолостую
                     shared.count(|c| c.recv_errors += 1);
                     thread::sleep(Duration::from_millis(5));
                 }
             },
         }
+    }
+}
+
+/// Что делать с ошибкой `recv_from`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecvErrorKind {
+    /// Тайм-аут чтения или прерывание: просто следующий круг.
+    Quiet,
+    /// Сброс «соединения» из-за ICMP от закрытого порта (WSAECONNRESET): пропустить без паузы.
+    PeerReset,
+    /// Всё остальное: счётчик и короткая пауза.
+    Other,
+}
+
+fn classify_recv_error(kind: io::ErrorKind) -> RecvErrorKind {
+    match kind {
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted => {
+            RecvErrorKind::Quiet
+        }
+        io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionRefused => {
+            RecvErrorKind::PeerReset
+        }
+        _ => RecvErrorKind::Other,
     }
 }
 

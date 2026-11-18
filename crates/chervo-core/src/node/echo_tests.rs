@@ -779,3 +779,49 @@ async fn keepalive_three_misses_emit_event() {
         .unwrap();
     drop(got.1);
 }
+
+// ------------------------------------------------------------------------ круг 1: DNS и роутер
+
+#[test]
+fn resolve_name_refused_while_previous_dns_hangs() {
+    use super::echo::resolve;
+    use super::error::{EchoFailure, NodeError};
+    // зависший поток DNS держит флаг: новое разрешение имени получает «занято», сети не трогает
+    let busy = Arc::new(AtomicBool::new(true));
+    let r = resolve(EchoHost::Name("server.example".to_owned()), 45900, &busy);
+    assert_eq!(r.err(), Some(NodeError::Echo(EchoFailure::Busy)));
+    assert!(
+        busy.load(Ordering::SeqCst),
+        "флаг чужого потока не трогается"
+    );
+    // литерал адреса DNS не использует и флагом не задерживается
+    let ip = resolve(EchoHost::Ip(v4(203, 0, 113, 5)), 45900, &busy).unwrap();
+    assert_eq!(ip, sa(203, 0, 113, 5, 45900));
+}
+
+#[test]
+fn resolve_name_releases_flag_when_done() {
+    use super::echo::resolve;
+    let busy = Arc::new(AtomicBool::new(false));
+    // результат не важен (зависит от окружения), важно, что флаг снят после ответа
+    let _ = resolve(EchoHost::Name("localhost".to_owned()), 45900, &busy);
+    assert!(
+        !busy.load(Ordering::SeqCst),
+        "флаг остался после разрешения"
+    );
+}
+
+#[test]
+fn allowed_addr_only_in_same_network() {
+    use super::echo::AllowedAddr;
+    let id = chervo_upnp::RouterId::from_setting("uuid:unit-router").unwrap();
+    let other = chervo_upnp::RouterId::from_setting("uuid:unit-other").unwrap();
+    let a = AllowedAddr::with_source(id.clone(), v4(10, 0, 0, 1), Some(v4(10, 0, 0, 7)));
+    assert!(a.same_network(Some(v4(10, 0, 0, 7))));
+    assert!(!a.same_network(Some(v4(192, 168, 1, 7))), "другая сеть");
+    assert!(!a.same_network(None), "маршрута к роутеру больше нет");
+    assert!(a.is_router(&id) && !a.is_router(&other));
+    // источник неизвестен уже при «Разрешить»: точным адрес не считается никогда
+    let b = AllowedAddr::with_source(id, v4(10, 0, 0, 1), None);
+    assert!(!b.same_network(None));
+}

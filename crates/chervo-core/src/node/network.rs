@@ -14,6 +14,7 @@ use chervo_upnp::{AllowedRouter, UpnpError, UpnpMapper, UpnpSettings};
 
 use super::Node;
 use super::core::{Eng, diagnosis_view, lock};
+use super::echo::AllowedAddr;
 use super::error::NodeError;
 use super::profile;
 use super::settings::{self, MAX_CLOCK_OFFSET_MS};
@@ -114,9 +115,22 @@ impl Node {
         let attached = lock(&self.core.mapper).clone();
         let mapper = attached.unwrap_or_else(|| Arc::new(UpnpMapper::new(UpnpSettings::default())));
         let found = mapper.identify(own).map_err(NodeError::Upnp)?;
-        // адрес роутера нужен помощнику «Разрешить входящие подключения» для шага 1 (этап 13д)
-        *lock(&self.core.last_identify) = Some(found.lan_ip);
+        // Адрес в помощник попадает только для роутера из списка разрешённых (после «Разрешить»
+        // в `upnp_allow` или найденного заново): до ответа человека это любое устройство,
+        // ответившее на SSDP.
+        self.note_identified(&found.id, found.lan_ip);
         Ok(RouterCandidate(found.id, found.lan_ip))
+    }
+
+    /// Запомнить адрес найденного роутера для помощника, только если он уже в списке разрешённых.
+    pub(crate) fn note_identified(&self, id: &chervo_upnp::RouterId, ip: Ipv4Addr) {
+        let allowed = lock(&self.core.settings)
+            .routers
+            .iter()
+            .any(|r| r.id == *id);
+        if allowed && !ip.is_unspecified() {
+            *lock(&self.core.allowed_router) = Some(AllowedAddr::new(id.clone(), ip));
+        }
     }
 
     /// Разрешить роутеру открывать порт. `permanent_ok`: согласие на бессрочную аренду (после
@@ -140,6 +154,11 @@ impl Node {
             }
             Ok(())
         })?;
+        // адрес для шага 1 помощника «Разрешить входящие подключения» (этап 13д); кандидат из
+        // списка разрешённых (адрес 0.0.0.0) старый адрес не затирает
+        if !router.1.is_unspecified() {
+            *lock(&self.core.allowed_router) = Some(AllowedAddr::new(router.0.clone(), router.1));
+        }
         self.sync_mapper()
     }
 
@@ -150,6 +169,12 @@ impl Node {
             s.routers.retain(|r| r.id != router.0);
             Ok(())
         })?;
+        {
+            let mut slot = lock(&self.core.allowed_router);
+            if slot.as_ref().is_some_and(|a| a.is_router(&router.0)) {
+                *slot = None;
+            }
+        }
         self.sync_mapper()
     }
 

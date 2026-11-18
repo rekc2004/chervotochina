@@ -316,6 +316,59 @@ fn keepalive_stops_on_sas_cancel_expiry() {
     drop(rig_a);
 }
 
+/// Ждущее приглашение с адресом от эхо, интервал поддержания 150 мс; сервер уже получает
+/// запросы поддержания.
+fn waiting_invite(node: &Node, server: &Server) {
+    node.set_echo_server(Some(&server.text())).unwrap();
+    node.set_keepalive_every_for_tests(Duration::from_millis(150));
+    let report = as_global(&node.echo_probe().unwrap());
+    let ExternalPlan::Add { addrs, .. } = plan_invite_external(&report, node.nat_view(), None)
+    else {
+        panic!("ожидалось вписать адрес");
+    };
+    node.create_invite_ext(false, &addrs).unwrap();
+    assert_eq!(node.keepalive_count_for_tests(), 1);
+    let before = server.requests();
+    std::thread::sleep(Duration::from_millis(700));
+    assert!(server.requests() > before, "поддержание не идёт");
+}
+
+/// Р9: убрали сервер из настроек: к нему не уходит ни одного пакета, поддержание снято.
+#[test]
+fn removing_server_stops_keepalive_packets() {
+    let server = Server::start(false);
+    let (_rig, node, _w) = start_node("echo-ka-revoke");
+    waiting_invite(&node, &server);
+    node.set_echo_server(None).unwrap();
+    assert_eq!(node.keepalive_count_for_tests(), 0);
+    std::thread::sleep(Duration::from_millis(150)); // запрос, уже ушедший в сеть
+    let after = server.requests();
+    std::thread::sleep(Duration::from_millis(900));
+    assert_eq!(server.requests(), after, "после отзыва пакеты идут");
+    node.shutdown(Duration::from_secs(5));
+}
+
+/// Смена сервера: старый больше не получает запросов поддержания; тот же текст ничего не снимает.
+#[test]
+fn changing_server_stops_keepalive_to_old_one() {
+    let old = Server::start(false);
+    let new = Server::start(false);
+    let (_rig, node, _w) = start_node("echo-ka-change");
+    waiting_invite(&node, &old);
+    // повторная запись того же сервера поддержание не трогает
+    node.set_echo_server(Some(&old.text())).unwrap();
+    assert_eq!(node.keepalive_count_for_tests(), 1);
+    node.set_echo_server(Some(&new.text())).unwrap();
+    assert_eq!(node.keepalive_count_for_tests(), 0);
+    std::thread::sleep(Duration::from_millis(150));
+    let after = old.requests();
+    let new_before = new.requests();
+    std::thread::sleep(Duration::from_millis(900));
+    assert_eq!(old.requests(), after, "старый сервер получает запросы");
+    assert_eq!(new.requests(), new_before, "новый сервер получает запросы");
+    node.shutdown(Duration::from_secs(5));
+}
+
 // ------------------------------------------------------------------------------ доступ
 
 #[test]
@@ -393,5 +446,46 @@ fn forward_help_uses_node_state() {
     assert_eq!(h.port, rig.port);
     assert!(!h.gw_exact, "роутер не искали");
     assert_eq!(format!("{h:?}"), "ForwardHelp(..)");
+    node.shutdown(Duration::from_secs(5));
+}
+
+/// Адрес роутера в помощнике только от «Разрешить», и только пока сеть та же.
+#[test]
+fn router_address_exact_only_for_allowed_in_same_network() {
+    let (_rig, node, _w) = start_node("echo-help-allowed");
+    let ip = std::net::Ipv4Addr::new(10, 20, 30, 254);
+    let mine = std::net::Ipv4Addr::new(10, 20, 30, 7);
+    // роутер найден, но не разрешён: узел ничего не запомнил
+    assert_eq!(node.allowed_router_for_tests(Some(mine)), (None, None));
+    assert!(!node.forward_help().gw_exact);
+    // найден заново, но в списке разрешённых его нет: адрес не запоминается
+    assert!(!node.note_identified_for_tests("uuid:stranger-1", ip, false));
+    assert_eq!(node.allowed_router_for_tests(Some(mine)), (None, None));
+    assert!(!node.forward_help().gw_exact);
+    // разрешён: адрес точный, пока источник маршрута к нему тот же
+    node.set_allowed_router_for_tests(ip, Some(mine));
+    assert_eq!(
+        node.allowed_router_for_tests(Some(mine)),
+        (Some(ip), Some(mine))
+    );
+    // сеть сменилась: адрес сброшен и обратно сам не возвращается
+    assert_eq!(
+        node.allowed_router_for_tests(Some(std::net::Ipv4Addr::new(192, 168, 5, 9))),
+        (None, None)
+    );
+    assert_eq!(node.allowed_router_for_tests(Some(mine)), (None, None));
+    // через настоящий `forward_help`: источник маршрута к чужому адресу не совпадёт с записью
+    node.set_allowed_router_for_tests(std::net::Ipv4Addr::LOCALHOST, Some(mine));
+    assert!(!node.forward_help().gw_exact, "запись другой сети");
+    assert_eq!(node.allowed_router_for_tests(Some(mine)), (None, None));
+    node.shutdown(Duration::from_secs(5));
+}
+
+/// Роутер, уже разрешённый раньше и найденный заново, запоминается (список разрешённых).
+#[test]
+fn router_found_again_is_remembered_only_if_in_list() {
+    let (_rig, node, _w) = start_node("echo-help-again");
+    let ip = std::net::Ipv4Addr::new(10, 20, 30, 254);
+    assert!(node.note_identified_for_tests("uuid:known-1", ip, true));
     node.shutdown(Duration::from_secs(5));
 }
