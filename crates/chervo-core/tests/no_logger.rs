@@ -316,6 +316,9 @@ fn no_logger_macros_in_product_src() {
     }
 }
 
+/// Единственный файл эхо-сервера (этап 13д), где разрешена печать в stderr.
+const RDV_MAIN: &str = "chervo-rendezvous-server/src/main.rs";
+
 #[test]
 fn no_print_in_product_src_except_cli_out() {
     // Этап 18в: охрана расширена с `chervo-cli/src/main.rs` на весь `chervo-cli/src/`. Печать
@@ -329,13 +332,23 @@ fn no_print_in_product_src_except_cli_out() {
     let mut sink_hits = 0;
     for (rel, code) in &srcs {
         for w in ["println!(", "eprintln!(", "print!(", "eprint!(", "dbg!("] {
+            // Этап 13д: эхо-сервер печатает в stderr строку старта и строки счётчиков (без адресов
+            // клиентов); это его интерфейс, как у CLI. Только `eprintln!(` и только в его `main.rs`
+            // (форму печати держит `chervo-rendezvous-server/tests/src_guard.rs`).
+            if rel == RDV_MAIN && w == "eprintln!(" {
+                continue;
+            }
             assert!(!has_word(code, w), "{rel}: `{w}` в продуктовом коде");
         }
         for w in ["stdout", "stderr"] {
             if has_word(code, w) {
                 // Этап 19: утилита сборки манифеста запускается только в CI (`assemble.sh`) и в
-                // релиз не входит; ошибки она пишет в stderr. Больше исключений нет.
+                // релиз не входит; ошибки она пишет в stderr. Ещё одно исключение: `RDV_MAIN`
+                // (этап 13д). Других нет.
                 if rel == "chervo-update/src/bin/chervo-make-manifest.rs" && w == "stderr" {
+                    continue;
+                }
+                if rel == RDV_MAIN && w == "stderr" {
                     continue;
                 }
                 assert_eq!(

@@ -1,0 +1,22 @@
+[package]
+name = "chervo-rendezvous-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Только наш протокол и классификация адресов; внешних пакетов и асинхронной среды нет (этап 13д, Р4).
+[dependencies]
+chervo-rendezvous-wire.workspace = true
+chervo-addr.workspace = true
+
+[lib]
+name = "chervo_rendezvous_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "chervo-rendezvous"
+path = "src/main.rs"
+
+[lints]
+workspace = true

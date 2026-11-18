@@ -2,15 +2,16 @@
 //! даже называть `quinn` или `tokio`. Теперь ядру разрешены наш транспорт `chervo-transport-quinn`
 //! и `tokio` (рабочие возможности без `rt-multi-thread`), поэтому проверка точная, по ИМЕНАМ
 //! прямых зависимостей: запрещены сами крейты `quinn`, `rustls`, `snow`, `ring`, `iroh`, оболочки
-//! (`chervo-cli`, `chervo-gui`) и любые крейты GUI.
+//! (`chervo-cli`, `chervo-gui`), эхо-сервер `chervo-rendezvous-server` (этап 13д) и любые крейты GUI.
 
 use std::fs;
 use std::path::Path;
 
 /// Запрещённые прямые зависимости ядра (точные имена).
-const FORBIDDEN: [&str; 14] = [
+const FORBIDDEN: [&str; 15] = [
     "chervo-cli",
     "chervo-gui",
+    "chervo-rendezvous-server",
     "iroh",
     "quinn",
     "rustls",
@@ -100,6 +101,8 @@ fn workspace_layout() {
         "chervo-connect",
         "chervo-upnp",
         "chervo-lan",
+        "chervo-rendezvous-wire",
+        "chervo-rendezvous-server",
         "chervo-transfer",
         "chervo-receive",
         "chervo-core",

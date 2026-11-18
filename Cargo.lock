@@ -798,6 +798,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "chervo-rendezvous-server"
+version = "0.0.0"
+dependencies = [
+ "chervo-addr",
+ "chervo-rendezvous-wire",
+]
+
+[[package]]
+name = "chervo-rendezvous-wire"
+version = "0.0.0"
+
+[[package]]
 name = "chervo-timesync"
 version = "0.0.0"
 dependencies = [

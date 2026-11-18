@@ -29,6 +29,8 @@ chervo-update-check = { path = "../crates/chervo-update-check", features = ["fuz
 chervo-lan = { path = "../crates/chervo-lan", features = ["fuzzing"] }
 # Stage 18a: the node settings parser (`chervo_core::fuzz_settings`, target `settings`).
 chervo-core = { path = "../crates/chervo-core", features = ["fuzzing"] }
+# Stage 13d: echo server wire parsers (targets `rdv_request`, `rdv_response`); public API only, no features.
+chervo-rendezvous-wire = { path = "../crates/chervo-rendezvous-wire" }
 
 [workspace]
 members = ["."]
@@ -211,6 +213,21 @@ bench = false
 [[bin]]
 name = "lan_beacon"
 path = "fuzz_targets/lan_beacon.rs"
+test = false
+doc = false
+bench = false
+
+# Stage 13d: echo server datagram parsers (chervo-rendezvous-wire, public API only).
+[[bin]]
+name = "rdv_request"
+path = "fuzz_targets/rdv_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rdv_response"
+path = "fuzz_targets/rdv_response.rs"
 test = false
 doc = false
 bench = false

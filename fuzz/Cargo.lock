@@ -218,6 +218,7 @@ dependencies = [
  "chervo-identity",
  "chervo-lan",
  "chervo-receive",
+ "chervo-rendezvous-wire",
  "chervo-timesync",
  "chervo-token",
  "chervo-transfer",
@@ -273,6 +274,10 @@ dependencies = [
  "rustix",
  "unicode-normalization",
 ]
+
+[[package]]
+name = "chervo-rendezvous-wire"
+version = "0.0.0"
 
 [[package]]
 name = "chervo-timesync"
