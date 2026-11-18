@@ -7,7 +7,7 @@ use crate::model::{Intent, Model, Page};
 use crate::screens::{add_friend, diagnosis, friends, offers, send, settings, transfers, update};
 use crate::texts;
 
-const PAGES: [(Page, &str); 8] = [
+const PAGES: [(Page, &str); 7] = [
     (Page::Friends, texts::NAV_FRIENDS),
     (Page::AddFriend, texts::NAV_ADD_FRIEND),
     (Page::Send, texts::NAV_SEND),
@@ -15,7 +15,6 @@ const PAGES: [(Page, &str); 8] = [
     (Page::Transfers, texts::NAV_TRANSFERS),
     (Page::Diagnosis, texts::NAV_DIAGNOSIS),
     (Page::Settings, texts::NAV_SETTINGS),
-    (Page::Updates, texts::NAV_UPDATES),
 ];
 
 pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
@@ -61,7 +60,17 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
         Page::Transfers => out.extend(transfers::show(ui, model)),
         Page::Diagnosis => out.extend(diagnosis::show(ui, model)),
         Page::Settings => out.extend(settings::show(ui, model)),
-        Page::Updates => out.extend(update::show(ui, model)),
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_updates_tab() {
+        assert_eq!(PAGES.len(), 7);
+        assert!(PAGES.iter().all(|(_, label)| *label != texts::NAV_UPDATES));
+    }
 }

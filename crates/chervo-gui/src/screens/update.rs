@@ -1,4 +1,4 @@
-//! Страница «Обновления» и карточки (этап 19г-2): согласие на проверку новых версий, найденная
+//! Раздел «Обновления» (в «Настройках») и карточки (этап 19г-2): согласие на проверку новых версий, найденная
 //! версия со ссылкой на страницу выпусков (текст и «Копировать», браузер не запускается),
 //! офлайн-сверка скачанных файлов, вшитые ключи. Экран только рисует готовые строки модели и
 //! возвращает намерения: ни файлов, ни сети, ни потоков здесь нет.
@@ -58,16 +58,17 @@ pub fn newer_card(ui: &mut egui::Ui, model: &Model, out: &mut Vec<Intent>) {
     });
 }
 
-pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
-    let mut out = Vec::new();
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        check_section(ui, model, &mut out);
-        ui.separator();
-        verify_section(ui, model, &mut out);
-        ui.separator();
-        keys_section(ui, model);
-    });
-    out
+/// Раздел «Обновления» в конце «Настроек»: согласие и проверка новых версий; сверка скачанных
+/// файлов и вшитые ключи свёрнуты под «Для опытных».
+pub fn section(ui: &mut egui::Ui, model: &Model, out: &mut Vec<Intent>) {
+    check_section(ui, model, out);
+    egui::CollapsingHeader::new(texts::UPD_EXPERT)
+        .default_open(false)
+        .show(ui, |ui| {
+            verify_section(ui, model, out);
+            ui.separator();
+            keys_section(ui, model);
+        });
 }
 
 fn check_section(ui: &mut egui::Ui, model: &Model, out: &mut Vec<Intent>) {

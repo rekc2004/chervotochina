@@ -219,7 +219,7 @@ fn upd(m: &mut Model, i: UpdateIntent) {
 }
 
 fn updates_page(consent: UpdateConsent) -> Model {
-    let mut m = open_model(Page::Updates);
+    let mut m = open_model(Page::Settings);
     if let Some(s) = m.snapshot.settings.as_mut() {
         s.update_consent = consent;
     }
@@ -319,7 +319,7 @@ fn update_states(v: &mut Vec<Model>) {
         result: Ok(UpdateStatus::Newer(newer)),
     });
     v.push(m);
-    let mut m = open_model(Page::Updates);
+    let mut m = open_model(Page::Settings);
     m.on_outcome(Outcome::UpdateChecked {
         manual: true,
         result: Ok(UpdateStatus::Newer(newer)),

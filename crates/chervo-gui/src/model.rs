@@ -260,7 +260,6 @@ pub enum Page {
     Transfers,
     Diagnosis,
     Settings,
-    Updates,
 }
 
 /// Что сделал пользователь (кнопки и поля).
@@ -730,7 +729,12 @@ impl Model {
                 match ev {
                     NodeEvent::Warning(w) => self.push_notice(w.user_text()),
                     NodeEvent::Internal => self.push_notice(texts::INTERNAL_NOTICE),
-                    NodeEvent::OwnAddressChanged => self.push_notice(texts::OWN_ADDR_CHANGED),
+                    NodeEvent::OwnAddressChanged => {
+                        // без друзей совет «отправьте другу» невыполним (Ж2)
+                        if !self.snapshot.friends.is_empty() {
+                            self.push_notice(texts::OWN_ADDR_CHANGED);
+                        }
+                    }
                     NodeEvent::MappingChanged { status } => {
                         self.push_notice(chervo_core::texts::mapping_text(status));
                     }
@@ -951,5 +955,23 @@ mod tests {
         m.on_outcome(Outcome::OpenFailed(NodeError::FirstRun));
         assert!(m.update(Intent::SubmitFirstRun).is_empty());
         assert!(matches!(&m.start, Start::FirstRun(f) if f.error == Some(texts::FOLDER_EMPTY)));
+    }
+
+    #[test]
+    fn own_address_notice_needs_friends() {
+        let mut m = failed(NodeError::FirstRun);
+        m.on_outcome(Outcome::Event(NodeEvent::OwnAddressChanged));
+        assert!(m.notices.is_empty(), "без друзей уведомления нет");
+        m.snapshot.friends.push(crate::rows::FriendRow {
+            id: crate::rows::Id(1),
+            name: "Маша".to_owned(),
+            status: chervo_core::FriendStatus::Active,
+            online: false,
+            auto_accept: false,
+            key_problem: false,
+            path: None,
+        });
+        m.on_outcome(Outcome::Event(NodeEvent::OwnAddressChanged));
+        assert_eq!(m.notices, vec![texts::OWN_ADDR_CHANGED.to_owned()]);
     }
 }

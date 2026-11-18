@@ -1,6 +1,6 @@
 //! «Стук»: 48 байт, которые звонящий шлёт до QUIC; вызываемый до верного стука молчит.
 //!
-//! Ключ направления `K(S→R) = BLAKE2s-MAC-256(key = ss, KNOCK_KDF_LABEL || pub_S || pub_R)`,
+//! Ключ направления `K(S->R) = BLAKE2s-MAC-256(key = ss, KNOCK_KDF_LABEL || pub_S || pub_R)`,
 //! где `ss` — секрет пары X25519 (наружу не отдаётся). Формат `id(16) || nonce(16) || tag(16)`,
 //! `id = first16(MAC(K, ID_LABEL || w))`, `tag = first16(MAC(K, TAG_LABEL || w || id || nonce))`,
 //! `w` — номер окна времени (u64, big-endian). Только вызовы blake2 (`Mac`).

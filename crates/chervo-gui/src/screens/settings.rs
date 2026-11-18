@@ -40,6 +40,8 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
             ui.separator();
         }
         about(ui);
+        ui.separator();
+        crate::screens::update::section(ui, model, &mut out);
     });
     out
 }
@@ -55,22 +57,30 @@ fn folders(ui: &mut egui::Ui, set: &SettingsRow, st: &SettingsUi, out: &mut Vec<
         }
     }
     ui.horizontal(|ui| {
-        let mut text = r.text.clone().unwrap_or_default();
-        if ui
-            .add_enabled(
-                !r.busy,
-                egui::TextEdit::singleline(&mut text).desired_width(360.0),
-            )
-            .changed()
+        // поле показывает текущую папку; правка применяется по Enter
+        let mut text = r.text.clone().unwrap_or_else(|| set.receive_root.clone());
+        let resp = ui.add_enabled(
+            !r.busy,
+            egui::TextEdit::singleline(&mut text).desired_width(360.0),
+        );
+        if resp.changed() {
+            out.push(s(S::RootEdited(text.clone())));
+        }
+        if resp.lost_focus()
+            && ui.input(|i| i.key_pressed(egui::Key::Enter))
+            && text.trim() != set.receive_root
         {
             out.push(s(S::RootEdited(text)));
+            out.push(s(S::RootSubmit));
         }
+        // выбор в окне сразу меняет папку, с теми же проверками, что и ввод пути
         if ui
             .add_enabled(!r.busy, egui::Button::new(texts::BTN_PICK_FOLDER))
             .clicked()
             && let Some(p) = picker::pick_folder()
         {
             out.push(s(S::RootEdited(p.to_string_lossy().into_owned())));
+            out.push(s(S::RootSubmit));
         }
     });
     if let Some(e) = r.error {
@@ -86,14 +96,11 @@ fn folders(ui: &mut egui::Ui, set: &SettingsRow, st: &SettingsUi, out: &mut Vec<
             .changed()
         {
             out.push(s(S::RootOutsideChecked(checked)));
+            if checked {
+                // отметка ставится после отказа узла: сразу повторяем смену папки
+                out.push(s(S::RootSubmit));
+            }
         }
-    }
-    let can = !r.busy && (!r.outside_warning || r.outside_confirmed);
-    if ui
-        .add_enabled(can, egui::Button::new(texts::BTN_CHANGE_FOLDER))
-        .clicked()
-    {
-        out.push(s(S::RootSubmit));
     }
 }
 
@@ -103,27 +110,23 @@ fn num_row(
     edit: &NumEdit,
     current: String,
     on_edit: fn(String) -> S,
-    submit: S,
     out: &mut Vec<Intent>,
 ) {
     ui.label(label);
-    ui.horizontal(|ui| {
-        let mut text = edit.text.clone().unwrap_or(current);
-        if ui
-            .add(egui::TextEdit::singleline(&mut text).desired_width(100.0))
-            .changed()
-        {
-            out.push(s(on_edit(text)));
-        }
-        if ui.button(texts::BTN_SAVE).clicked() {
-            out.push(s(submit));
-        }
-    });
+    let mut text = edit.text.clone().unwrap_or(current);
+    if ui
+        .add(egui::TextEdit::singleline(&mut text).desired_width(100.0))
+        .changed()
+    {
+        out.push(s(on_edit(text)));
+    }
     if let Some(e) = edit.error {
         warn(ui, e);
     }
 }
 
+/// Запас места, порт и внешний порт: одна кнопка «Сохранить» на раздел. Сохраняются только
+/// поля, которые правили.
 fn numbers(ui: &mut egui::Ui, set: &SettingsRow, st: &SettingsUi, out: &mut Vec<Intent>) {
     num_row(
         ui,
@@ -131,7 +134,6 @@ fn numbers(ui: &mut egui::Ui, set: &SettingsRow, st: &SettingsUi, out: &mut Vec<
         &st.min_free,
         set.min_free_percent.to_string(),
         S::MinFreeEdited,
-        S::MinFreeSubmit,
         out,
     );
     num_row(
@@ -140,7 +142,6 @@ fn numbers(ui: &mut egui::Ui, set: &SettingsRow, st: &SettingsUi, out: &mut Vec<
         &st.port,
         set.port.to_string(),
         S::PortEdited,
-        S::PortSubmit,
         out,
     );
     num_row(
@@ -151,9 +152,23 @@ fn numbers(ui: &mut egui::Ui, set: &SettingsRow, st: &SettingsUi, out: &mut Vec<
             .map(|p| p.to_string())
             .unwrap_or_default(),
         S::ForwardEdited,
-        S::ForwardSubmit,
         out,
     );
+    let edited = st.min_free.text.is_some() || st.port.text.is_some() || st.forward.text.is_some();
+    if ui
+        .add_enabled(edited, egui::Button::new(texts::BTN_SAVE))
+        .clicked()
+    {
+        if st.min_free.text.is_some() {
+            out.push(s(S::MinFreeSubmit));
+        }
+        if st.port.text.is_some() {
+            out.push(s(S::PortSubmit));
+        }
+        if st.forward.text.is_some() {
+            out.push(s(S::ForwardSubmit));
+        }
+    }
 }
 
 /// Поиск друзей в локальной сети: три выбора, состояние, адреса поиска и подсказка про VPN.
@@ -161,25 +176,35 @@ fn numbers(ui: &mut egui::Ui, set: &SettingsRow, st: &SettingsUi, out: &mut Vec<
 fn lan(ui: &mut egui::Ui, set: &SettingsRow, out: &mut Vec<Intent>) {
     ui.heading(texts::SET_TITLE_LAN);
     for mode in [LanMode::Off, LanMode::Listen, LanMode::Announce] {
-        if ui
-            .radio(set.lan.mode == mode, core_texts::lan_mode_text(mode))
-            .clicked()
-        {
+        let short = match mode {
+            LanMode::Off => texts::LAN_SHORT_OFF,
+            LanMode::Listen => texts::LAN_SHORT_LISTEN,
+            _ => texts::LAN_SHORT_ANNOUNCE,
+        };
+        if ui.radio(set.lan.mode == mode, short).clicked() {
             out.push(s(S::LanChoose(mode)));
         }
     }
     ui.label(core_texts::lan_status_text(
         set.lan.status.unwrap_or(LanStatus::Off),
     ));
-    if !set.lan.addrs.is_empty() {
-        let list: Vec<String> = set.lan.addrs.iter().map(ToString::to_string).collect();
-        ui.label(format!(
-            "{}{}",
-            core_texts::ADDRS_PREFIX_TEXT,
-            list.join(", ")
-        ));
-    }
     ui.label(core_texts::VPN_HINT_TEXT);
+    egui::CollapsingHeader::new(texts::DETAILS)
+        .id_salt("lan-details")
+        .default_open(false)
+        .show(ui, |ui| {
+            for mode in [LanMode::Off, LanMode::Listen, LanMode::Announce] {
+                ui.label(core_texts::lan_mode_text(mode));
+            }
+            if !set.lan.addrs.is_empty() {
+                let list: Vec<String> = set.lan.addrs.iter().map(ToString::to_string).collect();
+                ui.label(format!(
+                    "{}{}",
+                    core_texts::ADDRS_PREFIX_TEXT,
+                    list.join(", ")
+                ));
+            }
+        });
 }
 
 fn upnp(ui: &mut egui::Ui, model: &Model, set: &SettingsRow, out: &mut Vec<Intent>) {
@@ -252,12 +277,17 @@ fn upnp(ui: &mut egui::Ui, model: &Model, set: &SettingsRow, out: &mut Vec<Inten
 fn clock(ui: &mut egui::Ui, set: &SettingsRow, st: &SettingsUi, out: &mut Vec<Intent>) {
     ui.heading(texts::SET_TITLE_CLOCK);
     ui.label(texts::SET_CLOCK_NOTE);
-    ui.label(texts::clock_offset_text(set.clock_offset_ms));
-    ui.label(format!(
-        "{}: {}",
-        texts::SET_NTP,
-        set.ntp_servers.join(", ")
-    ));
+    egui::CollapsingHeader::new(texts::DETAILS)
+        .id_salt("clock-details")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.label(texts::clock_offset_text(set.clock_offset_ms));
+            ui.label(format!(
+                "{}: {}",
+                texts::SET_NTP,
+                set.ntp_servers.join(", ")
+            ));
+        });
     ui.horizontal(|ui| {
         let busy = matches!(st.clock, ClockUi::Syncing | ClockUi::Proposal(_));
         if ui
@@ -309,13 +339,17 @@ fn store_name(k: KeyStoreKind) -> &'static str {
 
 fn keys(ui: &mut egui::Ui, model: &Model, set: &SettingsRow, out: &mut Vec<Intent>) {
     ui.heading(texts::SET_TITLE_KEYS);
-    ui.label(format!(
-        "{}: {}",
-        texts::SET_KEY_STORE,
-        store_name(set.key_store)
-    ));
+    egui::CollapsingHeader::new(texts::DETAILS)
+        .id_salt("keys-details")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.label(format!(
+                "{}: {}",
+                texts::SET_KEY_STORE,
+                store_name(set.key_store)
+            ));
+        });
     // режима «локальные ключи» нет: ни переключателя, ни кнопки
-    ui.label(texts::KEYS_LOCAL_UNAVAILABLE);
     if ui.button(texts::BTN_REKEY_ALL).clicked() {
         // диалог подтверждения живёт на экране «Друзья»
         out.push(Intent::Main(MainIntent::RekeyAllAsk));

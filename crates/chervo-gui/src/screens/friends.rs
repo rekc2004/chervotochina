@@ -45,19 +45,22 @@ fn status_label(s: FriendStatus) -> &'static str {
 }
 
 fn list(ui: &mut egui::Ui, model: &Model, out: &mut Vec<Intent>) {
-    ui.horizontal(|ui| {
-        if ui.button(texts::BTN_FRIEND_TEXT).clicked() {
-            out.push(main(MainIntent::FriendTextOpen));
-        }
-        if ui.button(texts::BTN_REKEY_ALL).clicked() {
-            out.push(main(MainIntent::RekeyAllAsk));
-        }
-    });
-    ui.separator();
     if model.snapshot.friends.is_empty() {
         ui.label(texts::FRIENDS_EMPTY);
+        ui.horizontal(|ui| {
+            if ui.button(texts::BTN_INVITE_FRIEND).clicked() {
+                out.push(Intent::Go(Page::AddFriend));
+            }
+            if ui.button(texts::BTN_FRIEND_TEXT).clicked() {
+                out.push(main(MainIntent::FriendTextOpen));
+            }
+        });
         return;
     }
+    if ui.button(texts::BTN_FRIEND_TEXT).clicked() {
+        out.push(main(MainIntent::FriendTextOpen));
+    }
+    ui.separator();
     egui::ScrollArea::vertical().show(ui, |ui| {
         for f in &model.snapshot.friends {
             friend_row(ui, f, model.connecting.contains(&f.id), out);
@@ -259,16 +262,12 @@ pub fn friend_text_dialog(ui: &mut egui::Ui, p: &PasteDialog, out: &mut Vec<Inte
     // больше 4096, чтобы слишком длинный текст был виден как «слишком длинный».
     let edit = egui::TextEdit::singleline(&mut t)
         .desired_width(f32::INFINITY)
+        .hint_text(texts::PASTE_HINT)
         .char_limit(MAX_PASTE + 1);
     if ui.add_enabled(!p.busy, edit).changed() {
         out.push(main(MainIntent::FriendTextEdited(t)));
     }
-    if p.too_long {
-        warn(ui, core_texts::INPUT_TOO_LONG_TEXT);
-    }
-    if let Some(e) = p.error {
-        warn(ui, e);
-    }
+    // кнопки сразу под полем: при узком окне они не уходят за край (Ж5)
     ui.horizontal(|ui| {
         if ui
             .add_enabled(!p.busy, egui::Button::new(texts::BTN_APPLY))
@@ -280,6 +279,12 @@ pub fn friend_text_dialog(ui: &mut egui::Ui, p: &PasteDialog, out: &mut Vec<Inte
             out.push(main(MainIntent::DialogClose));
         }
     });
+    if p.too_long {
+        warn(ui, core_texts::INPUT_TOO_LONG_TEXT);
+    }
+    if let Some(e) = p.error {
+        warn(ui, e);
+    }
 }
 
 fn confirm_buttons(ui: &mut egui::Ui, yes: &str, intent: MainIntent, out: &mut Vec<Intent>) {

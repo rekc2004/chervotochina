@@ -5,7 +5,7 @@ use chervo_core::FriendStatus;
 use eframe::egui;
 
 use crate::main_model::MainIntent;
-use crate::model::{Intent, Model};
+use crate::model::{Intent, Model, Page};
 use crate::screens::common::warn;
 use crate::{picker, texts};
 
@@ -74,6 +74,9 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
         .collect();
     if usable.is_empty() {
         ui.label(texts::SEND_NO_ACTIVE_FRIENDS);
+        if ui.button(texts::BTN_GO_ADD_FRIEND).clicked() {
+            out.push(Intent::Go(Page::AddFriend));
+        }
     }
     ui.horizontal_wrapped(|ui| {
         for f in usable {
@@ -92,10 +95,81 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
     }
     ui.add_space(8.0);
     if ui
-        .add_enabled(!s.busy, egui::Button::new(texts::BTN_SEND))
+        .add_enabled(send_ready(model), egui::Button::new(texts::BTN_SEND))
         .clicked()
     {
         out.push(main(MainIntent::SendSubmit));
     }
+    if let Some(why) = send_missing(model) {
+        ui.label(why);
+    }
     out
+}
+
+fn friend_chosen(model: &Model) -> bool {
+    model.send.friend.is_some_and(|id| {
+        model
+            .snapshot
+            .friends
+            .iter()
+            .any(|f| f.id == id && f.status == FriendStatus::Active && !f.key_problem)
+    })
+}
+
+/// «Отправить» доступна, только когда выбраны файлы и друг (Ж6).
+pub fn send_ready(model: &Model) -> bool {
+    !model.send.busy && !model.send.paths.is_empty() && friend_chosen(model)
+}
+
+/// Чего не хватает для отправки; `None`, если всё выбрано.
+pub fn send_missing(model: &Model) -> Option<&'static str> {
+    match (model.send.paths.is_empty(), friend_chosen(model)) {
+        (true, false) => Some(texts::SEND_MISSING_BOTH),
+        (true, true) => Some(texts::SEND_NO_FILES),
+        (false, false) => Some(texts::SEND_NO_FRIEND),
+        (false, true) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rows::{FriendRow, Id, PickedPath};
+
+    fn model_with_friend() -> Model {
+        let mut m = Model::preview();
+        m.snapshot.friends.push(FriendRow {
+            id: Id(1),
+            name: "Маша".to_owned(),
+            status: FriendStatus::Active,
+            online: true,
+            auto_accept: false,
+            key_problem: false,
+            path: None,
+        });
+        m
+    }
+
+    #[test]
+    fn send_is_disabled_until_files_and_friend_chosen() {
+        let mut m = model_with_friend();
+        assert!(!send_ready(&m));
+        assert_eq!(send_missing(&m), Some(texts::SEND_MISSING_BOTH));
+        m.send.friend = Some(Id(1));
+        assert!(!send_ready(&m));
+        assert_eq!(send_missing(&m), Some(texts::SEND_NO_FILES));
+        m.send.friend = None;
+        m.send.paths.push(PickedPath {
+            path: "a.txt".into(),
+            is_dir: false,
+            size: 1,
+        });
+        assert!(!send_ready(&m));
+        assert_eq!(send_missing(&m), Some(texts::SEND_NO_FRIEND));
+        m.send.friend = Some(Id(1));
+        assert!(send_ready(&m));
+        assert_eq!(send_missing(&m), None);
+        m.send.busy = true;
+        assert!(!send_ready(&m));
+    }
 }

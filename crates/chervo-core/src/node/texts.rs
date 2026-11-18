@@ -60,7 +60,7 @@ pub const BAD_TOKEN_TEXT: &str = "Этот текст повреждён или 
 /// Текст, у которого нет вида приглашения, нового адреса или уведомления об удалении.
 pub const NOT_FROM_US_TEXT: &str = "Это не похоже на текст из Червоточины. Попросите друга скопировать его целиком кнопкой «Копировать».";
 /// Приглашение друга уже недействительно (срок вышел).
-pub const INVITE_EXPIRED_TEXT: &str = "Срок этого приглашения истёк. Попросите друга создать новое: «Добавить друга» → «Создать приглашение».";
+pub const INVITE_EXPIRED_TEXT: &str = "Срок этого приглашения истёк. Попросите друга создать новое: «Добавить друга», затем «Создать приглашение».";
 pub const NO_ADDRESS_TEXT: &str =
     "Нет адреса, который можно сообщить другу. Проверьте сеть или укажите адрес с пробросом порта.";
 pub const UNKNOWN_ITEM_TEXT: &str = "Такого друга, приглашения или передачи нет.";
@@ -73,8 +73,7 @@ pub const TRANSFER_TOO_MANY_TEXT: &str = "Слишком много файлов
 pub const TRANSFER_NO_CONNECTION_TEXT: &str = "Нет живого соединения с другом или файл недоступен.";
 pub const TRANSFER_WRONG_STATE_TEXT: &str = "Сейчас это действие недоступно для этой передачи.";
 pub const TRANSFER_TEXT: &str = "Не удалось выполнить действие с передачей.";
-pub const UPNP_NO_GATEWAY_TEXT: &str =
-    "Роутер не отвечает на просьбу открыть порт. Возможно, в его настройках выключен UPnP.";
+pub const UPNP_NO_GATEWAY_TEXT: &str = "Роутер не отвечает на просьбу открыть порт. Возможно, в его настройках выключено автоматическое открытие портов.";
 pub const UPNP_AMBIGUOUS_TEXT: &str = chervo_upnp::AMBIGUOUS_TEXT;
 pub const UPNP_TEXT: &str = "Не удалось поговорить с роутером.";
 pub const CLOCK_TEXT: &str =
@@ -97,7 +96,7 @@ pub const RESULT_PROTOCOL_TEXT: &str = "Передача прервана из-�
 pub const RESULT_BUSY_TEXT: &str = "Друг сейчас занят другой передачей. Попробуйте позже.";
 pub const RESULT_LIMITS_TEXT: &str =
     "Предложение не подошло под ограничения приёма (число файлов, размер или имена).";
-pub const RESULT_NOT_FRIEND_TEXT: &str = "Друг не признал это соединение. Добавьте друга заново: вкладка «Добавить друга» → «Создать приглашение».";
+pub const RESULT_NOT_FRIEND_TEXT: &str = "Друг не признал это соединение. Добавьте друга заново: вкладка «Добавить друга», затем «Создать приглашение».";
 pub const RESULT_CANCELLED_BY_US_TEXT: &str = "Вы отменили передачу.";
 
 fn root_text(e: RootError) -> &'static str {
