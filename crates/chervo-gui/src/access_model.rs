@@ -148,6 +148,20 @@ pub struct AccessUi {
     /// «Правило создано» принято узлом.
     pub done: bool,
     pub error: Option<&'static str>,
+    /// Итог проброса на момент «Разрешить»: старый итог не считается ответом на разрешение.
+    pub map_base: Option<MapStatus>,
+    /// Итог проброса, появившийся после «Разрешить» (по новому снимку или событию): «Готово»
+    /// только по нему.
+    pub map_fresh: Option<MapStatus>,
+}
+
+/// Откуда начат поиск роутера: ответ на него относится к этому месту.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpnpOrigin {
+    /// «Попробовать автоматически» в помощнике.
+    Helper,
+    /// «Найти роутер» в настройках.
+    Settings,
 }
 
 /// Намерения помощника. Имена `Access*` записаны в охране `gated_node_actions`.
@@ -234,12 +248,20 @@ impl Model {
                     return Vec::new();
                 }
                 self.access.stage = AccessStage::Searching;
+                if self.upnp_asked.contains(&UpnpOrigin::Helper) {
+                    // прежний поиск из помощника ещё идёт: его ответ относится к этому нажатию
+                    return Vec::new();
+                }
+                self.upnp_asked.push(UpnpOrigin::Helper);
                 vec![Command::UpnpIdentify]
             }
             A::AccessAllow => {
                 if self.access.stage != AccessStage::Asking {
                     return Vec::new();
                 }
+                // «Готово» только по итогу, который появится после этого нажатия
+                self.access.map_base = self.snapshot.mapping;
+                self.access.map_fresh = None;
                 self.access.stage = AccessStage::Waiting {
                     deadline: Instant::now() + AUTO_WAIT,
                 };
@@ -286,7 +308,13 @@ impl Model {
         let AccessStage::Waiting { deadline } = self.access.stage else {
             return Vec::new();
         };
-        match self.snapshot.mapping {
+        // итог, отличный от бывшего при «Разрешить», новый; прежний итог «Готово» не даёт
+        if let Some(now) = self.snapshot.mapping
+            && Some(now) != self.access.map_base
+        {
+            self.access.map_fresh = Some(now);
+        }
+        match self.access.map_fresh {
             Some(MapStatus::Mapped | MapStatus::MappedPermanent) => {
                 self.access.stage = AccessStage::Ok;
                 let mut cmds = vec![Command::ForwardHelp];
@@ -301,31 +329,65 @@ impl Model {
         }
     }
 
+    /// Ядро прислало итог проброса (событие): после «Разрешить» это и есть новый итог.
+    pub fn access_mapping_reported(&mut self, status: MapStatus) -> Vec<Command> {
+        if matches!(self.access.stage, AccessStage::Waiting { .. }) {
+            self.access.map_fresh = Some(status);
+        }
+        self.access_progress()
+    }
+
+    /// Чей это ответ на поиск роутера: берётся самый старый неотвеченный поиск (узел отвечает по
+    /// порядку команд). Без записи (ответ без команды из модели) решает состояние экранов.
+    fn take_upnp_origin(&mut self) -> UpnpOrigin {
+        if self.upnp_asked.is_empty() {
+            return if self.access.stage == AccessStage::Searching {
+                UpnpOrigin::Helper
+            } else {
+                UpnpOrigin::Settings
+            };
+        }
+        self.upnp_asked.remove(0)
+    }
+
+    /// Ответ на поиск, начатый в помощнике. Если помощник за это время открыт заново (поиск
+    /// больше не ждётся), ответ отбрасывается.
+    fn helper_found(&mut self, r: Result<bool, chervo_core::NodeError>) -> Vec<Command> {
+        if self.access.stage != AccessStage::Searching {
+            return Vec::new();
+        }
+        match r {
+            Ok(true) => {
+                // роутер уже разрешён: вопрос не задаётся, «Разрешить» не нажималось, поэтому
+                // текущий итог проброса годится
+                self.access.map_base = self.snapshot.mapping;
+                self.access.map_fresh = self.snapshot.mapping;
+                self.access.stage = AccessStage::Waiting {
+                    deadline: Instant::now() + AUTO_WAIT,
+                };
+                vec![Command::ForwardHelp, Command::RefreshMapping]
+            }
+            Ok(false) => {
+                self.access.stage = AccessStage::Asking;
+                vec![Command::ForwardHelp]
+            }
+            Err(e) => {
+                self.access.stage = AccessStage::Failed(Some(e.user_text()));
+                vec![Command::ForwardHelp]
+            }
+        }
+    }
+
     /// Ответы на команды помощника и поиск роутера.
     pub fn outcome_access(&mut self, outcome: Outcome) -> Vec<Command> {
         match outcome {
-            Outcome::UpnpFound(r) if self.access.stage == AccessStage::Searching => match r {
-                Ok(already) => {
-                    if already {
-                        // роутер уже разрешён: вопрос не задаётся
-                        self.access.stage = AccessStage::Waiting {
-                            deadline: Instant::now() + AUTO_WAIT,
-                        };
-                        vec![Command::ForwardHelp, Command::RefreshMapping]
-                    } else {
-                        self.access.stage = AccessStage::Asking;
-                        vec![Command::ForwardHelp]
-                    }
-                }
-                Err(e) => {
-                    self.access.stage = AccessStage::Failed(Some(e.user_text()));
-                    vec![Command::ForwardHelp]
+            Outcome::UpnpFound(r) => match self.take_upnp_origin() {
+                UpnpOrigin::Helper => self.helper_found(r),
+                UpnpOrigin::Settings => {
+                    self.outcome_settings(Outcome::UpnpFound(r));
+                    Vec::new()
                 }
             },
-            o @ Outcome::UpnpFound(_) => {
-                self.outcome_settings(o);
-                Vec::new()
-            }
             Outcome::ForwardHelp(h) => {
                 self.access.help = Some(*h);
                 Vec::new()
@@ -804,6 +866,119 @@ mod tests {
         };
         acc(&mut m, AccessIntent::AutoTimeout);
         assert_eq!(m.access.stage, AccessStage::Failed(None));
+    }
+
+    /// Готовый помощник на вопросе «Разрешить» при старом итоге `Mapped`.
+    fn asking_with_old_mapped() -> Model {
+        let mut m = model();
+        with_server(&mut m, None, Some(MapStatus::Mapped));
+        acc(&mut m, AccessIntent::Open);
+        acc(&mut m, AccessIntent::AccessAuto);
+        m.on_outcome(Outcome::UpnpFound(Ok(false)));
+        assert_eq!(m.access.stage, AccessStage::Asking);
+        m
+    }
+
+    #[test]
+    fn old_mapped_status_does_not_finish_after_allow() {
+        let mut m = asking_with_old_mapped();
+        acc(&mut m, AccessIntent::AccessAllow);
+        // тот же старый итог в новом снимке: не «Готово»
+        with_server(&mut m, None, Some(MapStatus::Mapped));
+        assert!(matches!(m.access.stage, AccessStage::Waiting { .. }));
+        assert_eq!(m.access.check, CheckUi::Idle);
+        // срок вышел, нового итога нет: ручные шаги, а не «Готово»
+        m.access.stage = AccessStage::Waiting {
+            deadline: Instant::now() - Duration::from_secs(1),
+        };
+        acc(&mut m, AccessIntent::AutoTimeout);
+        assert_eq!(m.access.stage, AccessStage::Failed(None));
+        // новый итог в снимке закрывает ожидание
+        let mut m = asking_with_old_mapped();
+        acc(&mut m, AccessIntent::AccessAllow);
+        with_server(&mut m, None, Some(MapStatus::MappedPermanent));
+        assert_eq!(m.access.stage, AccessStage::Ok);
+    }
+
+    #[test]
+    fn mapping_event_after_allow_is_the_new_status() {
+        let mut m = asking_with_old_mapped();
+        acc(&mut m, AccessIntent::AccessAllow);
+        // событие о том же итоге после «Разрешить» (снимок ещё старый) тоже новое
+        m.on_outcome(Outcome::Event(chervo_core::NodeEvent::MappingChanged {
+            status: MapStatus::Mapped,
+        }));
+        assert_eq!(m.access.stage, AccessStage::Ok);
+        // событие вне ожидания ничего не открывает
+        let mut m = asking_with_old_mapped();
+        m.on_outcome(Outcome::Event(chervo_core::NodeEvent::MappingChanged {
+            status: MapStatus::Mapped,
+        }));
+        assert_eq!(m.access.stage, AccessStage::Asking);
+    }
+
+    #[test]
+    fn router_already_allowed_accepts_current_status() {
+        // «Разрешить» не нажималось: текущий итог проброса годится
+        let mut m = model();
+        with_server(&mut m, None, Some(MapStatus::Mapped));
+        acc(&mut m, AccessIntent::Open);
+        acc(&mut m, AccessIntent::AccessAuto);
+        m.on_outcome(Outcome::UpnpFound(Ok(true)));
+        with_server(&mut m, None, Some(MapStatus::Mapped));
+        assert_eq!(m.access.stage, AccessStage::Ok);
+    }
+
+    #[test]
+    fn settings_search_answer_goes_to_settings_not_helper() {
+        use crate::settings_model::{SettingsIntent, UpnpUi};
+        let mut m = model();
+        with_server(&mut m, None, None);
+        // поиск начат в настройках, потом открыт помощник и в нём нажато «Попробовать»
+        assert_eq!(
+            ask(&mut m, MainIntent::Settings(SettingsIntent::UpnpFind)),
+            vec![Command::UpnpIdentify]
+        );
+        acc(&mut m, AccessIntent::Open);
+        assert_eq!(
+            acc(&mut m, AccessIntent::AccessAuto),
+            vec![Command::UpnpIdentify]
+        );
+        // первый ответ (настройки) не задаёт вопрос в помощнике
+        m.on_outcome(Outcome::UpnpFound(Ok(false)));
+        assert!(m.settings_ui.upnp == UpnpUi::Found);
+        assert_eq!(m.access.stage, AccessStage::Searching);
+        // второй ответ (помощник) не трогает настройки
+        m.settings_ui.upnp = UpnpUi::Idle;
+        m.on_outcome(Outcome::UpnpFound(Ok(false)));
+        assert_eq!(m.access.stage, AccessStage::Asking);
+        assert!(m.settings_ui.upnp == UpnpUi::Idle);
+    }
+
+    #[test]
+    fn helper_search_answer_after_reopen_is_dropped() {
+        use crate::settings_model::UpnpUi;
+        let mut m = model();
+        with_server(&mut m, None, None);
+        acc(&mut m, AccessIntent::Open);
+        acc(&mut m, AccessIntent::AccessAuto);
+        // помощник закрыт и открыт заново до ответа: вопроса ни там, ни в настройках
+        acc(&mut m, AccessIntent::Close);
+        acc(&mut m, AccessIntent::Open);
+        m.on_outcome(Outcome::UpnpFound(Ok(false)));
+        assert_eq!(m.access.stage, AccessStage::Idle);
+        assert!(m.settings_ui.upnp == UpnpUi::Idle);
+        // новое нажатие не шлёт второй поиск, пока первый не вернулся
+        let mut m = model();
+        with_server(&mut m, None, None);
+        acc(&mut m, AccessIntent::Open);
+        acc(&mut m, AccessIntent::AccessAuto);
+        acc(&mut m, AccessIntent::Close);
+        acc(&mut m, AccessIntent::Open);
+        assert!(acc(&mut m, AccessIntent::AccessAuto).is_empty());
+        assert_eq!(m.access.stage, AccessStage::Searching);
+        m.on_outcome(Outcome::UpnpFound(Ok(false)));
+        assert_eq!(m.access.stage, AccessStage::Asking);
     }
 
     #[test]

@@ -15,7 +15,7 @@ use chervo_core::{
     RootError,
 };
 
-use crate::access_model::{AccessUi, ExternalMode, GetIpResult, InviteExt};
+use crate::access_model::{AccessUi, ExternalMode, GetIpResult, InviteExt, UpnpOrigin};
 use crate::main_model::{AddFriend, Dialog, MainIntent, OfferUi, SendUi};
 use crate::redact::{redacted_debug_enum, redacted_debug_struct};
 use crate::rows::{DiagRow, FriendRow, Id, OfferRow, RetiredRow, SettingsRow, TransferRow};
@@ -389,6 +389,9 @@ pub struct Model {
     pub settings_ui: SettingsUi,
     /// Помощник «Разрешить входящие подключения» (этап 13д).
     pub access: AccessUi,
+    /// Откуда начаты поиски роутера, ответа на которые ещё нет (по порядку команд): ответ
+    /// относится к тому месту, откуда начат поиск (помощник или настройки).
+    pub(crate) upnp_asked: Vec<UpnpOrigin>,
     /// Состояние страницы «Обновления» и карточек (этап 19г-2).
     pub update: UpdateUi,
     pub close: Close,
@@ -417,6 +420,7 @@ impl Model {
             clock_hint: false,
             settings_ui: SettingsUi::default(),
             access: AccessUi::default(),
+            upnp_asked: Vec::new(),
             update: UpdateUi::default(),
             close: Close::None,
             dialog: Dialog::None,
@@ -448,6 +452,7 @@ impl Model {
             clock_hint: false,
             settings_ui: SettingsUi::default(),
             access: AccessUi::default(),
+            upnp_asked: Vec::new(),
             update: UpdateUi::default(),
             close: Close::None,
             dialog: Dialog::None,
@@ -776,6 +781,9 @@ impl Model {
                     }
                     NodeEvent::MappingChanged { status } => {
                         self.push_notice(chervo_core::texts::mapping_text(status));
+                        // новый итог проброса: помощник, который ждёт его после «Разрешить»,
+                        // может закончить
+                        return self.access_mapping_reported(status);
                     }
                     _ => {}
                 }

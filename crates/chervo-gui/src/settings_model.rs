@@ -233,6 +233,9 @@ impl Model {
                     return Vec::new();
                 }
                 self.settings_ui.upnp = UpnpUi::Searching;
+                // ответ вернётся сюда, даже если за это время открыт помощник
+                self.upnp_asked
+                    .push(crate::access_model::UpnpOrigin::Settings);
                 vec![Command::UpnpIdentify]
             }
             S::UpnpAllowYes => {

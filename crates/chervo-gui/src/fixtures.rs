@@ -571,6 +571,7 @@ pub fn all() -> Vec<Model> {
             check: CheckUi::Done(CheckResult::NotReachable(50_000)),
             done: false,
             error: None,
+            ..AccessUi::default()
         };
         v.push(m);
     }
