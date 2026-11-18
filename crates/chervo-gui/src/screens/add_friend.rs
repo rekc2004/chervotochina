@@ -1,14 +1,20 @@
-//! Экран 3: добавить друга. Вкладки «Пригласить» и «Принять приглашение», ожидание и экран
-//! проверочного кода (8 цифр группами 4+4, подпись для диктора цифра за цифрой).
+//! Экран 3: добавить друга. Создание приглашения, кнопка «Друг прислал мне текст» (одно поле
+//! для любого текста от друга), ожидание и экран проверочного кода (8 цифр группами 4+4,
+//! подпись для диктора цифра за цифрой).
+
+use std::time::{Duration, Instant};
 
 use eframe::egui::{self, FontId, RichText, Role, Sense, WidgetInfo};
 
-use crate::main_model::{AddFriend, AddStage, MAX_PASTE, MainIntent, SasState, Tab};
+use crate::main_model::{AddFriend, AddStage, Dialog, MainIntent, SasState};
 use crate::model::{Intent, Model};
 use crate::qr::QrMatrix;
 use crate::screens::common::{copy_box, warn};
+use crate::screens::friends::friend_text_dialog;
 use crate::texts;
-use chervo_core::texts as core_texts;
+
+/// Как часто перерисовывать окно, пока показан срок приглашения.
+const VALID_REPAINT: Duration = Duration::from_secs(15);
 
 fn main(i: MainIntent) -> Intent {
     Intent::Main(i)
@@ -17,9 +23,16 @@ fn main(i: MainIntent) -> Intent {
 pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
     let mut out = Vec::new();
     let a = &model.add;
+    // поле «Друг прислал мне текст» открыто с этой вкладки: оно занимает место формы
+    if let (Dialog::FriendText(p), AddStage::Form { .. }) = (&model.dialog, &a.stage) {
+        friend_text_dialog(ui, p, &mut out);
+        return out;
+    }
     match &a.stage {
         AddStage::Form { busy } => form(ui, a, *busy, &mut out),
-        AddStage::Waiting { token, qr, .. } => waiting(ui, token.as_deref(), qr.as_ref(), &mut out),
+        AddStage::Waiting {
+            token, qr, valid, ..
+        } => waiting(ui, token.as_deref(), qr.as_ref(), *valid, &mut out),
         AddStage::Sas(s) => sas(ui, s, &mut out),
         AddStage::Finished(text) => {
             ui.label(*text);
@@ -33,86 +46,63 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
 }
 
 fn form(ui: &mut egui::Ui, a: &AddFriend, busy: bool, out: &mut Vec<Intent>) {
-    ui.horizontal(|ui| {
-        if ui
-            .selectable_label(a.tab == Tab::Invite, texts::ADD_TAB_INVITE)
-            .clicked()
-        {
-            out.push(main(MainIntent::AddTab(Tab::Invite)));
-        }
-        if ui
-            .selectable_label(a.tab == Tab::Accept, texts::ADD_TAB_ACCEPT)
-            .clicked()
-        {
-            out.push(main(MainIntent::AddTab(Tab::Accept)));
-        }
-    });
+    // друг уже прислал текст: приглашение, новый адрес или уведомление об удалении
+    if ui
+        .add_enabled(!busy, egui::Button::new(texts::BTN_FRIEND_TEXT))
+        .clicked()
+    {
+        out.push(main(MainIntent::FriendTextOpen));
+    }
     ui.separator();
-    match a.tab {
-        Tab::Invite => {
-            let mut same = a.same_network;
-            if ui
-                .add_enabled(
-                    !busy,
-                    egui::Checkbox::new(&mut same, texts::LABEL_SAME_NETWORK),
-                )
-                .changed()
-            {
-                out.push(main(MainIntent::AddSameNetwork(same)));
-            }
-            ui.add_space(6.0);
-            ui.label(texts::ADD_MANUAL_LABEL);
-            let mut manual = a.manual_addr.clone();
-            if ui
-                .add_enabled(!busy, egui::TextEdit::singleline(&mut manual))
-                .changed()
-            {
-                out.push(main(MainIntent::AddManualEdited(manual)));
-            }
-            warn(ui, texts::IP_WARNING);
-            if let Some(e) = a.error {
-                warn(ui, e);
-            }
-            ui.add_space(8.0);
-            if ui
-                .add_enabled(!busy, egui::Button::new(texts::BTN_CREATE_INVITE))
-                .clicked()
-            {
-                out.push(main(MainIntent::AddCreate));
-            }
-        }
-        Tab::Accept => {
-            ui.label(texts::LABEL_PASTE_HERE);
-            let mut paste = a.paste.clone();
-            // egui 0.37: `char_limit` действует только у однострочного поля. Предел на один
-            // символ больше 4096, чтобы слишком длинный текст был виден как «слишком длинный».
-            let edit = egui::TextEdit::singleline(&mut paste)
-                .desired_width(f32::INFINITY)
-                .char_limit(MAX_PASTE + 1);
-            if ui.add_enabled(!busy, edit).changed() {
-                out.push(main(MainIntent::AddPasteEdited(paste)));
-            }
-            if a.paste_too_long {
-                warn(ui, core_texts::INPUT_TOO_LONG_TEXT);
-            }
-            if let Some(e) = a.error {
-                warn(ui, e);
-            }
-            ui.add_space(8.0);
-            if ui
-                .add_enabled(!busy, egui::Button::new(texts::BTN_ACCEPT_INVITE))
-                .clicked()
-            {
-                out.push(main(MainIntent::AddAcceptSubmit));
-            }
-        }
+    let mut same = a.same_network;
+    if ui
+        .add_enabled(
+            !busy,
+            egui::Checkbox::new(&mut same, texts::LABEL_SAME_NETWORK),
+        )
+        .changed()
+    {
+        out.push(main(MainIntent::AddSameNetwork(same)));
+    }
+    ui.add_space(6.0);
+    ui.label(texts::ADD_MANUAL_LABEL);
+    let mut manual = a.manual_addr.clone();
+    if ui
+        .add_enabled(!busy, egui::TextEdit::singleline(&mut manual))
+        .changed()
+    {
+        out.push(main(MainIntent::AddManualEdited(manual)));
+    }
+    warn(ui, texts::IP_WARNING);
+    if let Some(e) = a.error {
+        warn(ui, e);
+    }
+    ui.add_space(8.0);
+    if ui
+        .add_enabled(!busy, egui::Button::new(texts::BTN_CREATE_INVITE))
+        .clicked()
+    {
+        out.push(main(MainIntent::AddCreate));
     }
 }
 
-fn waiting(ui: &mut egui::Ui, token: Option<&str>, qr: Option<&QrMatrix>, out: &mut Vec<Intent>) {
+fn waiting(
+    ui: &mut egui::Ui,
+    token: Option<&str>,
+    qr: Option<&QrMatrix>,
+    valid: Option<(Instant, u64)>,
+    out: &mut Vec<Intent>,
+) {
     match token {
         Some(t) => {
             ui.label(texts::INVITE_WAIT);
+            if let Some((created, ttl)) = valid {
+                let left = ttl.saturating_sub(created.elapsed().as_secs());
+                ui.label(texts::invite_valid_text(left));
+                if left > 0 {
+                    ui.ctx().request_repaint_after(VALID_REPAINT);
+                }
+            }
             warn(ui, texts::IP_WARNING);
             copy_box(ui, t);
             if let Some(q) = qr {
@@ -192,4 +182,12 @@ fn sas(ui: &mut egui::Ui, s: &SasState, out: &mut Vec<Intent>) {
             out.push(main(MainIntent::SasMismatch));
         }
     });
+    // после «Совпадает» кнопки серые: без этой строки кажется, что программа зависла
+    if s.waiting {
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(texts::SAS_WAITING);
+        });
+    }
 }

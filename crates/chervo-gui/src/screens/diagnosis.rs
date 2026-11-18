@@ -79,6 +79,13 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
                 if !f.online && !f.key_problem && ui.button(texts::BTN_CONNECT).clicked() {
                     out.push(main(MainIntent::ConnectNow(f.id)));
                 }
+                // С5: до итога «Соединить» показывает, что попытка идёт
+                if !f.online && model.connecting.contains(&f.id) {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(texts::CONNECTING);
+                    });
+                }
             });
         }
     });

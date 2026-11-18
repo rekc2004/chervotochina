@@ -6,12 +6,12 @@ use std::collections::HashMap;
 use std::hash::Hash;
 
 use chervo_core::{
-    ClockProposal, ClockSync, FriendRef, FriendStatus, FriendsError, InviteRef, NoDirectPath, Node,
-    NodeError, NodeEvent, PathKind, RouterCandidate, Side, TransferRef, TransferState,
-    TrustConfirmation,
+    ClockProposal, ClockSync, FriendRef, FriendStatus, FriendText, FriendsError, InviteRef,
+    NoDirectPath, Node, NodeError, NodeEvent, PathKind, RouterCandidate, Side, TransferRef,
+    TransferState, TrustConfirmation,
 };
 
-use crate::model::{ClockResult, Command, FriendEventKind, Outcome, Snapshot};
+use crate::model::{ClockResult, Command, FriendEventKind, FriendTextOutcome, Outcome, Snapshot};
 use crate::rows::{
     DiagRow, FileRow, FriendRow, Id, LanRow, OfferRow, RetiredRow, RouterRow, SettingsRow,
     TransferRow,
@@ -223,6 +223,7 @@ pub fn snapshot(node: &Node, refs: &mut Refs) -> Snapshot {
         receive_root: sv.receive_root,
         extra_roots: sv.extra_roots,
         min_free_percent: sv.min_free_percent,
+        invite_ttl_secs: sv.invite_ttl_secs,
         manual_forward: sv.manual_forward,
         routers: sv
             .routers
@@ -367,9 +368,25 @@ pub fn exec(node: &Node, refs: &mut Refs, cmd: Command) -> Option<Outcome> {
                 .map(|(i, t)| (refs.invites.id(i), t.as_str().to_owned()));
             Some(Outcome::InviteCreated(r))
         }
-        Command::AcceptInvite(text) => {
-            let r = node.accept_invite(&text).map(|i| refs.invites.id(i));
-            Some(Outcome::InviteAccepted(r))
+        // любой текст от друга: вид определяет узел, дальше его обычный путь (для приглашения
+        // обязательна сверка кода)
+        Command::ApplyFriendText(text) => {
+            let r = node.apply_friend_text(&text).and_then(|t| match t {
+                FriendText::InviteAccepted { invite } => {
+                    Ok(FriendTextOutcome::InviteAccepted(refs.invites.id(invite)))
+                }
+                FriendText::AddressUpdated { .. } => Ok(FriendTextOutcome::AddressUpdated),
+                FriendText::Revoked { friend } => Ok(FriendTextOutcome::Revoked {
+                    applied: friend.is_some(),
+                }),
+                _ => Err(NodeError::Unsupported),
+            });
+            Some(Outcome::FriendText(r))
+        }
+        // кнопка «Открыть папку»: узел сам знает, какую папку открыть (только из настроек)
+        Command::OpenReceiveFolder => {
+            let r = node.open_receive_folder();
+            Some(Outcome::FolderOpened(r))
         }
         Command::ConfirmSas { invite, yes, name } => {
             let r = match refs.invites.get(invite) {
@@ -457,10 +474,6 @@ pub fn exec(node: &Node, refs: &mut Refs, cmd: Command) -> Option<Outcome> {
                 None => Err(unknown()),
             };
             Some(Outcome::AddrToken(r))
-        }
-        Command::ApplyAddrToken(text) => {
-            let r = node.apply_addr_update_text(&text).map(|_| ());
-            Some(Outcome::AddrApplied(r))
         }
         // кнопка «Соединить»: сам узел это не делает
         Command::ConnectNow(id) => done(match refs.friends.get(id) {

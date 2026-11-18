@@ -18,7 +18,7 @@ struct Gate {
     node_call: &'static str,
 }
 
-const GATED: [Gate; 6] = [
+const GATED: [Gate; 8] = [
     Gate {
         command: "Command::ConnectNow",
         intent_arm: "I::ConnectNow(",
@@ -53,6 +53,19 @@ const GATED: [Gate; 6] = [
         command: "Command::SetUpdateConsent",
         intent_arm: "U::SetConsent",
         node_call: "set_update_consent(",
+    },
+    // 18б: любой текст от друга (приглашение, новый адрес, уведомление об удалении) уходит узлу
+    // только из ветки кнопки «Применить» окна «Друг прислал мне текст»; вид текста решает узел
+    Gate {
+        command: "Command::ApplyFriendText",
+        intent_arm: "I::FriendTextSubmit",
+        node_call: "apply_friend_text(",
+    },
+    // 18б, Н7: запуск проводника для папки приёма только из ветки кнопки «Открыть папку»
+    Gate {
+        command: "Command::OpenReceiveFolder",
+        intent_arm: "I::OpenReceiveFolder",
+        node_call: "open_receive_folder(",
     },
 ];
 
@@ -184,6 +197,8 @@ fn node_calls_for_gated_actions_are_in_their_worker_arms() {
         "sync_clock(",
         "set_lan_mode(",
         "set_update_consent(",
+        "apply_friend_text(",
+        "open_receive_folder(",
         "user_confirmed_trust",
         "TrustConfirmation",
     ] {
@@ -246,6 +261,14 @@ const GOOD_MODEL: &str = "match i {
     U::SetConsent(on) => {
         vec![Command::SetUpdateConsent(on)]
     }
+    I::FriendTextSubmit => {
+        if let Dialog::FriendText(d) = &mut self.dialog {
+            return vec![Command::ApplyFriendText(text)];
+        }
+    }
+    I::OpenReceiveFolder => {
+        vec![Command::OpenReceiveFolder]
+    }
 }
 ";
 
@@ -269,6 +292,14 @@ const GOOD_WORKER: &str = "match cmd {
         Command::SetUpdateConsent(on) => Some(Outcome::UpdateConsentSet {
             result: node.set_update_consent(on),
         }),
+        Command::ApplyFriendText(text) => {
+            let r = node.apply_friend_text(&text);
+            Some(Outcome::FriendText(r))
+        }
+        Command::OpenReceiveFolder => {
+            let r = node.open_receive_folder();
+            Some(Outcome::FolderOpened(r))
+        }
 }
 ";
 
@@ -300,6 +331,13 @@ fn control_model_guard_can_fail() {
     // комментарий не считается созданием
     let commented = format!("{GOOD_MODEL}// Command::ConnectNow(id)\n");
     assert!(model_violations(&commented).is_empty());
+    // 18б: текст от друга и «Открыть папку» только из своих веток
+    let text_wrong = GOOD_MODEL.replace("I::FriendTextSubmit => {", "I::FriendTextEdited(t) => {");
+    assert!(!model_violations(&text_wrong).is_empty());
+    let folder_wrong = GOOD_MODEL.replace("I::OpenReceiveFolder => {", "I::Block(id) => {");
+    assert!(!model_violations(&folder_wrong).is_empty());
+    let text_twice = format!("{GOOD_MODEL}fn other() {{\n    Command::ApplyFriendText(x);\n}}\n");
+    assert!(!model_violations(&text_twice).is_empty());
 }
 
 #[test]
@@ -351,6 +389,17 @@ fn control_worker_guard_can_fail() {
         "Command::SyncClock => {\n            node.set_lan_mode(m);",
     );
     assert!(!worker_violations(&lan_twice).is_empty());
+    // 18б: вызов узла для текста от друга и для папки приёма в чужой ветке или второй раз
+    let text_wrong = GOOD_WORKER.replace(
+        "Command::ApplyFriendText(text) => {",
+        "Command::ResetClock => {",
+    );
+    assert!(!worker_violations(&text_wrong).is_empty());
+    let folder_twice = GOOD_WORKER.replace(
+        "Command::SyncClock => {",
+        "Command::SyncClock => {\n            node.open_receive_folder();",
+    );
+    assert!(!worker_violations(&folder_twice).is_empty());
     // доверие создаётся вне ветки автоприёма
     let trust = GOOD_WORKER.replace(
         "Some(f) => node.connect_now(f),",

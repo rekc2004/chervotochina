@@ -6,10 +6,11 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use chervo_core::{FriendStatus, InviteOutcome};
 
-use crate::model::{Command, Model, Outcome, Page};
+use crate::model::{Command, FriendTextOutcome, Model, Outcome, Page};
 use crate::qr::{self, QrMatrix};
 use crate::redact::redacted_debug_enum;
 use crate::rows::{Id, PickedPath};
@@ -36,12 +37,6 @@ pub fn cap_paste(text: String) -> (String, bool) {
     (text[..cut].to_owned(), true)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tab {
-    Invite,
-    Accept,
-}
-
 /// Намерения главного окна.
 #[derive(Clone, PartialEq, Eq)]
 pub enum MainIntent {
@@ -63,20 +58,19 @@ pub enum MainIntent {
     AddrTokenOpen(Id),
     AddrTokenNetwork(bool),
     AddrTokenIssue,
-    PasteTokenOpen,
-    PasteTokenEdited(String),
-    PasteTokenSubmit,
+    /// «Друг прислал мне текст»: одно поле для приглашения, нового адреса и уведомления об
+    /// удалении (на «Друзьях» и на «Добавить друга»).
+    FriendTextOpen,
+    FriendTextEdited(String),
+    FriendTextSubmit,
     ConnectNow(Id),
     FriendSend(Id),
     DialogClose,
     DismissNotices,
     // добавление друга
-    AddTab(Tab),
     AddSameNetwork(bool),
     AddManualEdited(String),
     AddCreate,
-    AddPasteEdited(String),
-    AddAcceptSubmit,
     AddCancel,
     AddDone,
     SasNameEdited(String),
@@ -90,11 +84,16 @@ pub enum MainIntent {
     // входящие
     OfferAck(Id, bool),
     OfferAccept(Id),
-    OfferAcceptInto { id: Id, root: PathBuf },
+    OfferAcceptInto {
+        id: Id,
+        root: PathBuf,
+    },
     OfferDecline(Id),
     // передачи
     TransferCancel(Id),
     TransferRetry(Id),
+    /// Кнопка «Открыть папку»: только папка приёма из настроек (Н7).
+    OpenReceiveFolder,
     Settings(SettingsIntent),
     Update(UpdateIntent),
 }
@@ -113,7 +112,8 @@ pub enum Dialog {
     Trust(Id),
     Revocation(RevocationDialog),
     AddrToken(AddrTokenDialog),
-    PasteToken(PasteDialog),
+    /// «Друг прислал мне текст» (общее поле).
+    FriendText(PasteDialog),
 }
 
 pub struct RevocationDialog {
@@ -145,6 +145,8 @@ pub struct SasState {
     pub name: String,
     pub error: Option<&'static str>,
     pub busy: bool,
+    /// «Совпадает» отправлено, ждём, пока друг тоже ответит.
+    pub waiting: bool,
 }
 
 pub enum AddStage {
@@ -156,17 +158,16 @@ pub enum AddStage {
         invite: Id,
         token: Option<String>,
         qr: Option<QrMatrix>,
+        /// Только у созданного приглашения: когда оно создано и сколько секунд действует.
+        valid: Option<(Instant, u64)>,
     },
     Sas(SasState),
     Finished(&'static str),
 }
 
 pub struct AddFriend {
-    pub tab: Tab,
     pub same_network: bool,
     pub manual_addr: String,
-    pub paste: String,
-    pub paste_too_long: bool,
     pub error: Option<&'static str>,
     pub stage: AddStage,
 }
@@ -174,11 +175,8 @@ pub struct AddFriend {
 impl Default for AddFriend {
     fn default() -> Self {
         Self {
-            tab: Tab::Invite,
             same_network: false,
             manual_addr: String::new(),
-            paste: String::new(),
-            paste_too_long: false,
             error: None,
             stage: AddStage::Form { busy: false },
         }
@@ -373,17 +371,21 @@ impl Model {
                 }
                 Vec::new()
             }
-            I::PasteTokenOpen => {
-                self.dialog = Dialog::PasteToken(PasteDialog {
-                    text: String::new(),
-                    too_long: false,
-                    error: None,
-                    busy: false,
-                });
+            // «Друг прислал мне текст»: одно поле на любой вид текста; вид определяет узел
+            I::FriendTextOpen => {
+                // во время ожидания кода или самого кода приглашение не подменяется
+                if matches!(self.add.stage, AddStage::Form { busy: false }) {
+                    self.dialog = Dialog::FriendText(PasteDialog {
+                        text: String::new(),
+                        too_long: false,
+                        error: None,
+                        busy: false,
+                    });
+                }
                 Vec::new()
             }
-            I::PasteTokenEdited(t) => {
-                if let Dialog::PasteToken(d) = &mut self.dialog
+            I::FriendTextEdited(t) => {
+                if let Dialog::FriendText(d) = &mut self.dialog
                     && !d.busy
                 {
                     (d.text, d.too_long) = cap_paste(t);
@@ -391,8 +393,9 @@ impl Model {
                 }
                 Vec::new()
             }
-            I::PasteTokenSubmit => {
-                if let Dialog::PasteToken(d) = &mut self.dialog {
+            // единственное место, где появляется `Command::ApplyFriendText`
+            I::FriendTextSubmit => {
+                if let Dialog::FriendText(d) = &mut self.dialog {
                     if d.busy {
                         return Vec::new();
                     }
@@ -406,13 +409,22 @@ impl Model {
                         return Vec::new();
                     }
                     d.busy = true;
-                    return vec![Command::ApplyAddrToken(text)];
+                    return vec![Command::ApplyFriendText(text)];
                 }
                 Vec::new()
+            }
+            // единственное место, где появляется `Command::OpenReceiveFolder`
+            I::OpenReceiveFolder => {
+                self.folder_error = None;
+                vec![Command::OpenReceiveFolder]
             }
             // «Соединить»: единственное место, где появляется `Command::ConnectNow`
             I::ConnectNow(id) => {
                 if self.usable_friend(id) {
+                    // до итога показывается «Пробуем соединиться…»
+                    if !self.connecting.contains(&id) {
+                        self.connecting.push(id);
+                    }
                     vec![Command::ConnectNow(id)]
                 } else {
                     Vec::new()
@@ -442,13 +454,6 @@ impl Model {
     fn update_add_send(&mut self, intent: MainIntent) -> Vec<Command> {
         use MainIntent as I;
         match intent {
-            I::AddTab(t) => {
-                if matches!(self.add.stage, AddStage::Form { .. }) {
-                    self.add.tab = t;
-                    self.add.error = None;
-                }
-                Vec::new()
-            }
             I::AddSameNetwork(v) => {
                 self.add.same_network = v;
                 Vec::new()
@@ -459,9 +464,7 @@ impl Model {
                 Vec::new()
             }
             I::AddCreate => {
-                if self.add.tab != Tab::Invite
-                    || !matches!(self.add.stage, AddStage::Form { busy: false })
-                {
+                if !matches!(self.add.stage, AddStage::Form { busy: false }) {
                     return Vec::new();
                 }
                 let manual_text = self.add.manual_addr.trim();
@@ -482,32 +485,6 @@ impl Model {
                     same_network: self.add.same_network,
                     manual,
                 }]
-            }
-            I::AddPasteEdited(t) => {
-                if matches!(self.add.stage, AddStage::Form { busy: false }) {
-                    (self.add.paste, self.add.paste_too_long) = cap_paste(t);
-                    self.add.error = None;
-                }
-                Vec::new()
-            }
-            I::AddAcceptSubmit => {
-                if self.add.tab != Tab::Accept
-                    || !matches!(self.add.stage, AddStage::Form { busy: false })
-                {
-                    return Vec::new();
-                }
-                if self.add.paste_too_long {
-                    self.add.error = Some(chervo_core::texts::INPUT_TOO_LONG_TEXT);
-                    return Vec::new();
-                }
-                let text = self.add.paste.trim().to_owned();
-                if text.is_empty() {
-                    self.add.error = Some(texts::PASTE_EMPTY);
-                    return Vec::new();
-                }
-                self.add.error = None;
-                self.add.stage = AddStage::Form { busy: true };
-                vec![Command::AcceptInvite(text)]
             }
             I::AddCancel => {
                 if let AddStage::Waiting { invite, .. } = self.add.stage {
@@ -543,6 +520,8 @@ impl Model {
                         return Vec::new();
                     }
                     s.busy = true;
+                    // С3: после «Совпадает» ждём, пока друг тоже ответит
+                    s.waiting = true;
                     return vec![Command::ConfirmSas {
                         invite: s.invite,
                         yes: true,
@@ -684,25 +663,62 @@ impl Model {
         match outcome {
             Outcome::InviteCreated(Ok((invite, token))) => {
                 let qr = qr::encode(&token);
+                let ttl = self
+                    .snapshot
+                    .settings
+                    .as_ref()
+                    .map_or(900, |s| s.invite_ttl_secs);
                 self.add.stage = AddStage::Waiting {
                     invite,
                     token: Some(token),
                     qr,
+                    valid: Some((Instant::now(), ttl)),
                 };
             }
-            Outcome::InviteCreated(Err(e)) | Outcome::InviteAccepted(Err(e)) => {
+            Outcome::InviteCreated(Err(e)) => {
                 self.add.stage = AddStage::Form { busy: false };
                 self.add.error = Some(e.user_text());
             }
-            Outcome::InviteAccepted(Ok(invite)) => {
-                // могла прийти раньше проверочного кода: не затираем его
-                if !matches!(self.add.stage, AddStage::Sas(_)) {
-                    self.add.stage = AddStage::Waiting {
-                        invite,
-                        token: None,
-                        qr: None,
-                    };
+            // текст от друга: ошибка остаётся в окне вставки, остальное по виду текста
+            Outcome::FriendText(Err(e)) => {
+                if let Dialog::FriendText(d) = &mut self.dialog {
+                    d.busy = false;
+                    d.error = Some(e.user_text());
+                } else {
+                    self.push_notice(e.user_text());
                 }
+            }
+            Outcome::FriendText(Ok(done)) => {
+                self.dialog = Dialog::None;
+                match done {
+                    FriendTextOutcome::InviteAccepted(invite) => {
+                        // к сверке кода: она показывается на «Добавить друга»
+                        self.page = Page::AddFriend;
+                        // могла прийти раньше проверочного кода: не затираем его
+                        if !matches!(self.add.stage, AddStage::Sas(_)) {
+                            self.add.stage = AddStage::Waiting {
+                                invite,
+                                token: None,
+                                qr: None,
+                                valid: None,
+                            };
+                        }
+                    }
+                    FriendTextOutcome::AddressUpdated => self.push_notice(texts::ADDR_APPLIED),
+                    FriendTextOutcome::Revoked { applied: true } => {
+                        self.push_notice(texts::REVOKED_APPLIED);
+                    }
+                    FriendTextOutcome::Revoked { applied: false } => {
+                        self.push_notice(texts::REVOKED_NOBODY);
+                    }
+                }
+            }
+            Outcome::FolderOpened(r) => {
+                self.folder_error = match r {
+                    Ok(()) => None,
+                    Err(chervo_core::NodeError::ReceiveRoot(_)) => Some(texts::OPEN_FOLDER_MISSING),
+                    Err(_) => Some(texts::OPEN_FOLDER_FAILED),
+                };
             }
             Outcome::InviteSas {
                 invite,
@@ -716,13 +732,19 @@ impl Model {
                     name: String::new(),
                     error: None,
                     busy: false,
+                    waiting: false,
                 });
+                // поле «Друг прислал мне текст» не должно остаться открытым за сверкой кода
+                if matches!(self.dialog, Dialog::FriendText(_)) {
+                    self.dialog = Dialog::None;
+                }
                 self.page = Page::AddFriend;
                 self.attention = true;
             }
             Outcome::SasAnswered(Err(e)) => {
                 if let AddStage::Sas(s) = &mut self.add.stage {
                     s.busy = false;
+                    s.waiting = false;
                     s.error = Some(e.user_text());
                 }
             }
@@ -767,20 +789,6 @@ impl Model {
                     }
                 }
             }
-            Outcome::AddrApplied(r) => match r {
-                Ok(()) => {
-                    self.dialog = Dialog::None;
-                    self.push_notice(texts::ADDR_APPLIED);
-                }
-                Err(e) => {
-                    if let Dialog::PasteToken(d) = &mut self.dialog {
-                        d.busy = false;
-                        d.error = Some(e.user_text());
-                    } else {
-                        self.push_notice(e.user_text());
-                    }
-                }
-            },
             Outcome::Sent(r) => {
                 self.send.busy = false;
                 match r {
@@ -796,6 +804,7 @@ impl Model {
             Outcome::AutoAccepted => self.push_notice(texts::AUTO_ACCEPTED),
             Outcome::Done(Err(e)) => {
                 self.clear_busy();
+                self.connecting.clear();
                 self.push_notice(e.user_text());
             }
             other => self.outcome_settings(other),
@@ -993,34 +1002,203 @@ mod tests {
         );
     }
 
-    #[test]
-    fn paste_over_4096_rejected() {
-        let mut m = model();
-        ask(&mut m, MainIntent::AddTab(Tab::Accept));
-        ask(&mut m, MainIntent::AddPasteEdited("x".repeat(5000)));
-        assert!(m.add.paste.len() <= MAX_PASTE, "текст в модели обрезан");
-        assert!(ask(&mut m, MainIntent::AddAcceptSubmit).is_empty());
-        assert_eq!(m.add.error, Some(chervo_core::texts::INPUT_TOO_LONG_TEXT));
-        // многобайтные символы считаются байтами: 2049 * 2 = 4098
-        ask(&mut m, MainIntent::AddPasteEdited("ж".repeat(2049)));
-        assert!(ask(&mut m, MainIntent::AddAcceptSubmit).is_empty());
-        // ровно 4096 байт проходит
-        ask(&mut m, MainIntent::AddPasteEdited("x".repeat(4096)));
-        let cmds = ask(&mut m, MainIntent::AddAcceptSubmit);
-        assert!(matches!(cmds.as_slice(), [Command::AcceptInvite(t)] if t.len() == 4096));
+    fn friend_text_dialog(m: &Model) -> &PasteDialog {
+        match &m.dialog {
+            Dialog::FriendText(d) => d,
+            _ => panic!("диалог «Друг прислал мне текст» не открыт"),
+        }
     }
 
     #[test]
-    fn friend_token_paste_over_4096_rejected() {
+    fn friend_text_over_4096_rejected() {
         let mut m = model();
-        ask(&mut m, MainIntent::PasteTokenOpen);
-        ask(&mut m, MainIntent::PasteTokenEdited("y".repeat(4097)));
-        assert!(ask(&mut m, MainIntent::PasteTokenSubmit).is_empty());
-        ask(&mut m, MainIntent::PasteTokenEdited("token".to_owned()));
-        assert_eq!(
-            ask(&mut m, MainIntent::PasteTokenSubmit),
-            vec![Command::ApplyAddrToken("token".to_owned())]
+        ask(&mut m, MainIntent::FriendTextOpen);
+        ask(&mut m, MainIntent::FriendTextEdited("x".repeat(5000)));
+        assert!(
+            friend_text_dialog(&m).text.len() <= MAX_PASTE,
+            "текст в модели обрезан"
         );
+        assert!(ask(&mut m, MainIntent::FriendTextSubmit).is_empty());
+        assert_eq!(
+            friend_text_dialog(&m).error,
+            Some(chervo_core::texts::INPUT_TOO_LONG_TEXT)
+        );
+        // многобайтные символы считаются байтами: 2049 * 2 = 4098
+        ask(&mut m, MainIntent::FriendTextEdited("ж".repeat(2049)));
+        assert!(ask(&mut m, MainIntent::FriendTextSubmit).is_empty());
+        // ровно 4096 байт проходит к узлу (там предел и разбор)
+        ask(&mut m, MainIntent::FriendTextEdited("x".repeat(4096)));
+        let cmds = ask(&mut m, MainIntent::FriendTextSubmit);
+        assert!(matches!(cmds.as_slice(), [Command::ApplyFriendText(t)] if t.len() == 4096));
+    }
+
+    #[test]
+    fn friend_text_goes_to_one_command_for_every_kind() {
+        let mut m = model();
+        ask(&mut m, MainIntent::FriendTextOpen);
+        // пусто: ошибка в самом окне, команды нет
+        assert!(ask(&mut m, MainIntent::FriendTextSubmit).is_empty());
+        assert_eq!(friend_text_dialog(&m).error, Some(texts::PASTE_EMPTY));
+        // любой вид текста уходит одной командой, пробелы по краям обрезаны; вид решает узел
+        for kind in ["CHV1AAAA", "CHA1BBBB", "CHR1CCCC", "мусор"] {
+            let mut m = model();
+            ask(&mut m, MainIntent::FriendTextOpen);
+            ask(&mut m, MainIntent::FriendTextEdited(format!("  {kind}\n ")));
+            assert_eq!(
+                ask(&mut m, MainIntent::FriendTextSubmit),
+                vec![Command::ApplyFriendText(kind.to_owned())]
+            );
+            // пока ждём ответ, второй команды нет
+            assert!(ask(&mut m, MainIntent::FriendTextSubmit).is_empty());
+        }
+    }
+
+    #[test]
+    fn friend_text_outcomes_route_by_kind() {
+        use crate::model::FriendTextOutcome as F;
+        // приглашение: ждём сверку кода на «Добавить друга», диалог закрыт
+        let mut m = model();
+        ask(&mut m, MainIntent::FriendTextOpen);
+        ask(&mut m, MainIntent::FriendTextEdited("x".to_owned()));
+        ask(&mut m, MainIntent::FriendTextSubmit);
+        m.on_outcome(Outcome::FriendText(Ok(F::InviteAccepted(Id(4)))));
+        assert!(matches!(m.dialog, Dialog::None));
+        assert_eq!(m.page, Page::AddFriend);
+        assert!(matches!(
+            m.add.stage,
+            AddStage::Waiting {
+                invite: Id(4),
+                token: None,
+                ..
+            }
+        ));
+        // новый адрес и уведомление об удалении: только сообщение, на странице остаёмся
+        for (o, want) in [
+            (F::AddressUpdated, texts::ADDR_APPLIED),
+            (F::Revoked { applied: true }, texts::REVOKED_APPLIED),
+            (F::Revoked { applied: false }, texts::REVOKED_NOBODY),
+        ] {
+            let mut m = model();
+            ask(&mut m, MainIntent::FriendTextOpen);
+            ask(&mut m, MainIntent::FriendTextEdited("x".to_owned()));
+            ask(&mut m, MainIntent::FriendTextSubmit);
+            m.on_outcome(Outcome::FriendText(Ok(o)));
+            assert!(matches!(m.dialog, Dialog::None));
+            assert_eq!(m.page, Page::Friends);
+            assert_eq!(m.notices, vec![want.to_owned()]);
+        }
+        // ошибка остаётся в окне вставки, текст ошибки не повторяет вставленное
+        let mut m = model();
+        ask(&mut m, MainIntent::FriendTextOpen);
+        ask(
+            &mut m,
+            MainIntent::FriendTextEdited("СЕКРЕТ-ТЕКСТ".to_owned()),
+        );
+        ask(&mut m, MainIntent::FriendTextSubmit);
+        m.on_outcome(Outcome::FriendText(Err(
+            chervo_core::NodeError::InputTooLong,
+        )));
+        let d = friend_text_dialog(&m);
+        assert!(!d.busy);
+        assert_eq!(d.error, Some(chervo_core::texts::INPUT_TOO_LONG_TEXT));
+        assert!(!d.error.unwrap_or_default().contains("СЕКРЕТ"));
+        assert!(m.notices.is_empty());
+    }
+
+    #[test]
+    fn friend_text_dialog_is_one_for_friends_and_add_friend() {
+        // кнопка одна и та же на обеих вкладках: одно намерение, один диалог
+        let mut m = model();
+        m.update(Intent::Go(Page::AddFriend));
+        ask(&mut m, MainIntent::FriendTextOpen);
+        assert!(matches!(m.dialog, Dialog::FriendText(_)));
+        ask(&mut m, MainIntent::DialogClose);
+        m.update(Intent::Go(Page::Friends));
+        ask(&mut m, MainIntent::FriendTextOpen);
+        assert!(matches!(m.dialog, Dialog::FriendText(_)));
+        // во время сверки кода приглашение не подменяется
+        let mut m = model();
+        m.on_outcome(Outcome::InviteSas {
+            invite: Id(1),
+            digits: "1234 5678".to_owned(),
+            spoken: String::new(),
+        });
+        ask(&mut m, MainIntent::FriendTextOpen);
+        assert!(matches!(m.dialog, Dialog::None));
+    }
+
+    #[test]
+    fn sas_waiting_text_after_match() {
+        let mut m = model();
+        m.on_outcome(Outcome::InviteSas {
+            invite: Id(7),
+            digits: "1234 5678".to_owned(),
+            spoken: String::new(),
+        });
+        ask(&mut m, MainIntent::SasNameEdited("Маша".to_owned()));
+        ask(&mut m, MainIntent::SasMatch);
+        let AddStage::Sas(s) = &m.add.stage else {
+            panic!("сверка кода");
+        };
+        assert!(s.busy && s.waiting);
+        // ошибка снимает ожидание
+        m.on_outcome(Outcome::SasAnswered(Err(chervo_core::NodeError::Io)));
+        let AddStage::Sas(s) = &m.add.stage else {
+            panic!("сверка кода");
+        };
+        assert!(!s.busy && !s.waiting);
+    }
+
+    #[test]
+    fn connect_shows_progress_until_online_or_failure() {
+        let mut m = model();
+        with_snapshot(&mut m, |s| {
+            s.friends.push(friend(1, FriendStatus::Active, false));
+        });
+        assert_eq!(
+            ask(&mut m, MainIntent::ConnectNow(Id(1))),
+            vec![Command::ConnectNow(Id(1))]
+        );
+        assert_eq!(m.connecting, vec![Id(1)]);
+        // всё ещё не в сети: подпись остаётся
+        with_snapshot(&mut m, |s| {
+            s.friends.push(friend(1, FriendStatus::Active, false));
+        });
+        assert_eq!(m.connecting, vec![Id(1)]);
+        // стал «в сети»: подпись гаснет
+        with_snapshot(&mut m, |s| {
+            s.friends.push(friend(1, FriendStatus::Active, true));
+        });
+        assert!(m.connecting.is_empty());
+        // ошибка действия тоже гасит
+        with_snapshot(&mut m, |s| {
+            s.friends.push(friend(1, FriendStatus::Active, false));
+        });
+        ask(&mut m, MainIntent::ConnectNow(Id(1)));
+        m.on_outcome(Outcome::Done(Err(chervo_core::NodeError::Io)));
+        assert!(m.connecting.is_empty());
+    }
+
+    #[test]
+    fn open_folder_command_only_from_its_intent_and_error_is_local() {
+        let mut m = model();
+        assert_eq!(
+            ask(&mut m, MainIntent::OpenReceiveFolder),
+            vec![Command::OpenReceiveFolder]
+        );
+        // не каталог: текст рядом с кнопкой, а не общее уведомление
+        m.on_outcome(Outcome::FolderOpened(Err(
+            chervo_core::NodeError::ReceiveRoot(chervo_core::RootError::NotDir),
+        )));
+        assert_eq!(m.folder_error, Some(texts::OPEN_FOLDER_MISSING));
+        m.on_outcome(Outcome::FolderOpened(Err(chervo_core::NodeError::Io)));
+        assert_eq!(m.folder_error, Some(texts::OPEN_FOLDER_FAILED));
+        assert!(m.notices.is_empty());
+        // новая попытка стирает прежнюю ошибку; успех её не возвращает
+        ask(&mut m, MainIntent::OpenReceiveFolder);
+        assert_eq!(m.folder_error, None);
+        m.on_outcome(Outcome::FolderOpened(Ok(())));
+        assert_eq!(m.folder_error, None);
     }
 
     #[test]
@@ -1166,8 +1344,7 @@ mod tests {
     fn debug_output_does_not_contain_tokens_names_or_paths() {
         let secret = "СЕКРЕТНЫЙ-ТОКЕН-12345";
         let cmds = [
-            Command::AcceptInvite(secret.to_owned()),
-            Command::ApplyAddrToken(secret.to_owned()),
+            Command::ApplyFriendText(secret.to_owned()),
             Command::Rename {
                 friend: Id(1),
                 name: secret.to_owned(),
@@ -1191,8 +1368,7 @@ mod tests {
             assert!(!format!("{c:#?}").contains(secret));
         }
         let intents = [
-            Intent::Main(MainIntent::AddPasteEdited(secret.to_owned())),
-            Intent::Main(MainIntent::PasteTokenEdited(secret.to_owned())),
+            Intent::Main(MainIntent::FriendTextEdited(secret.to_owned())),
             Intent::Main(MainIntent::SasNameEdited(secret.to_owned())),
             Intent::Main(MainIntent::PathsAdded(vec![PickedPath {
                 path: PathBuf::from(secret),
@@ -1218,7 +1394,7 @@ mod tests {
     fn main_intents_ignored_until_node_open() {
         let (mut m, _) = Model::start();
         assert!(
-            m.update(Intent::Main(MainIntent::PasteTokenOpen))
+            m.update(Intent::Main(MainIntent::FriendTextOpen))
                 .is_empty()
         );
         assert!(matches!(m.dialog, Dialog::None));

@@ -9,17 +9,41 @@
 
 use std::net::SocketAddr;
 
-use chervo_connect::{Clock, InviteAddrs};
+use chervo_connect::{Clock, ConnectError, InviteAddrs};
 use chervo_friends::{FriendBook, FriendState, FriendsError, Permission, TrustConfirmation};
 use chervo_identity::PairId;
+use chervo_token::{Token, TokenError};
 
 use super::core::lock;
 use super::error::NodeError;
 use super::store::NodeStore;
 use super::views::{
-    AddrToken, FriendRef, FriendStatus, FriendView, InviteRef, NodeWarning, RevocationText,
+    AddrToken, FriendRef, FriendStatus, FriendText, FriendView, InviteRef, NodeWarning,
+    RevocationText,
 };
 use super::{MAX_INPUT_BYTES, Node};
+
+/// Вид вставленного текста, определённый по разобранному `chervo-token`, а не по сравнению строк.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TextKind {
+    Invite,
+    AddrUpdate,
+    Revocation,
+}
+
+/// Разбор вида текста. Длина (до 2048 байт) и все прочие проверки формата идут внутри
+/// `chervo_token::decode` до любого разбора содержимого; подпись приглашения и отзыва он тоже
+/// проверяет, подпись нового адреса проверяет существующий путь `apply_addr_update_text`.
+fn text_kind(text: &str) -> Result<TextKind, NodeError> {
+    match chervo_token::decode(text) {
+        Ok(Token::Invite(_)) => Ok(TextKind::Invite),
+        Ok(Token::AddrUpdate(_)) => Ok(TextKind::AddrUpdate),
+        Ok(Token::Revocation(_)) => Ok(TextKind::Revocation),
+        Ok(_) => Err(NodeError::Connect(ConnectError::Token(TokenError::BadKind))),
+        Err(TokenError::TooLong) => Err(NodeError::InputTooLong),
+        Err(e) => Err(NodeError::Connect(ConnectError::Token(e))),
+    }
+}
 
 /// Вставленный текст: обрезка пробелов, предел 4096 байт до любого разбора (инвариант 5).
 pub(crate) fn checked_input(text: &str) -> Result<&str, NodeError> {
@@ -270,6 +294,32 @@ impl Node {
         // действие пользователя «вставить токен»: набор сразу, как в узле 16
         let _ = self.core.engine.connect_now(&pair);
         Ok(FriendRef::new(pair))
+    }
+
+    /// Единственная точка для любого текста, который прислал друг: приглашение, новый адрес или
+    /// уведомление об удалении (до 4096 байт, пробелы по краям отбрасываются). Вид определяет
+    /// разбор `chervo-token`; дальше идёт уже существующий путь для этого вида, его проверки не
+    /// ослаблены и не повторены здесь:
+    /// - приглашение: как `accept_invite`; после него обязательна сверка проверочного кода
+    ///   (`confirm_sas`);
+    /// - новый адрес: как `apply_addr_update_text` (подпись, друг, срок);
+    /// - уведомление об удалении: как `apply_revocation_text` (подпись, друг).
+    ///
+    /// Текст ошибки не содержит вставленного. Нераспознанный текст (`BadPrefix`, `BadEncoding`)
+    /// и повреждённый различаются через `NodeError::user_text`.
+    pub fn apply_friend_text(&self, text: &str) -> Result<FriendText, NodeError> {
+        let t = checked_input(text)?;
+        match text_kind(t)? {
+            TextKind::Invite => self
+                .accept_invite(t)
+                .map(|invite| FriendText::InviteAccepted { invite }),
+            TextKind::AddrUpdate => self
+                .apply_addr_update_text(t)
+                .map(|friend| FriendText::AddressUpdated { friend }),
+            TextKind::Revocation => self
+                .apply_revocation_text(t)
+                .map(|friend| FriendText::Revoked { friend }),
+        }
     }
 
     /// Кнопка «Соединить». Узел сам её не нажимает.

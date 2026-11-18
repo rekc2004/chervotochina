@@ -9,8 +9,7 @@ pub const MODE_ANNOUNCE_TEXT: &str = "Слушать и сообщать о се
 pub const STATUS_OFF_TEXT: &str = MODE_OFF_TEXT;
 pub const STATUS_NO_PRIVATE_ROUTE_TEXT: &str =
     "Поиск в локальной сети не работает: у компьютера нет частного адреса домашней сети.";
-pub const STATUS_PORT_BUSY_TEXT: &str =
-    "Поиск в локальной сети недоступен: его порт занят другой программой.";
+pub const STATUS_PORT_BUSY_TEXT: &str = "Поиск друзей дома не работает: мешает другая программа.";
 pub const STATUS_LISTENING_TEXT: &str = "Слушаем локальную сеть.";
 pub const STATUS_ANNOUNCING_TEXT: &str = "Сообщаем о себе друзьям в локальной сети.";
 pub const STATUS_FAILED_TEXT: &str =

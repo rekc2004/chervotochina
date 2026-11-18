@@ -64,6 +64,10 @@ fn offer(ui: &mut egui::Ui, model: &Model, o: &OfferRow, out: &mut Vec<Intent>) 
                     ));
                 }
             });
+        // Н5: пояснение к «(!)»
+        if o.files.iter().any(|f| f.needs_question) {
+            ui.label(texts::RISKY_LEGEND);
+        }
         for w in &o.warnings {
             warn(ui, w);
         }

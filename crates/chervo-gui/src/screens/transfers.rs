@@ -1,5 +1,7 @@
 //! Экран 6: передачи. Ход, причина паузы, «Повторить», отмена, итог. Папка, куда легли файлы,
-//! показана текстом с кнопкой «Копировать»; ничего не открывается и не запускается.
+//! показана текстом с кнопкой «Копировать». Кнопка «Открыть папку» открывает в проводнике только
+//! папку приёма из настроек (решение владельца 2026-11-18); файлы и пути от друга не
+//! открываются, сам запуск делает узел.
 
 use chervo_core::texts as core_texts;
 use chervo_core::{PauseReason, Side, TransferState};
@@ -17,6 +19,16 @@ fn main(i: MainIntent) -> Intent {
 
 pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
     let mut out = Vec::new();
+    // Н7: открывается только папка приёма из настроек; ошибка запуска показана рядом
+    ui.horizontal_wrapped(|ui| {
+        if ui.button(texts::BTN_OPEN_FOLDER).clicked() {
+            out.push(main(MainIntent::OpenReceiveFolder));
+        }
+        if let Some(e) = model.folder_error {
+            warn(ui, e);
+        }
+    });
+    ui.separator();
     if model.snapshot.transfers.is_empty() {
         ui.label(texts::TRANSFERS_EMPTY);
         return out;

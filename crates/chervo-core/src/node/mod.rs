@@ -14,6 +14,7 @@ mod folder;
 mod friends;
 mod interrupt;
 mod network;
+mod open_folder;
 mod profile;
 mod runtime;
 mod settings;
@@ -70,8 +71,9 @@ pub use self::store::KeyStoreKind;
 pub use self::testing::TestOpen;
 pub use self::views::{
     AddrToken, ClockProposal, ClockSync, DiagnosisView, FileKind, FriendRef, FriendStatus,
-    FriendView, IncomingOffer, InviteRef, NodeWarning, OfferFile, RevocationText, RouterCandidate,
-    RouterView, SasView, SettingsView, SpaceView, TransferRef, TransferResult, TransferView,
+    FriendText, FriendView, IncomingOffer, InviteRef, NodeWarning, OfferFile, RevocationText,
+    RouterCandidate, RouterView, SasView, SettingsView, SpaceView, TransferRef, TransferResult,
+    TransferView,
 };
 
 use self::core::{Core, Eng, LiveConfig, Registry, lock, pump};

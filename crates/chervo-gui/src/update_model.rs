@@ -402,6 +402,7 @@ mod tests {
             receive_root: "D:/recv".to_owned(),
             extra_roots: Vec::new(),
             min_free_percent: 5,
+            invite_ttl_secs: 900,
             manual_forward: None,
             routers: Vec::new(),
             clock_offset_ms: 0,

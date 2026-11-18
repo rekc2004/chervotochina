@@ -341,6 +341,8 @@ impl Model {
                     self.push_notice(format!("{name}: {}", texts::CLOCK_SKEW_HINT));
                 }
                 FriendEventKind::Unreachable { text, lan_hint } => {
+                    // итог попытки соединиться получен
+                    self.connecting.clear();
                     self.push_notice(format!("{name}: {text}"));
                     if lan_hint {
                         self.push_notice(format!("{name}: {}", texts::LAN_EXPIRED_HINT));
@@ -376,6 +378,7 @@ mod tests {
             receive_root: "D:/recv".to_owned(),
             extra_roots: Vec::new(),
             min_free_percent: 5,
+            invite_ttl_secs: 900,
             manual_forward: None,
             routers: (0..routers)
                 .map(|i| RouterRow {
@@ -606,7 +609,7 @@ mod tests {
         let last = m.notices.last().cloned().unwrap_or_default();
         assert_eq!(last, chervo_core::texts::ANCHOR_NOT_UPDATED_TEXT);
         // не «не удалось», а «сохранено ... перезапустите»
-        assert!(last.contains("Сохранено") && last.contains("Перезапустите"));
+        assert!(last.contains("сохранены") && last.contains("перезапустить"));
         assert!(!last.to_lowercase().contains("не удалось"));
         m.on_outcome(Outcome::Event(NodeEvent::Internal));
         assert_eq!(

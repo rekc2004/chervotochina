@@ -109,6 +109,8 @@ pub struct SettingsRow {
     pub receive_root: String,
     pub extra_roots: Vec<String>,
     pub min_free_percent: u8,
+    /// Срок жизни приглашения, секунд (для подписи «приглашение действует ещё N мин»).
+    pub invite_ttl_secs: u64,
     pub manual_forward: Option<u16>,
     pub routers: Vec<RouterRow>,
     pub clock_offset_ms: i64,

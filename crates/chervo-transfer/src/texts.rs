@@ -11,4 +11,4 @@ pub const STALLED_TEXT: &str =
 pub const DECLINED_TEXT: &str = "Друг отклонил передачу.";
 pub const EXPIRED_TEXT: &str = "Друг не ответил на предложение вовремя.";
 pub const DISCONNECTED_TEXT: &str = "Связь с другом пропала, пока предложение ждало ответа. Отправьте файлы ещё раз, когда друг будет на связи.";
-pub const PREPARING_TEXT: &str = "Отправитель готовит файлы к передаче: считает контрольные суммы.";
+pub const PREPARING_TEXT: &str = "Готовим файлы к отправке…";

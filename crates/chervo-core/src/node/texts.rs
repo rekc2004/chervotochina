@@ -6,6 +6,7 @@
 use chervo_connect::ConnectError;
 use chervo_friends::FriendsError;
 use chervo_receive::RootError;
+use chervo_token::{InviteError, TokenError};
 use chervo_transfer::{FailReason, TransferError};
 
 use super::error::NodeError;
@@ -37,7 +38,7 @@ pub const FIRST_RUN_TEXT: &str =
 pub const ALREADY_RUNNING_TEXT: &str = "Программа уже запущена.";
 pub const DATA_DIR_TEXT: &str = "Не удалось определить или создать папку данных программы.";
 pub const SETTINGS_CORRUPT_TEXT: &str = "Файл настроек повреждён или содержит недопустимое значение. Можно сбросить настройки: копия файла сохранится.";
-pub const KEY_STORE_LOCKED_TEXT: &str = "Хранилище ключей ОС закрыто или недоступно. Разблокируйте его или убедитесь, что оно работает, и повторите.";
+pub const KEY_STORE_LOCKED_TEXT: &str = "Программа не может открыть защищённое хранилище системы. Разблокируйте его или войдите в систему заново и нажмите «Повторить».";
 pub const KEYS_LOST_TEXT: &str = "Ключ списка друзей пропал: список прочитать нельзя. Можно начать заново, друзей придётся добавить снова. Старый файл сохранится рядом.";
 pub const ROLLED_BACK_TEXT: &str = "Список друзей старше последнего изменения безопасности: возможно, его подменили старой копией. Принять старый список можно только осознанно.";
 pub const STALE_INSTANCE_TEXT: &str =
@@ -55,12 +56,16 @@ pub const BAD_NAME_TEXT: &str =
 pub const INPUT_TOO_LONG_TEXT: &str = "Вставленный текст слишком длинный.";
 pub const FRIENDS_TEXT: &str = "Не удалось изменить список друзей.";
 pub const INVALID_NAME_TEXT: &str = "Недопустимое имя друга.";
-pub const BAD_TOKEN_TEXT: &str = "Текст не распознан или не подходит ни одному другу.";
+pub const BAD_TOKEN_TEXT: &str = "Этот текст повреждён или не подходит ни одному из ваших друзей. Попросите друга прислать его ещё раз и скопируйте целиком кнопкой «Копировать».";
+/// Текст, у которого нет вида приглашения, нового адреса или уведомления об удалении.
+pub const NOT_FROM_US_TEXT: &str = "Это не похоже на текст из Червоточины. Попросите друга скопировать его целиком кнопкой «Копировать».";
+/// Приглашение друга уже недействительно (срок вышел).
+pub const INVITE_EXPIRED_TEXT: &str = "Срок этого приглашения истёк. Попросите друга создать новое: «Добавить друга» → «Создать приглашение».";
 pub const NO_ADDRESS_TEXT: &str =
     "Нет адреса, который можно сообщить другу. Проверьте сеть или укажите адрес с пробросом порта.";
 pub const UNKNOWN_ITEM_TEXT: &str = "Такого друга, приглашения или передачи нет.";
 pub const NOT_ACTIVE_TEXT: &str = "Друг сейчас не активен: он заблокирован, удалён или отозван.";
-pub const CONNECT_TEXT: &str = "Не удалось выполнить действие со связью.";
+pub const CONNECT_TEXT: &str = "Не получилось. Проверьте интернет и повторите.";
 pub const TRANSFER_BUSY_TEXT: &str =
     "Слишком много передач одновременно или с этим другом уже идёт передача.";
 pub const TRANSFER_TOO_BIG_TEXT: &str = "Файл или набор файлов слишком большой.";
@@ -69,7 +74,7 @@ pub const TRANSFER_NO_CONNECTION_TEXT: &str = "Нет живого соедин�
 pub const TRANSFER_WRONG_STATE_TEXT: &str = "Сейчас это действие недоступно для этой передачи.";
 pub const TRANSFER_TEXT: &str = "Не удалось выполнить действие с передачей.";
 pub const UPNP_NO_GATEWAY_TEXT: &str =
-    "Роутер с поддержкой автоматического проброса в сети не найден.";
+    "Роутер не отвечает на просьбу открыть порт. Возможно, в его настройках выключен UPnP.";
 pub const UPNP_AMBIGUOUS_TEXT: &str = chervo_upnp::AMBIGUOUS_TEXT;
 pub const UPNP_TEXT: &str = "Не удалось поговорить с роутером.";
 pub const CLOCK_TEXT: &str =
@@ -83,7 +88,7 @@ pub const LIMIT_REACHED_TEXT: &str =
     "Достигнут предел списка: уберите ненужную папку приёма или роутер и повторите.";
 
 pub const ANCHOR_NOT_UPDATED_TEXT: &str =
-    "Сохранено, но счётчик защиты от отката не обновлён. Перезапустите программу.";
+    "Изменения сохранены, но программу нужно перезапустить, чтобы защита работала полностью.";
 pub const ROOT_UNAVAILABLE_TEXT: &str = "Одна из дополнительных папок приёма недоступна. Недокачанные там передачи не продолжатся, пока папка не вернётся.";
 pub const SETTINGS_NOT_SAVED_TEXT: &str = "Действие выполнено, но настройки записать не удалось.";
 
@@ -92,7 +97,7 @@ pub const RESULT_PROTOCOL_TEXT: &str = "Передача прервана из-�
 pub const RESULT_BUSY_TEXT: &str = "Друг сейчас занят другой передачей. Попробуйте позже.";
 pub const RESULT_LIMITS_TEXT: &str =
     "Предложение не подошло под ограничения приёма (число файлов, размер или имена).";
-pub const RESULT_NOT_FRIEND_TEXT: &str = "Друг не признал это соединение. Добавьте друга заново.";
+pub const RESULT_NOT_FRIEND_TEXT: &str = "Друг не признал это соединение. Добавьте друга заново: вкладка «Добавить друга» → «Создать приглашение».";
 pub const RESULT_CANCELLED_BY_US_TEXT: &str = "Вы отменили передачу.";
 
 fn root_text(e: RootError) -> &'static str {
@@ -124,6 +129,8 @@ fn connect_text(e: ConnectError) -> &'static str {
         ConnectError::NoAddresses => NO_ADDRESS_TEXT,
         ConnectError::UnknownPair => UNKNOWN_ITEM_TEXT,
         ConnectError::NotActive => NOT_ACTIVE_TEXT,
+        ConnectError::Token(TokenError::BadPrefix | TokenError::BadEncoding) => NOT_FROM_US_TEXT,
+        ConnectError::Invite(InviteError::Expired) => INVITE_EXPIRED_TEXT,
         ConnectError::Token(_) | ConnectError::Invite(_) => BAD_TOKEN_TEXT,
         _ => CONNECT_TEXT,
     }

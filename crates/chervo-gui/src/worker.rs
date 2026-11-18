@@ -98,6 +98,18 @@ impl Worker {
 
 type Wake = std::sync::Arc<dyn Fn() + Send + Sync>;
 
+/// Ответ окну на команду узла. `None` от `worker_ops::exec` значит «ответа нет»: для обычной
+/// команды это «узла нет (ещё не открыт или уже остановлен), действие невозможно». Команда
+/// `RefreshSnapshot` ответа не ждёт никогда: новый снимок присылает цикл после любой команды, а
+/// «Программа завершает работу.» при открытии «Настроек» был ложной ошибкой (этап 18б, В1).
+fn reply(is_refresh: bool, out: Option<Outcome>) -> Option<Outcome> {
+    match out {
+        Some(o) => Some(o),
+        None if is_refresh => None,
+        None => Some(Outcome::Done(Err(NodeError::Shutdown))),
+    }
+}
+
 fn config(port: Option<u16>) -> NodeConfig {
     NodeConfig {
         data_dir: None,
@@ -194,6 +206,7 @@ impl State {
                 }
             }
             other => {
+                let is_refresh = matches!(other, Command::RefreshSnapshot);
                 let out = self
                     .node
                     .as_ref()
@@ -206,8 +219,9 @@ impl State {
                 {
                     self.next_update_tick = Some(Instant::now());
                 }
-                // узла нет (ещё не открыт или уже остановлен): действие невозможно
-                self.post(out.unwrap_or(Outcome::Done(Err(NodeError::Shutdown))));
+                if let Some(o) = reply(is_refresh, out) {
+                    self.post(o);
+                }
             }
         }
         true
@@ -333,6 +347,63 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refresh_snapshot_never_gets_a_reply_without_answer() {
+        // В1: `exec` отвечает `None` на `RefreshSnapshot` и при открытом узле; ответом-ошибкой
+        // «Программа завершает работу.» это быть не должно
+        assert!(reply(true, None).is_none());
+        // остальные команды без узла по-прежнему получают ошибку
+        assert!(matches!(
+            reply(false, None),
+            Some(Outcome::Done(Err(NodeError::Shutdown)))
+        ));
+        // настоящий ответ команды проходит как есть
+        assert!(matches!(
+            reply(true, Some(Outcome::Done(Ok(())))),
+            Some(Outcome::Done(Ok(())))
+        ));
+    }
+
+    /// Настоящий фоновый поток: открытие «Настроек» шлёт `RefreshSnapshot`, и уведомлений после
+    /// этого нет; обычная команда без узла по-прежнему даёт ровно одну ошибку.
+    #[test]
+    fn opening_settings_leaves_no_notice() {
+        use crate::model::{Intent, Model, Page};
+        use crate::rows::Id;
+
+        let report = chervo_core::harden_process();
+        let worker = Worker::spawn(report, || {}).expect("поток");
+        let (mut model, _) = Model::start();
+        model.on_outcome(Outcome::Opened { port_saved: true });
+        let cmds = model.update(Intent::Go(Page::Settings));
+        assert_eq!(cmds, vec![Command::RefreshSnapshot]);
+        for c in cmds {
+            worker.send(c);
+        }
+        // контрольная команда после «обновить»: ответ на неё приходит, а на «обновить» нет
+        worker.send(Command::CancelTransfer(Id(1)));
+        let mut got = Vec::new();
+        let until = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < until && got.is_empty() {
+            while let Some(o) = worker.try_recv() {
+                got.push(o);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        while let Some(o) = worker.try_recv() {
+            got.push(o);
+        }
+        assert_eq!(got.len(), 1, "ответ ровно на контрольную команду");
+        for o in got {
+            model.on_outcome(o);
+        }
+        // уведомление только от контрольной команды (узла в этом тесте нет)
+        assert_eq!(model.notices.len(), 1);
+        assert_eq!(model.notices[0], NodeError::Shutdown.user_text());
+        assert!(worker.finish());
+    }
 
     #[test]
     fn join_bound_covers_longest_op_plus_shutdown() {

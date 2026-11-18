@@ -89,6 +89,21 @@ impl fmt::Debug for SasView {
     }
 }
 
+/// Что произошло с текстом, который прислал друг (`Node::apply_friend_text`). Адресов, имён и
+/// ключей нет: только ссылки.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FriendText {
+    /// Это приглашение: запрос ушёл, дальше обязательная сверка проверочного кода (оболочка
+    /// ждёт `NodeEvent::InviteSas` по этой ссылке).
+    InviteAccepted { invite: InviteRef },
+    /// Это новый адрес друга: сохранён, соединение пробуется сразу.
+    AddressUpdated { friend: FriendRef },
+    /// Это уведомление об удалении: подлинное. `Some`: друг помечен как отозвавший ключ;
+    /// `None`: оно никому из ваших друзей не подходит (или уже применено).
+    Revoked { friend: Option<FriendRef> },
+}
+
 /// Подписанный нами отзыв: его отправляют другу вручную. `Debug` скрыт.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RevocationText(String);

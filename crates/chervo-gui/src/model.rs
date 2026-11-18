@@ -50,7 +50,10 @@ pub enum Command {
         same_network: bool,
         manual: Option<SocketAddr>,
     },
-    AcceptInvite(String),
+    /// Любой текст, который прислал друг (приглашение, новый адрес или уведомление об
+    /// удалении): вид определяет узел. Только из ветки `MainIntent::FriendTextSubmit`
+    /// (охрана `gated_node_actions`).
+    ApplyFriendText(String),
     ConfirmSas {
         invite: Id,
         yes: bool,
@@ -73,7 +76,9 @@ pub enum Command {
         friend: Id,
         same_network: bool,
     },
-    ApplyAddrToken(String),
+    /// Только из ветки `MainIntent::OpenReceiveFolder` (охрана `gated_node_actions`): открывает
+    /// в проводнике папку приёма из настроек и ничего другого.
+    OpenReceiveFolder,
     /// Только из обработчика кнопки «Соединить» (охрана `gated_node_actions`).
     ConnectNow(Id),
     // передачи (экраны 4-6)
@@ -157,6 +162,17 @@ pub enum FriendEventKind {
     },
 }
 
+/// Что узел сделал с текстом от друга (окну: куда перейти и что сказать).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FriendTextOutcome {
+    /// Приглашение принято к сверке кода (`Id` приглашения).
+    InviteAccepted(Id),
+    /// Новый адрес друга сохранён.
+    AddressUpdated,
+    /// Уведомление об удалении подлинное; `applied`: оно подошло кому-то из друзей.
+    Revoked { applied: bool },
+}
+
 /// Итог кнопки «Сверить часы» (смещение в миллисекундах).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClockResult {
@@ -180,7 +196,10 @@ pub enum Outcome {
     Stopped,
     // ответы на команды экранов 2-6
     InviteCreated(Result<(Id, String), NodeError>),
-    InviteAccepted(Result<Id, NodeError>),
+    /// Итог вставки текста от друга (`Command::ApplyFriendText`).
+    FriendText(Result<FriendTextOutcome, NodeError>),
+    /// Итог кнопки «Открыть папку».
+    FolderOpened(Result<(), NodeError>),
     InviteSas {
         invite: Id,
         digits: String,
@@ -198,7 +217,6 @@ pub enum Outcome {
         failed: usize,
     },
     AddrToken(Result<String, NodeError>),
-    AddrApplied(Result<(), NodeError>),
     Sent(Result<(), NodeError>),
     SasAnswered(Result<(), NodeError>),
     /// Событие, относящееся к другу (имя берёт фоновый поток).
@@ -344,6 +362,10 @@ pub struct Model {
     pub add: AddFriend,
     pub send: SendUi,
     pub offer_ui: HashMap<Id, OfferUi>,
+    /// Друзья, к которым нажато «Соединить» и итога ещё нет.
+    pub connecting: Vec<Id>,
+    /// Ошибка кнопки «Открыть папку»: показывается рядом с кнопкой.
+    pub folder_error: Option<&'static str>,
     /// Просьба к окну привлечь внимание (мигание в панели задач); забирает `take_attention`.
     pub(crate) attention: bool,
 }
@@ -366,6 +388,8 @@ impl Model {
             add: AddFriend::default(),
             send: SendUi::default(),
             offer_ui: HashMap::new(),
+            connecting: Vec::new(),
+            folder_error: None,
             attention: false,
         };
         (
@@ -394,6 +418,8 @@ impl Model {
             add: AddFriend::default(),
             send: SendUi::default(),
             offer_ui: HashMap::new(),
+            connecting: Vec::new(),
+            folder_error: None,
             attention: false,
         }
     }
@@ -694,6 +720,10 @@ impl Model {
             }
             Outcome::Snapshot(s) => {
                 self.snapshot = *s;
+                // «Пробуем соединиться…» гаснет, когда друг стал «в сети» или исчез из списка
+                let friends = &self.snapshot.friends;
+                self.connecting
+                    .retain(|id| friends.iter().any(|f| f.id == *id && !f.online));
                 Vec::new()
             }
             Outcome::Event(ev) => {

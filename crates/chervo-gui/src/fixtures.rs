@@ -16,7 +16,7 @@ use chervo_core::{
 
 use crate::main_model::{
     AddFriend, AddStage, AddrTokenDialog, Dialog, MainIntent, OfferUi, PasteDialog,
-    RevocationDialog, Tab,
+    RevocationDialog,
 };
 use crate::model::{ClockResult, Close, FriendEventKind, Intent, Model, Outcome, Page};
 use crate::rows::{
@@ -158,6 +158,7 @@ fn open_model(page: Page) -> Model {
         receive_root: "D:/Приём".to_owned(),
         extra_roots: vec!["E:/Большой диск".to_owned()],
         min_free_percent: 5,
+        invite_ttl_secs: 900,
         manual_forward: Some(50_001),
         routers: vec![
             RouterRow {
@@ -455,7 +456,7 @@ pub fn all() -> Vec<Model> {
             busy: false,
             error: None,
         }),
-        Dialog::PasteToken(PasteDialog {
+        Dialog::FriendText(PasteDialog {
             text: "вставленный текст".to_owned(),
             too_long: true,
             error: Some(chervo_core::texts::BAD_TOKEN_TEXT),
@@ -485,20 +486,20 @@ pub fn all() -> Vec<Model> {
     let mut m = open_model(Page::AddFriend);
     v.push(open_model(Page::AddFriend));
     m.add = AddFriend {
-        tab: Tab::Invite,
         same_network: true,
         manual_addr: "203.0.113.5:50000".to_owned(),
         error: Some(crate::texts::BAD_MANUAL_ADDR),
         ..AddFriend::default()
     };
     v.push(m);
+    // поле «Друг прислал мне текст» на вкладке «Добавить друга»
     let mut m = open_model(Page::AddFriend);
-    m.add = AddFriend {
-        tab: Tab::Accept,
-        paste: "приглашение".to_owned(),
-        paste_too_long: true,
-        ..AddFriend::default()
-    };
+    m.dialog = Dialog::FriendText(PasteDialog {
+        text: "приглашение".to_owned(),
+        too_long: true,
+        error: Some(chervo_core::texts::NOT_FROM_US_TEXT),
+        busy: false,
+    });
     v.push(m);
     let mut m = open_model(Page::AddFriend);
     m.on_outcome(Outcome::InviteCreated(Ok((
@@ -512,6 +513,7 @@ pub fn all() -> Vec<Model> {
         invite: Id(2),
         token: None,
         qr: None,
+        valid: None,
     };
     v.push(m);
     let mut m = open_model(Page::AddFriend);
@@ -533,6 +535,7 @@ pub fn all() -> Vec<Model> {
             invite: Id(1),
             token: None,
             qr: None,
+            valid: None,
         };
         m.on_outcome(Outcome::InviteFinished(o));
         v.push(m);

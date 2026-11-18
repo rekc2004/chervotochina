@@ -1,12 +1,12 @@
 //! Экран 2: друзья. Список с состоянием и действиями, диалоги (переименование, удаление,
-//! отзыв ключа, вопрос о доверии для автоприёма, токен адреса). Только рисует и возвращает
-//! намерения.
+//! отзыв ключа, вопрос о доверии для автоприёма, новый адрес для друга, «Друг прислал мне
+//! текст»). Только рисует и возвращает намерения.
 
 use chervo_core::texts as core_texts;
 use chervo_core::{FriendStatus, PathKind};
 use eframe::egui;
 
-use crate::main_model::{Dialog, MAX_PASTE, MainIntent};
+use crate::main_model::{Dialog, MAX_PASTE, MainIntent, PasteDialog};
 use crate::model::{Intent, Model, Page};
 use crate::rows::FriendRow;
 use crate::screens::common::{copy_box, warn};
@@ -46,8 +46,8 @@ fn status_label(s: FriendStatus) -> &'static str {
 
 fn list(ui: &mut egui::Ui, model: &Model, out: &mut Vec<Intent>) {
     ui.horizontal(|ui| {
-        if ui.button(texts::BTN_PASTE_FRIEND_TOKEN).clicked() {
-            out.push(main(MainIntent::PasteTokenOpen));
+        if ui.button(texts::BTN_FRIEND_TEXT).clicked() {
+            out.push(main(MainIntent::FriendTextOpen));
         }
         if ui.button(texts::BTN_REKEY_ALL).clicked() {
             out.push(main(MainIntent::RekeyAllAsk));
@@ -60,12 +60,12 @@ fn list(ui: &mut egui::Ui, model: &Model, out: &mut Vec<Intent>) {
     }
     egui::ScrollArea::vertical().show(ui, |ui| {
         for f in &model.snapshot.friends {
-            friend_row(ui, f, out);
+            friend_row(ui, f, model.connecting.contains(&f.id), out);
         }
     });
 }
 
-fn friend_row(ui: &mut egui::Ui, f: &FriendRow, out: &mut Vec<Intent>) {
+fn friend_row(ui: &mut egui::Ui, f: &FriendRow, connecting: bool, out: &mut Vec<Intent>) {
     ui.group(|ui| {
         ui.horizontal_wrapped(|ui| {
             ui.strong(&f.name);
@@ -95,6 +95,11 @@ fn friend_row(ui: &mut egui::Ui, f: &FriendRow, out: &mut Vec<Intent>) {
                 }
                 if !f.online && ui.button(texts::BTN_CONNECT).clicked() {
                     out.push(main(MainIntent::ConnectNow(f.id)));
+                }
+                // С5: «Соединить» ничего не показывал
+                if !f.online && connecting {
+                    ui.spinner();
+                    ui.label(texts::CONNECTING);
                 }
                 if ui.button(texts::BTN_DIAGNOSE).clicked() {
                     out.push(Intent::Go(Page::Diagnosis));
@@ -240,35 +245,41 @@ fn dialog(ui: &mut egui::Ui, model: &Model, d: &Dialog, out: &mut Vec<Intent>) {
                 out.push(main(MainIntent::DialogClose));
             }
         }
-        Dialog::PasteToken(p) => {
-            ui.heading(texts::PASTE_TOKEN_TITLE);
-            ui.label(texts::LABEL_PASTE_HERE);
-            let mut t = p.text.clone();
-            let edit = egui::TextEdit::singleline(&mut t)
-                .desired_width(f32::INFINITY)
-                .char_limit(MAX_PASTE + 1);
-            if ui.add_enabled(!p.busy, edit).changed() {
-                out.push(main(MainIntent::PasteTokenEdited(t)));
-            }
-            if p.too_long {
-                warn(ui, core_texts::INPUT_TOO_LONG_TEXT);
-            }
-            if let Some(e) = p.error {
-                warn(ui, e);
-            }
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(!p.busy, egui::Button::new(texts::BTN_APPLY))
-                    .clicked()
-                {
-                    out.push(main(MainIntent::PasteTokenSubmit));
-                }
-                if ui.button(texts::BTN_CANCEL).clicked() {
-                    out.push(main(MainIntent::DialogClose));
-                }
-            });
-        }
+        Dialog::FriendText(p) => friend_text_dialog(ui, p, out),
     }
+}
+
+/// «Друг прислал мне текст»: одно поле на приглашение, новый адрес и уведомление об удалении.
+/// Показывается и на «Друзьях», и на «Добавить друга».
+pub fn friend_text_dialog(ui: &mut egui::Ui, p: &PasteDialog, out: &mut Vec<Intent>) {
+    ui.heading(texts::FRIEND_TEXT_TITLE);
+    ui.label(texts::LABEL_PASTE_HERE);
+    let mut t = p.text.clone();
+    // egui 0.37: `char_limit` действует только у однострочного поля. Предел на один символ
+    // больше 4096, чтобы слишком длинный текст был виден как «слишком длинный».
+    let edit = egui::TextEdit::singleline(&mut t)
+        .desired_width(f32::INFINITY)
+        .char_limit(MAX_PASTE + 1);
+    if ui.add_enabled(!p.busy, edit).changed() {
+        out.push(main(MainIntent::FriendTextEdited(t)));
+    }
+    if p.too_long {
+        warn(ui, core_texts::INPUT_TOO_LONG_TEXT);
+    }
+    if let Some(e) = p.error {
+        warn(ui, e);
+    }
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(!p.busy, egui::Button::new(texts::BTN_APPLY))
+            .clicked()
+        {
+            out.push(main(MainIntent::FriendTextSubmit));
+        }
+        if ui.button(texts::BTN_CANCEL).clicked() {
+            out.push(main(MainIntent::DialogClose));
+        }
+    });
 }
 
 fn confirm_buttons(ui: &mut egui::Ui, yes: &str, intent: MainIntent, out: &mut Vec<Intent>) {
