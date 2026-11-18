@@ -51,6 +51,26 @@ pub enum NodeError {
     InvalidValue,
     /// Достигнут предел списка (папок приёма или разрешённых роутеров).
     LimitReached,
+    /// Узнать свой адрес в интернете не получилось (этап 13д): сервер эхо не задан, не
+    /// разобран или занят.
+    Echo(EchoFailure),
+}
+
+/// Почему проба эхо-сервера не началась (этап 13д). Без адресов.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EchoFailure {
+    /// Сервер в настройках не указан: к сети ничего не отправлено.
+    NotConfigured,
+    /// Строка сервера не разобрана или адрес неуказанный, групповой, широковещательный.
+    BadAddress,
+    /// Имя сервера не нашлось.
+    Resolve,
+    /// У имени нет адреса IPv4.
+    NoIpv4,
+    /// Другая проба ещё идёт.
+    Busy,
+    /// Внутренний сбой (среда остановлена, случайные числа, семейство гнезда).
+    Internal,
 }
 
 impl fmt::Display for NodeError {
@@ -79,6 +99,7 @@ impl fmt::Display for NodeError {
             Self::NoSpace => "not enough free space",
             Self::InvalidValue => "setting value is out of range",
             Self::LimitReached => "list limit reached",
+            Self::Echo(_) => "own address lookup error",
         };
         f.write_str(text)
     }

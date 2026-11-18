@@ -171,6 +171,7 @@ impl Node {
 
     pub fn cancel_invite(&self, invite: InviteRef) -> Result<(), NodeError> {
         let _g = self.enter();
+        self.core.stop_keepalive(&invite);
         self.core.engine.cancel_invite(invite.inner())?;
         Ok(())
     }

@@ -126,6 +126,10 @@ pub(crate) struct Core {
     /// Порт транспорта совпал с портом маяка (старый файл настроек с `port=` порта маяка): служба
     /// поиска не запускается, состояние `PortBusy`.
     pub(crate) lan_blocked: bool,
+    /// Эхо-сервер, внешний адрес в приглашении, помощник доступа (этап 13д, `node/echo.rs`).
+    pub(crate) echo: super::echo::EchoState,
+    /// Адрес роутера из последнего «Найти роутер» (только читается помощником).
+    pub(crate) last_identify: Mutex<Option<std::net::Ipv4Addr>>,
 }
 
 impl Core {
@@ -259,12 +263,15 @@ impl Core {
                 });
             }
             EngineEvent::SasReady { pair, sas } => {
+                // до SAS приглашение ждёт, дальше адрес в нём уже не нужен
+                self.stop_keepalive(&InviteRef::new(pair));
                 self.sink.emit(NodeEvent::InviteSas {
                     invite: InviteRef::new(pair),
                     sas: SasView::new(sas),
                 });
             }
             EngineEvent::InviteFinished { pair, outcome } => {
+                self.stop_keepalive(&InviteRef::new(pair));
                 self.sink.emit(NodeEvent::InviteFinished {
                     invite: InviteRef::new(pair),
                     outcome,

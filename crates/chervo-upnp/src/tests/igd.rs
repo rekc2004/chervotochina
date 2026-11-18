@@ -832,7 +832,7 @@ fn igd_identify_returns_udn() {
         skip()
     };
     let m = lab.mapper(UpnpSettings::default());
-    let id = m.identify(OWN).unwrap();
+    let id = m.identify(OWN).unwrap().id;
     assert_eq!(id.to_setting(), UDN);
     assert_eq!(id, RouterId::from_setting(UDN).unwrap());
     assert_eq!(lab.r().soap_count(), 0);
@@ -851,6 +851,21 @@ fn igd_identify_returns_udn() {
         empty.mapper(UpnpSettings::default()).identify(OWN),
         Err(UpnpError::NoGateway)
     );
+}
+
+/// Этап 13д: `identify` отдаёт адрес роутера из проверенного `LOCATION`; в `Debug` его нет.
+#[test]
+#[cfg_attr(target_os = "macos", ignore = "needs 127.0.0.x aliases")]
+fn identify_returns_lan_ip_of_location() {
+    let Some(lab) = Lab::new(vec![Cfg::default()]) else {
+        skip()
+    };
+    let m = lab.mapper(UpnpSettings::default());
+    let found = m.identify(OWN).unwrap();
+    assert_eq!(found.lan_ip, lab.r().ip);
+    assert_eq!(found.id.to_setting(), UDN);
+    assert_eq!(format!("{found:?}"), "Identified(..)");
+    assert_eq!(format!("{found:#?}"), "Identified(..)");
 }
 
 #[test]

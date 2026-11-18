@@ -49,6 +49,29 @@ impl Node {
         open_node(cfg, h, mode, StoreSource::Given(store))
     }
 
+    /// Интервал поддержания адреса ждущих приглашений вместо `KEEPALIVE_EVERY` (этап 13д;
+    /// действует на приглашения, созданные после вызова).
+    #[doc(hidden)]
+    pub fn set_keepalive_every_for_tests(&self, every: std::time::Duration) {
+        *self
+            .core
+            .echo
+            .every_override
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(every);
+    }
+
+    /// Сколько приглашений сейчас поддерживают адрес (этап 13д).
+    #[doc(hidden)]
+    pub fn keepalive_count_for_tests(&self) -> usize {
+        self.core
+            .echo
+            .keepalives
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
     /// Итог сверки часов без сети (тесты порога в 5 минут).
     #[doc(hidden)]
     pub fn clock_result_for_tests(

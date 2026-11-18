@@ -8,6 +8,9 @@
 //! tokio живёт в отдельном потоке узла.
 
 mod core;
+mod echo;
+#[cfg(test)]
+mod echo_tests;
 mod error;
 mod events;
 mod folder;
@@ -57,7 +60,11 @@ pub use chervo_timesync::SyncError;
 pub use chervo_transfer::{FailReason, PauseReason, Side, TransferError, TransferState};
 pub use chervo_upnp::UpnpError;
 
-pub use self::error::NodeError;
+pub use self::echo::{
+    ECHO_COOLDOWN, EchoPath, EchoReport, EchoResult, EchoVerdict, EchoVia, ExternalPlan,
+    ForwardHelp, KEEPALIVE_EVERY, ReachResult, SkipReason, plan_invite_external,
+};
+pub use self::error::{EchoFailure, NodeError};
 pub use self::events::{NodeEvent, NodeEvents};
 #[cfg(any(test, feature = "fuzzing"))]
 #[doc(hidden)]
@@ -561,6 +568,8 @@ fn build_core(cfg: &NodeConfig, p: Parts) -> Result<Built, NodeError> {
         mapper: Mutex::new(mapper),
         lan: Mutex::new(lan),
         lan_blocked,
+        echo: echo::EchoState::default(),
+        last_identify: Mutex::new(None),
     });
     Ok((core, events, tevents, warnings))
 }

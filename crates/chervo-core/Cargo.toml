@@ -45,6 +45,10 @@ blake2.workspace = true
 # Свои тесты используют точки входа за свойствами `fuzzing` и `test-store` (как в chervo-token): в продуктовой
 # сборке её нет.
 chervo-core = { path = ".", features = ["fuzzing", "test-store"] }
+# Этап 13д: настоящий эхо-сервер для тестов ядра (только dev: охрана `layout` запрещает его в
+# `[dependencies]`). Новых внешних пакетов нет.
+chervo-rendezvous-server.workspace = true
+chervo-rendezvous-wire.workspace = true
 
 [features]
 # Точка входа разбора настроек для libFuzzer (`fuzz/`, вне рабочего пространства), не для продукта.

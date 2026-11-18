@@ -4,6 +4,7 @@
 //! санитизированы (нет bidi, нулевой ширины, `..`, зарезервированных имён), а недоверенное имя
 //! (`UntrustedName`) из ядра не выходит.
 
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 
 use chervo_receive::{
@@ -365,7 +366,7 @@ impl Node {
                 .routers
                 .iter()
                 .map(|r| RouterView {
-                    router: RouterCandidate(r.id.clone()),
+                    router: RouterCandidate(r.id.clone(), Ipv4Addr::UNSPECIFIED),
                     permanent_ok: r.permanent_ok,
                     needs_permanent: !r.permanent_ok && waiting_router.as_ref() == Some(&r.id),
                 })
@@ -380,6 +381,7 @@ impl Node {
                 Some(false) => UpdateConsent::Disabled,
             },
             lan_mode: s.lan_mode,
+            echo_server: s.echo_server.clone(),
             restart_needed,
         }
     }

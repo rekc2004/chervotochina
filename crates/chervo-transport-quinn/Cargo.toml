@@ -8,6 +8,8 @@ publish.workspace = true
 [dependencies]
 chervo-identity.workspace = true
 chervo-transport.workspace = true
+# Этап 13д: запросы и ответы эхо-пробы (своих зависимостей нет).
+chervo-rendezvous-wire.workspace = true
 quinn.workspace = true
 rustls.workspace = true
 ring.workspace = true

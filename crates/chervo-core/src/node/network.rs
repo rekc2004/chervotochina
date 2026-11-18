@@ -113,8 +113,10 @@ impl Node {
         };
         let attached = lock(&self.core.mapper).clone();
         let mapper = attached.unwrap_or_else(|| Arc::new(UpnpMapper::new(UpnpSettings::default())));
-        let id = mapper.identify(own).map_err(NodeError::Upnp)?;
-        Ok(RouterCandidate(id))
+        let found = mapper.identify(own).map_err(NodeError::Upnp)?;
+        // адрес роутера нужен помощнику «Разрешить входящие подключения» для шага 1 (этап 13д)
+        *lock(&self.core.last_identify) = Some(found.lan_ip);
+        Ok(RouterCandidate(found.id, found.lan_ip))
     }
 
     /// Разрешить роутеру открывать порт. `permanent_ok`: согласие на бессрочную аренду (после

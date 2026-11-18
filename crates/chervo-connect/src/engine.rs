@@ -99,6 +99,13 @@ pub enum InviteAddrs {
     },
     /// Введены пользователем (проброс, белый IP); также тесты.
     Manual(Vec<SocketAddr>),
+    /// Как `Auto`, но `extra` (например, адрес в интернете от эхо-сервера, этап 13д) идут первыми.
+    /// Повторы убираются, всего не больше `MAX_INVITE_ADDRS`. Собственный список пуст, а `extra`
+    /// нет: приглашение создаётся (ошибки `NoAddresses` нет).
+    AutoWith {
+        same_network: bool,
+        extra: Vec<SocketAddr>,
+    },
 }
 
 /// `Debug` скрыт: в событиях есть SAS.

@@ -118,6 +118,44 @@ fn src_guard() {
         "try_send( должен быть в knock.rs"
     );
 
+    // Этап 13д: запросы и разбор ответов эхо-пробы только в echo.rs; отправка `send_echo(` объявлена
+    // в knock.rs и вызывается только из echo.rs
+    for needle in [
+        "encode_echo_request(",
+        "encode_reach_request(",
+        "parse_response(",
+    ] {
+        for (name, s) in &srcs {
+            if name != "echo.rs" {
+                assert!(!s.contains(needle), "{needle} вне echo.rs: {name}");
+            }
+        }
+        assert!(
+            srcs.iter()
+                .any(|(n, s)| n == "echo.rs" && s.contains(needle)),
+            "{needle} должен быть в echo.rs"
+        );
+    }
+    for (name, s) in &srcs {
+        let declared = s.matches("fn send_echo(").count();
+        let calls = s.matches("send_echo(").count() - declared;
+        match name.as_str() {
+            "knock.rs" => {
+                assert_eq!(declared, 1, "send_echo объявлен ровно раз в knock.rs");
+                assert_eq!(calls, 0, "send_echo( вызван в knock.rs");
+            }
+            "echo.rs" => {
+                assert_eq!(declared, 0);
+                assert!(calls >= 1, "echo.rs не вызывает send_echo(");
+            }
+            _ => assert_eq!(
+                declared + calls,
+                0,
+                "send_echo( вне knock.rs и echo.rs: {name}"
+            ),
+        }
+    }
+
     // CLOSE_REFUSED: ровно два использования (не объявление и не комментарий), оба в conn.rs:
     // внутри fn refuse и внутри fn close_endpoint (закрытие гнезда при shutdown)
     let mut uses = Vec::new();

@@ -604,3 +604,82 @@ async fn invitee_notes_session_address_as_contact() {
         known.len()
     );
 }
+
+/// Этап 13д: `AutoWith` ставит `extra` первыми, убирает повторы, держит предел 8 адресов; при
+/// пустом собственном списке и непустом `extra` ошибки `NoAddresses` нет.
+#[tokio::test(start_paused = true)]
+async fn invite_auto_with_extra_first_dedup_cap() {
+    let n = Node::start_with(
+        Pre::new(),
+        ConnectConfig::default(),
+        FakeTransport::new(),
+        FakeProbe::new(Some("192.168.1.5")),
+    );
+    // свой частный адрес входит только по выбору; он же в `extra` не удваивается
+    let extra = vec![
+        addr("7.7.7.7:5555"),
+        addr("192.168.1.5:4000"),
+        addr("7.7.7.7:5555"),
+    ];
+    let (_, text) = n
+        .engine
+        .create_invite(
+            300,
+            InviteAddrs::AutoWith {
+                same_network: true,
+                extra,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        token_addrs(&text),
+        vec![addr("7.7.7.7:5555"), addr("192.168.1.5:4000")]
+    );
+    // предел 8: лишние отбрасываются с конца, собственные адреса уходят последними
+    let many: Vec<_> = (1..=10u8)
+        .map(|i| addr(&format!("8.8.8.{i}:6000")))
+        .collect();
+    let (_, text) = n
+        .engine
+        .create_invite(
+            300,
+            InviteAddrs::AutoWith {
+                same_network: true,
+                extra: many.clone(),
+            },
+        )
+        .unwrap();
+    assert_eq!(token_addrs(&text), many[..8].to_vec());
+    // пустой собственный список и непустой `extra`: приглашение создаётся
+    let e = Node::start_with(
+        Pre::new(),
+        ConnectConfig::default(),
+        FakeTransport::new(),
+        FakeProbe::new(None),
+    );
+    let (_, text) = e
+        .engine
+        .create_invite(
+            300,
+            InviteAddrs::AutoWith {
+                same_network: false,
+                extra: vec![addr("7.7.7.7:5555")],
+            },
+        )
+        .unwrap();
+    assert_eq!(token_addrs(&text), vec![addr("7.7.7.7:5555")]);
+    // оба списка пусты: прежняя ошибка и ничего не оставлено
+    assert_eq!(
+        e.engine
+            .create_invite(
+                300,
+                InviteAddrs::AutoWith {
+                    same_network: false,
+                    extra: vec![],
+                }
+            )
+            .map(|_| ()),
+        Err(ConnectError::NoAddresses)
+    );
+    assert_eq!(pending_count(&e), 1, "остаётся только первое приглашение");
+}

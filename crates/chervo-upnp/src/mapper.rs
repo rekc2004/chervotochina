@@ -51,6 +51,19 @@ impl std::fmt::Debug for RouterId {
     }
 }
 
+/// Результат явного поиска роутера: его UDN и адрес в домашней сети. `Debug` без данных.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Identified {
+    pub id: RouterId,
+    pub lan_ip: Ipv4Addr,
+}
+
+impl std::fmt::Debug for Identified {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Identified(..)")
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct AllowedRouter {
     pub id: RouterId,
@@ -324,7 +337,10 @@ impl UpnpMapper {
     }
 
     /// Явное действие пользователя: один поиск и одно описание. Нужен ровно один ответчик IGD.
-    pub fn identify(&self, own_ip: Ipv4Addr) -> Result<RouterId, UpnpError> {
+    /// Кроме UDN отдаёт адрес роутера в домашней сети (хост из проверенного `LOCATION`): он
+    /// нужен только для показа человеку в помощнике (этап 13д, Р10), в `Debug` и тексты ошибок
+    /// не попадает.
+    pub fn identify(&self, own_ip: Ipv4Addr) -> Result<Identified, UpnpError> {
         if !self.own_ip_ok(own_ip) {
             return Err(UpnpError::NoGateway);
         }
@@ -332,7 +348,10 @@ impl UpnpMapper {
         let found = self.find_routers(own_ip, overall)?;
         match found.as_slice() {
             [] => Err(UpnpError::NoGateway),
-            [one] => Ok(RouterId(one.desc.udn.clone())),
+            [one] => Ok(Identified {
+                id: RouterId(one.desc.udn.clone()),
+                lan_ip: *one.resp.target.gw.addr().ip(),
+            }),
             _ => Err(UpnpError::Ambiguous),
         }
     }

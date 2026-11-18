@@ -15,6 +15,7 @@
 
 mod client;
 mod conn;
+mod echo;
 #[cfg(any(test, feature = "fuzzing"))]
 mod fuzz_entry;
 mod knock;
@@ -41,6 +42,7 @@ use tokio::sync::{Semaphore, broadcast, mpsc};
 
 pub use chervo_transport::{DuplicatePairError, TransportEvent};
 pub use conn::{QuinnConn, QuinnRecv, QuinnSend};
+pub use echo::{ECHO_DEADLINE, ECHO_MAX_PATHS, ECHO_RETRY, ECHO_TRIES, EchoError, EchoPathResult};
 /// Этап 17, B6/C04, S1 L6: только для фаззинга (`fuzz/`, вне рабочего пространства) и тестов,
 /// не для продукта: в продуктовой сборке (без свойства `fuzzing`) этих функций нет.
 #[cfg(any(test, feature = "fuzzing"))]

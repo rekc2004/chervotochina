@@ -34,7 +34,7 @@ mod url;
 mod tests;
 
 pub use error::UpnpError;
-pub use mapper::{AllowedRouter, RouterId, UpnpMapper, UpnpSettings};
+pub use mapper::{AllowedRouter, Identified, RouterId, UpnpMapper, UpnpSettings};
 pub use texts::{
     AMBIGUOUS_TEXT, CGNAT_UPNP_TEXT, DOUBLE_NAT_UPNP_TEXT, ENABLE_ON_ROUTER_TEXT,
     NEED_PERMANENT_TEXT, NOT_HOME_TEXT, REFUSED_TEXT, status_text,

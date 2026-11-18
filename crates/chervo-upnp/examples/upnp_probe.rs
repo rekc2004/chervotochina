@@ -33,8 +33,8 @@ fn main() -> ExitCode {
     let mapper = UpnpMapper::new(UpnpSettings::default());
     match cmd {
         "identify" => match mapper.identify(own) {
-            Ok(id) => {
-                println!("{}", id.to_setting());
+            Ok(found) => {
+                println!("{}", found.id.to_setting());
                 ExitCode::SUCCESS
             }
             Err(e) => {
@@ -67,7 +67,7 @@ fn run(mapper: &UpnpMapper, own: std::net::Ipv4Addr, args: &[String], once: bool
             }
         },
         None => match mapper.identify(own) {
-            Ok(id) => id,
+            Ok(found) => found.id,
             Err(e) => {
                 println!("identify: {e:?}");
                 return ExitCode::FAILURE;

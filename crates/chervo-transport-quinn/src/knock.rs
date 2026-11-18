@@ -9,9 +9,9 @@ use std::collections::HashMap;
 use std::fmt;
 use std::future::poll_fn;
 use std::io::{self, IoSliceMut};
-use std::net::{IpAddr, SocketAddr, SocketAddrV6};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV6};
 use std::pin::Pin as StdPin;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -22,6 +22,7 @@ use quinn::udp::{RecvMeta, Transmit};
 use quinn::{AsyncUdpSocket, UdpPoller};
 use tokio::sync::broadcast;
 
+use crate::echo::EchoWait;
 use crate::limits::Counters;
 use crate::{KNOCK_ACCEPT_SPAN, KNOCK_HINT_SPAN, KNOCK_WINDOW_SECS, QuinnConfig, TransportEvent};
 
@@ -468,6 +469,10 @@ pub(crate) struct KnockState {
     replay: Mutex<Replay>,
     skew_events: Mutex<HashMap<PairId, Instant>>,
     tx: Mutex<Arc<dyn AsyncUdpSocket>>,
+    /// Ожидание ответов эхо-пробы (этап 13д); `None`, когда пробы нет.
+    pub(crate) echo: Mutex<Option<EchoWait>>,
+    /// Проба идёт: гнездо проверяет 48-байтные сегменты на ответы сервера до допуска.
+    pub(crate) echo_active: AtomicBool,
 }
 
 impl KnockState {
@@ -494,6 +499,8 @@ impl KnockState {
             replay: Mutex::new(Replay::new(cfg.replay_capacity)),
             skew_events: Mutex::new(HashMap::new()),
             tx: Mutex::new(raw),
+            echo: Mutex::new(None),
+            echo_active: AtomicBool::new(false),
         })
     }
 
@@ -595,28 +602,46 @@ impl KnockState {
 
     /// Отправка стука; при `WouldBlock` ожидание готовности гнезда.
     pub(crate) async fn send(&self, dest: SocketAddr, knock: &[u8; KNOCK_LEN]) {
+        let _ = self.send_packet(dest, knock, None).await;
+    }
+
+    /// Отправка запроса эхо-пробы (этап 13д) с основного гнезда. `src`: адрес источника на один
+    /// пакет (`Transmit::src_ip`), `None`: выбор системы. `true`: гнездо приняло датаграмму.
+    /// Вызывается только из `echo.rs`.
+    pub(crate) async fn send_echo(
+        &self,
+        dest: SocketAddr,
+        request: &[u8],
+        src: Option<Ipv4Addr>,
+    ) -> bool {
+        self.send_packet(dest, request, src.map(IpAddr::V4)).await
+    }
+
+    /// Единственная отправка датаграммы в гнездо (`try_send(` только здесь).
+    async fn send_packet(&self, dest: SocketAddr, data: &[u8], src_ip: Option<IpAddr>) -> bool {
         let sock = lock(&self.tx).clone();
         let dest = family_for(&sock, dest);
         for _ in 0..SEND_TRIES {
             let t = Transmit {
                 destination: dest,
                 ecn: None,
-                contents: knock,
+                contents: data,
                 segment_size: None,
-                src_ip: None,
+                src_ip,
             };
             match sock.try_send(&t) {
-                Ok(()) => return,
+                Ok(()) => return true,
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                     let mut poller = sock.clone().create_io_poller();
                     let ready = poll_fn(|cx| poller.as_mut().poll_writable(cx)).await;
                     if ready.is_err() {
-                        return;
+                        return false;
                     }
                 }
-                Err(_) => return,
+                Err(_) => return false,
             }
         }
+        false
     }
 
     pub(crate) fn set_tx(&self, raw: Arc<dyn AsyncUdpSocket>) {
@@ -732,22 +757,24 @@ impl KnockState {
     /// Вырезает из датаграммы (с сегментами GRO) опознанные стуки, остальное сдвигает к началу.
     /// Возвращает новую длину.
     fn strip_knocks(&self, addr: SocketAddr, buf: &mut [u8], len: usize, stride: usize) -> usize {
-        let len = len.min(buf.len());
-        let stride = stride.max(1);
-        let (mut out, mut pos) = (0usize, 0usize);
-        while pos < len {
-            let end = pos.saturating_add(stride).min(len);
-            let is_knock = end - pos == KNOCK_LEN
-                && buf.get(pos..end).is_some_and(|s| self.try_knock(addr, s));
-            if !is_knock {
-                if out != pos {
-                    buf.copy_within(pos..end, out);
-                }
-                out += end - pos;
-            }
-            pos = end;
-        }
-        out
+        cut_segments(buf, len, stride, |s| {
+            s.len() == KNOCK_LEN && self.try_knock(addr, s)
+        })
+    }
+
+    /// Вырезает сегменты, принятые как ответы текущей эхо-пробы (этап 13д), остальное сдвигает
+    /// к началу. Допуск адреса сервера не открывается: ответ только записывается в пробу.
+    fn strip_echo(&self, addr: SocketAddr, buf: &mut [u8], len: usize, stride: usize) -> usize {
+        cut_segments(buf, len, stride, |s| {
+            lock(&self.echo)
+                .as_mut()
+                .is_some_and(|wait| wait.offer(addr, s))
+        })
+    }
+
+    /// Гнездо обязано пропускать приём через `filter_batch`: стук обязателен или идёт эхо-проба.
+    pub(crate) fn filtering(&self) -> bool {
+        self.required || self.echo_active.load(Ordering::Acquire)
     }
 
     /// Фильтр партии: оставляет пропущенные записи в начале срезов, возвращает их число.
@@ -760,48 +787,31 @@ impl KnockState {
         let n = n.min(bufs.len()).min(meta.len());
         let mut kept = 0usize;
         for i in 0..n {
-            let Some(m) = meta.get(i).copied() else {
+            let Some(mut m) = meta.get(i).copied() else {
                 continue;
             };
             let addr = canon(m.addr);
-            let now = Instant::now();
-            let gate = {
-                let mut adm = lock(&self.admit);
-                if now.saturating_duration_since(adm.last_purge) >= Duration::from_secs(1) {
-                    adm.purge(now);
-                }
-                adm.classify(addr, now)
-            };
             let stride = if m.stride == 0 { m.len } else { m.stride };
-            let keep = match gate {
-                // Open и Pass: стук тоже распознаётся (досланные стуки, повтор после `rebind`
-                // попадают в кэш повторов), опознанные сегменты вырезаются, остальное проходит.
-                Gate::Open | Gate::Pass => {
-                    let new_len = bufs
-                        .get_mut(i)
-                        .map_or(m.len, |b| self.strip_knocks(addr, b, m.len, stride));
-                    if new_len != m.len
-                        && let Some(mm) = meta.get_mut(i)
-                    {
+            // Ответы эхо-пробы забираются до классификации допуска: они не открывают допуск и не
+            // считаются отброшенными недопущенными пакетами.
+            if self.echo_active.load(Ordering::Acquire) {
+                let new_len = bufs
+                    .get_mut(i)
+                    .map_or(m.len, |b| self.strip_echo(addr, b, m.len, stride));
+                if new_len != m.len {
+                    m.len = new_len;
+                    if let Some(mm) = meta.get_mut(i) {
                         mm.len = new_len;
                     }
-                    new_len > 0
                 }
-                Gate::Closed => {
-                    let data = bufs.get(i).and_then(|b| b.get(..m.len));
-                    let mut knocked = false;
-                    if let Some(d) = data {
-                        for seg in d.chunks(stride.max(1)) {
-                            if seg.len() == KNOCK_LEN && self.try_knock(addr, seg) {
-                                knocked = true;
-                            }
-                        }
-                    }
-                    if !knocked {
-                        Counters::bump(&self.counters.dropped_unadmitted);
-                    }
-                    false
+                if new_len == 0 {
+                    continue;
                 }
+            }
+            let keep = if self.required {
+                self.gate_keep(i, addr, stride, m, bufs, meta)
+            } else {
+                m.len > 0
             };
             if keep {
                 if kept != i {
@@ -813,6 +823,81 @@ impl KnockState {
         }
         kept
     }
+
+    /// Допуск по таблице и обработка стуков для записи `i` (стук обязателен).
+    fn gate_keep(
+        &self,
+        i: usize,
+        addr: SocketAddr,
+        stride: usize,
+        m: RecvMeta,
+        bufs: &mut [IoSliceMut<'_>],
+        meta: &mut [RecvMeta],
+    ) -> bool {
+        let now = Instant::now();
+        let gate = {
+            let mut adm = lock(&self.admit);
+            if now.saturating_duration_since(adm.last_purge) >= Duration::from_secs(1) {
+                adm.purge(now);
+            }
+            adm.classify(addr, now)
+        };
+        match gate {
+            // Open и Pass: стук тоже распознаётся (досланные стуки, повтор после `rebind`
+            // попадают в кэш повторов), опознанные сегменты вырезаются, остальное проходит.
+            Gate::Open | Gate::Pass => {
+                let new_len = bufs
+                    .get_mut(i)
+                    .map_or(m.len, |b| self.strip_knocks(addr, b, m.len, stride));
+                if new_len != m.len
+                    && let Some(mm) = meta.get_mut(i)
+                {
+                    mm.len = new_len;
+                }
+                new_len > 0
+            }
+            Gate::Closed => {
+                let data = bufs.get(i).and_then(|b| b.get(..m.len));
+                let mut knocked = false;
+                if let Some(d) = data {
+                    for seg in d.chunks(stride.max(1)) {
+                        if seg.len() == KNOCK_LEN && self.try_knock(addr, seg) {
+                            knocked = true;
+                        }
+                    }
+                }
+                if !knocked {
+                    Counters::bump(&self.counters.dropped_unadmitted);
+                }
+                false
+            }
+        }
+    }
+}
+
+/// Вырезает из буфера длины `len` сегменты по `stride` байт, для которых `cut` вернул `true`,
+/// остальное сдвигает к началу. Возвращает новую длину.
+fn cut_segments(
+    buf: &mut [u8],
+    len: usize,
+    stride: usize,
+    mut cut: impl FnMut(&[u8]) -> bool,
+) -> usize {
+    let len = len.min(buf.len());
+    let stride = stride.max(1);
+    let (mut out, mut pos) = (0usize, 0usize);
+    while pos < len {
+        let end = pos.saturating_add(stride).min(len);
+        let is_cut = buf.get(pos..end).is_some_and(&mut cut);
+        if !is_cut {
+            if out != pos {
+                buf.copy_within(pos..end, out);
+            }
+            out += end - pos;
+        }
+        pos = end;
+    }
+    out
 }
 
 /// Адрес назначения в семействе гнезда (IPv4 на двойном гнезде как v4-mapped).
@@ -862,7 +947,7 @@ impl AsyncUdpSocket for KnockSocket {
         bufs: &mut [IoSliceMut<'_>],
         meta: &mut [RecvMeta],
     ) -> Poll<io::Result<usize>> {
-        if !self.state.required {
+        if !self.state.filtering() {
             return self.inner.poll_recv(cx, bufs, meta);
         }
         for _ in 0..MAX_FILTER_POLLS {

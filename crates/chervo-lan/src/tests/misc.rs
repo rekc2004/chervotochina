@@ -82,3 +82,16 @@ fn debug_redacted() {
     // политика источника и ошибки не содержат данных
     assert!(format!("{:?}", SrcPolicy::PRODUCT).contains("allow_loopback"));
 }
+
+/// `private_sources` даёт тот же набор, что и `sweep_report` (без счётчика обращений).
+#[test]
+fn private_sources_matches_sweep() {
+    for default in [
+        std::net::Ipv4Addr::new(192, 168, 1, 10),
+        std::net::Ipv4Addr::UNSPECIFIED,
+        std::net::Ipv4Addr::new(8, 8, 8, 8),
+    ] {
+        let (set, _) = crate::sweep_report(default);
+        assert_eq!(crate::private_sources(default), set, "default = {default}");
+    }
+}

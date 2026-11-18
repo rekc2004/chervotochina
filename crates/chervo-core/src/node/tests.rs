@@ -103,6 +103,7 @@ fn full_sample() -> Settings {
     s.update_checked_at = 1_700_000_500;
     s.ntp_servers = vec!["ntp.example.org".to_owned(), "10.0.0.1".to_owned()];
     s.lan_mode = chervo_addr::LanMode::Announce;
+    s.echo_server = Some("203.0.113.5:45900".to_owned());
     s
 }
 

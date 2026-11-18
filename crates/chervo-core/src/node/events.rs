@@ -50,6 +50,11 @@ pub enum NodeEvent {
         diagnosis: DiagnosisView,
     },
     OwnAddressChanged,
+    /// Ваш адрес в интернете, вписанный в ждущее приглашение, изменился (или сервер три раза
+    /// подряд не ответил): приглашение может не сработать (этап 13д).
+    InviteAddressChanged {
+        invite: InviteRef,
+    },
     MappingChanged {
         status: MapStatus,
     },
@@ -89,6 +94,7 @@ impl NodeEvent {
             Self::ClockSkewSuspected { .. } => "ClockSkewSuspected",
             Self::Unreachable { .. } => "Unreachable",
             Self::OwnAddressChanged => "OwnAddressChanged",
+            Self::InviteAddressChanged { .. } => "InviteAddressChanged",
             Self::MappingChanged { .. } => "MappingChanged",
             Self::LanStatusChanged { .. } => "LanStatusChanged",
             Self::OfferIncoming { .. } => "OfferIncoming",

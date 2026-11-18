@@ -224,6 +224,21 @@ fn name_ok(name: &str) -> bool {
     !name.is_empty() && name.len() <= MAX_NAME_BYTES && !name.chars().any(char::is_control)
 }
 
+/// `extra` первыми, затем собственные адреса; повторы (по IP и порту) убираются, всего не больше
+/// `MAX_INVITE_ADDRS` (этап 13д, `InviteAddrs::AutoWith`).
+fn merge_extra_first(extra: Vec<SocketAddr>, own: Vec<SocketAddr>) -> Vec<SocketAddr> {
+    let mut out: Vec<SocketAddr> = Vec::new();
+    for a in extra.into_iter().chain(own) {
+        if out.len() >= chervo_token::MAX_INVITE_ADDRS {
+            break;
+        }
+        if !out.contains(&a) {
+            out.push(a);
+        }
+    }
+    out
+}
+
 impl<T, S> Inner<T, S>
 where
     T: ManagedTransport,
@@ -331,6 +346,20 @@ where
 
     // ---------------------------------------------------------------- выдача (A)
 
+    /// Собственные адреса для приглашения (как у `InviteAddrs::Auto`).
+    fn own_invite_addrs(&self, same_network: bool, unix: u64) -> Vec<SocketAddr> {
+        let st = self.lock();
+        st.own
+            .publishable(
+                PublishCtx {
+                    include_lan: same_network,
+                    path_source: None,
+                },
+                unix,
+            )
+            .socket_addrs()
+    }
+
     pub(crate) fn create_invite(
         &self,
         ttl_secs: u64,
@@ -345,18 +374,18 @@ where
         let unix = self.clock.now_unix();
         let addrs: Vec<SocketAddr> = match addrs {
             InviteAddrs::Auto { same_network } => {
-                let v = {
-                    let st = self.lock();
-                    st.own
-                        .publishable(
-                            PublishCtx {
-                                include_lan: same_network,
-                                path_source: None,
-                            },
-                            unix,
-                        )
-                        .socket_addrs()
-                };
+                let v = self.own_invite_addrs(same_network, unix);
+                if v.is_empty() {
+                    return Err(ConnectError::NoAddresses);
+                }
+                v
+            }
+            InviteAddrs::AutoWith {
+                same_network,
+                extra,
+            } => {
+                let own = self.own_invite_addrs(same_network, unix);
+                let v = merge_extra_first(extra, own);
                 if v.is_empty() {
                     return Err(ConnectError::NoAddresses);
                 }

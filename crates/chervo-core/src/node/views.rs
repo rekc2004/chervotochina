@@ -3,6 +3,7 @@
 //! только имя типа (этап 17, B3; инвариант 4 спецификации 18а).
 
 use std::fmt;
+use std::net::Ipv4Addr;
 use std::path::Path;
 
 use chervo_connect::{NoDirectPath, PathKind};
@@ -294,8 +295,27 @@ pub struct DiagnosisView {
 }
 
 /// Найденный роутер (непрозрачный). Появляется только после нажатия кнопки «Найти роутер».
-#[derive(Clone, PartialEq, Eq)]
-pub struct RouterCandidate(pub(crate) RouterId);
+/// Второе поле: адрес роутера в домашней сети из проверенного `LOCATION` (этап 13д); у записей
+/// списка разрешённых роутеров его нет (там `0.0.0.0`). Равенство только по роутеру.
+#[derive(Clone)]
+pub struct RouterCandidate(pub(crate) RouterId, pub(crate) Ipv4Addr);
+
+impl PartialEq for RouterCandidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl Eq for RouterCandidate {}
+
+impl RouterCandidate {
+    /// Адрес роутера в домашней сети (хост из проверенного `LOCATION`): только для показа
+    /// человеку в помощнике «Разрешить входящие подключения». `0.0.0.0`, если роутер взят из
+    /// списка разрешённых и не искался в этом запуске.
+    pub fn lan_ip(&self) -> Ipv4Addr {
+        self.1
+    }
+}
 
 impl fmt::Debug for RouterCandidate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -368,6 +388,8 @@ pub struct SettingsView {
     pub update_consent: crate::update::UpdateConsent,
     /// Режим поиска друзей в локальной сети (по умолчанию «только слушать»).
     pub lan_mode: chervo_addr::LanMode,
+    /// Сервер эхо `хост:порт`, если указан (этап 13д). Только для показа в строке настроек.
+    pub echo_server: Option<String>,
     /// Порт, папка приёма, запас места или ручной проброс изменены: вступят в силу после
     /// перезапуска программы.
     pub restart_needed: bool,

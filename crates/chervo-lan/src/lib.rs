@@ -41,6 +41,19 @@ pub use texts::{
     STATUS_PORT_BUSY_TEXT, VPN_HINT_TEXT, mode_text, status_text,
 };
 
+/// Частные адреса этого компьютера по опросу маршрутов системы (без небезопасного кода и системного
+/// перечисления интерфейсов): `default` (если частный), затем различные частные ответы опроса,
+/// не больше `MAX_IFACES`. Пакетов не отправляет, сокетов приёма и отправки не открывает
+/// (`UDP connect` без отправки). Логика та же, что у `sweep_report`, но без счётчика обращений.
+pub fn private_sources(default: std::net::Ipv4Addr) -> Vec<std::net::Ipv4Addr> {
+    ifaces::select(
+        default,
+        &mut |a| chervo_addr::route_source_for(std::net::SocketAddr::V4(a)),
+        wire::SrcPolicy::PRODUCT,
+        &|| false,
+    )
+}
+
 /// Только для проверок вручную (`lan_probe ifaces`): набор интерфейсов для адреса по умолчанию
 /// `default` по опросу маршрутов системы и число обращений к опросу. Пакетов не отправляет,
 /// сокетов приёма и отправки не открывает.

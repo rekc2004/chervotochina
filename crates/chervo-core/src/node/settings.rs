@@ -2,7 +2,8 @@
 //! по одному значению в строке, без serde. Файл читает только тот же пользователь, но разбор
 //! всё равно строгий: любое отклонение это `SettingsCorrupt`, файл молча не переписывается.
 //!
-//! В файле нет имён друзей, адресов и ключей. Запись атомарная (временный файл, fsync,
+//! В файле нет имён друзей, адресов друзей и ключей; единственный адрес это сервер эхо
+//! (`echo=`, этап 13д, T22), который человек вписал сам. Запись атомарная (временный файл, fsync,
 //! переименование), права 0600 там, где они есть.
 
 use std::fs::{self, OpenOptions};
@@ -58,6 +59,10 @@ pub(crate) struct Settings {
     /// Поиск друзей в локальной сети (`lan=off|listen|announce`). По умолчанию «только слушать»
     /// (решение владельца В1): ничего не рассылается, пока человек сам не включил «сообщать».
     pub(crate) lan_mode: LanMode,
+    /// Сервер эхо `хост:порт` (`echo=`, этап 13д): через него приглашение узнаёт ваш адрес в
+    /// интернете. `None`: сервера нет, к нему ни одного пакета. Строка проверена
+    /// `parse_echo_server`.
+    pub(crate) echo_server: Option<String>,
 }
 
 impl std::fmt::Debug for Settings {
@@ -84,6 +89,7 @@ impl Settings {
             update_checked_at: 0,
             ntp_servers: Vec::new(),
             lan_mode: DEFAULT_LAN_MODE,
+            echo_server: None,
         }
     }
 }
@@ -195,6 +201,41 @@ pub(crate) fn valid_ntp_name(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
 }
 
+/// Сервер эхо в настройках: не длиннее 259 байт.
+pub(crate) const MAX_ECHO_SERVER: usize = 259;
+
+/// Хост сервера эхо: литерал IPv4 или имя.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EchoHost {
+    Ip(std::net::Ipv4Addr),
+    Name(String),
+}
+
+/// Строгий разбор `хост:порт`: литерал IPv4 или имя по правилу имён серверов времени (ASCII
+/// буквы, цифры, точка, дефис; без пустых меток), порт 1..=65535 в каноническом виде. IPv6,
+/// `://`, пробелы, учётные данные, длина больше 259 отвергаются.
+pub(crate) fn parse_echo_server(s: &str) -> Option<(EchoHost, u16)> {
+    if s.is_empty() || s.len() > MAX_ECHO_SERVER || !s.is_ascii() {
+        return None;
+    }
+    let (host, port) = s.rsplit_once(':')?;
+    if host.contains(':') || host.contains("//") || host.is_empty() {
+        return None;
+    }
+    let port = parse_port(port).ok()?;
+    if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
+        return Some((EchoHost::Ip(ip), port));
+    }
+    // цифры и точки без верного IPv4 это не имя (`1.2.3`, `999.1.1.1`)
+    if host.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+        return None;
+    }
+    let labels_ok = host
+        .split('.')
+        .all(|l| !l.is_empty() && !l.starts_with('-') && !l.ends_with('-'));
+    (valid_ntp_name(host) && labels_ok).then(|| (EchoHost::Name(host.to_owned()), port))
+}
+
 fn parse_router(s: &str) -> Result<AllowedRouter, NodeError> {
     let (udn, flag) = s.rsplit_once(';').ok_or(NodeError::SettingsCorrupt)?;
     let permanent_ok = parse_bool(flag)?;
@@ -233,6 +274,7 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Settings, NodeError> {
     let mut update_check = None;
     let mut checked_at = None;
     let mut lan = None;
+    let mut echo = None;
     let mut extra_roots: Vec<PathBuf> = Vec::new();
     let mut routers: Vec<AllowedRouter> = Vec::new();
     let mut ntp: Vec<String> = Vec::new();
@@ -275,6 +317,12 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Settings, NodeError> {
             "update_check" => set_once(&mut update_check, parse_bool(value)?)?,
             "update_checked_at" => set_once(&mut checked_at, parse_u64(value)?)?,
             "lan" => set_once(&mut lan, parse_lan_mode(value)?)?,
+            "echo" => {
+                if parse_echo_server(value).is_none() {
+                    return bad();
+                }
+                set_once(&mut echo, value.to_owned())?;
+            }
             "extra_root" => {
                 let p = parse_path(value)?;
                 // повтор той же папки не копится
@@ -323,6 +371,7 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Settings, NodeError> {
         update_checked_at: checked_at.unwrap_or(0),
         ntp_servers: ntp,
         lan_mode: lan.unwrap_or(DEFAULT_LAN_MODE),
+        echo_server: echo,
     })
 }
 
@@ -376,6 +425,9 @@ pub(crate) fn serialize(s: &Settings) -> Result<String, NodeError> {
     }
     line("update_checked_at", &s.update_checked_at.to_string());
     line("lan", lan_mode_text(s.lan_mode));
+    if let Some(e) = &s.echo_server {
+        line("echo", e);
+    }
     // то, что записали, должно читаться обратно тем же разбором
     if parse(out.as_bytes()).as_ref() != Ok(s) {
         return bad();

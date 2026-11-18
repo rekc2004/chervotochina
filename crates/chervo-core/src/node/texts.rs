@@ -9,7 +9,7 @@ use chervo_receive::RootError;
 use chervo_token::{InviteError, TokenError};
 use chervo_transfer::{FailReason, TransferError};
 
-use super::error::NodeError;
+use super::error::{EchoFailure, NodeError};
 use super::views::{NodeWarning, TransferResult};
 
 pub use chervo_connect::{
@@ -61,8 +61,14 @@ pub const BAD_TOKEN_TEXT: &str = "Этот текст повреждён или 
 pub const NOT_FROM_US_TEXT: &str = "Это не похоже на текст из Червоточины. Попросите друга скопировать его целиком кнопкой «Копировать».";
 /// Приглашение друга уже недействительно (срок вышел).
 pub const INVITE_EXPIRED_TEXT: &str = "Срок этого приглашения истёк. Попросите друга создать новое: «Добавить друга», затем «Создать приглашение».";
-pub const NO_ADDRESS_TEXT: &str =
-    "Нет адреса, который можно сообщить другу. Проверьте сеть или укажите адрес с пробросом порта.";
+/// Первое приглашение у домашнего пользователя (В4): говорит, что делать (этап 13д, Р8).
+pub const NO_ADDRESS_TEXT: &str = "Приглашение не создано: программа пока не знает адреса, по которому друг сможет к вам подключиться. Что сделать: если друг в той же сети, что и вы, отметьте «мы в одной сети» и снова нажмите «Создать приглашение»; если в другой — нажмите «Разрешить входящие подключения» или впишите адрес своего сервера (вкладка «Настройки», раздел «Связь через интернет»); можно и наоборот: пусть приглашение создаст друг.";
+pub const ECHO_NOT_CONFIGURED_TEXT: &str =
+    "Адрес сервера не указан: впишите его на вкладке «Настройки», раздел «Связь через интернет».";
+pub const ECHO_BAD_ADDRESS_TEXT: &str = "Адрес сервера не распознан. Впишите его так, как дал владелец сервера, например 203.0.113.5:45900 или server.example:45900.";
+pub const ECHO_RESOLVE_TEXT: &str = "Не удалось найти сервер по этому имени. Проверьте строку «Адрес вашего сервера» на вкладке «Настройки», раздел «Связь через интернет».";
+pub const ECHO_NO_IPV4_TEXT: &str = "У этого сервера нет подходящего адреса. Попросите у владельца сервера адрес из цифр, например 203.0.113.5:45900.";
+pub const ECHO_BUSY_TEXT: &str = "Программа уже узнаёт ваш адрес, подождите несколько секунд.";
 pub const UNKNOWN_ITEM_TEXT: &str = "Такого друга, приглашения или передачи нет.";
 pub const NOT_ACTIVE_TEXT: &str = "Друг сейчас не активен: он заблокирован, удалён или отозван.";
 pub const CONNECT_TEXT: &str = "Не получилось. Проверьте интернет и повторите.";
@@ -149,6 +155,17 @@ fn transfer_text(e: TransferError) -> &'static str {
     }
 }
 
+fn echo_text(e: EchoFailure) -> &'static str {
+    match e {
+        EchoFailure::NotConfigured => ECHO_NOT_CONFIGURED_TEXT,
+        EchoFailure::BadAddress => ECHO_BAD_ADDRESS_TEXT,
+        EchoFailure::Resolve => ECHO_RESOLVE_TEXT,
+        EchoFailure::NoIpv4 => ECHO_NO_IPV4_TEXT,
+        EchoFailure::Busy => ECHO_BUSY_TEXT,
+        EchoFailure::Internal => CONNECT_TEXT,
+    }
+}
+
 impl NodeError {
     /// Русский текст для пользователя (фиксированный, без путей, имён и адресов).
     pub fn user_text(&self) -> &'static str {
@@ -180,6 +197,7 @@ impl NodeError {
             Self::NoSpace => NO_SPACE_TEXT,
             Self::InvalidValue => INVALID_VALUE_TEXT,
             Self::LimitReached => LIMIT_REACHED_TEXT,
+            Self::Echo(e) => echo_text(e),
         }
     }
 }
