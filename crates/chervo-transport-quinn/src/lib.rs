@@ -50,7 +50,7 @@ pub use echo::{ECHO_DEADLINE, ECHO_MAX_PATHS, ECHO_RETRY, ECHO_TRIES, EchoError,
 pub use fuzz_entry::{fuzz_knock_admits, fuzz_knock_ready};
 pub use knock::window_at;
 
-use knock::{KnockSocket, KnockState};
+use knock::{DirectTx, KnockSocket, KnockState};
 use limits::{Counters, IpLimiter, KkGate, PreauthKeys, PreauthPairs};
 use registry::Registry;
 
@@ -394,6 +394,8 @@ impl QuinnTransport {
         let base = tls::base_server_config(&cfg).map_err(|_| TransportError::Io)?;
         let counters = Arc::new(Counters::default());
         let (events, _) = broadcast::channel(64);
+        // Дубликат для эхо-проб: без него пробы честно сообщают «отправка не удалась».
+        let direct = DirectTx::new(&sock).ok().map(Arc::new);
         let raw = quinn::TokioRuntime
             .wrap_udp_socket(sock)
             .map_err(|_| TransportError::Io)?;
@@ -404,6 +406,9 @@ impl QuinnTransport {
             events.clone(),
             raw.clone(),
         );
+        if let Some(d) = direct {
+            knock.set_direct(d);
+        }
         let endpoint = quinn::Endpoint::new_with_abstract_socket(
             quinn::EndpointConfig::default(),
             Some(base),
@@ -509,6 +514,7 @@ impl QuinnTransport {
 
     pub fn rebind(&self, sock: std::net::UdpSocket) -> Result<(), TransportError> {
         sock.set_nonblocking(true).map_err(|_| TransportError::Io)?;
+        let direct = DirectTx::new(&sock).ok().map(Arc::new);
         let raw = quinn::TokioRuntime
             .wrap_udp_socket(sock)
             .map_err(|_| TransportError::Io)?;
@@ -518,6 +524,10 @@ impl QuinnTransport {
             .rebind_abstract(wrapped)
             .map_err(|_| TransportError::Io)?;
         self.inner.knock.set_tx(raw);
+        match direct {
+            Some(d) => self.inner.knock.set_direct(d),
+            None => self.inner.knock.clear_direct(),
+        }
         client::reknock_live(&self.inner);
         Ok(())
     }

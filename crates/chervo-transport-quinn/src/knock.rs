@@ -469,6 +469,8 @@ pub(crate) struct KnockState {
     replay: Mutex<Replay>,
     skew_events: Mutex<HashMap<PairId, Instant>>,
     tx: Mutex<Arc<dyn AsyncUdpSocket>>,
+    /// Прямая отправка запросов эхо-пробы (ошибки ОС не проглатываются); `None`: не задана.
+    direct: Mutex<Option<Arc<DirectTx>>>,
     /// Ожидание ответов эхо-пробы (этап 13д); `None`, когда пробы нет.
     pub(crate) echo: Mutex<Option<EchoWait>>,
     /// Проба идёт: гнездо проверяет 48-байтные сегменты на ответы сервера до допуска.
@@ -499,6 +501,7 @@ impl KnockState {
             replay: Mutex::new(Replay::new(cfg.replay_capacity)),
             skew_events: Mutex::new(HashMap::new()),
             tx: Mutex::new(raw),
+            direct: Mutex::new(None),
             echo: Mutex::new(None),
             echo_active: AtomicBool::new(false),
         })
@@ -602,11 +605,12 @@ impl KnockState {
 
     /// Отправка стука; при `WouldBlock` ожидание готовности гнезда.
     pub(crate) async fn send(&self, dest: SocketAddr, knock: &[u8; KNOCK_LEN]) {
-        let _ = self.send_packet(dest, knock, None).await;
+        let _ = self.send_packet(dest, knock, None, false).await;
     }
 
     /// Отправка запроса эхо-пробы (этап 13д) с основного гнезда. `src`: адрес источника на один
-    /// пакет (`Transmit::src_ip`), `None`: выбор системы. `true`: гнездо приняло датаграмму.
+    /// пакет (`Transmit::src_ip`), `None`: выбор системы. `true`: ОС приняла датаграмму; любая
+    /// ошибка отправки (в том числе из-за подставленного источника) даёт `false`.
     /// Вызывается только из `echo.rs`.
     pub(crate) async fn send_echo(
         &self,
@@ -614,12 +618,30 @@ impl KnockState {
         request: &[u8],
         src: Option<Ipv4Addr>,
     ) -> bool {
-        self.send_packet(dest, request, src.map(IpAddr::V4)).await
+        self.send_packet(dest, request, src.map(IpAddr::V4), true)
+            .await
     }
 
-    /// Единственная отправка датаграммы в гнездо (`try_send(` только здесь).
-    async fn send_packet(&self, dest: SocketAddr, data: &[u8], src_ip: Option<IpAddr>) -> bool {
+    /// Единственная отправка датаграммы в гнездо (`try_send(` только в этом файле).
+    /// `strict`: через `DirectTx`, то есть тем же гнездом, но без проглатывания ошибок ОС
+    /// (`AsyncUdpSocket::try_send` в quinn их пишет в журнал и сообщает «отправлено»); без
+    /// `DirectTx` отправка не удалась. Обычный стук идёт через гнездо quinn.
+    async fn send_packet(
+        &self,
+        dest: SocketAddr,
+        data: &[u8],
+        src_ip: Option<IpAddr>,
+        strict: bool,
+    ) -> bool {
         let sock = lock(&self.tx).clone();
+        let direct = if strict {
+            match lock(&self.direct).clone() {
+                Some(d) => Some(d),
+                None => return false,
+            }
+        } else {
+            None
+        };
         let dest = family_for(&sock, dest);
         for _ in 0..SEND_TRIES {
             let t = Transmit {
@@ -629,7 +651,11 @@ impl KnockState {
                 segment_size: None,
                 src_ip,
             };
-            match sock.try_send(&t) {
+            let sent = match &direct {
+                Some(d) => d.try_send(&t),
+                None => sock.try_send(&t),
+            };
+            match sent {
                 Ok(()) => return true,
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                     let mut poller = sock.clone().create_io_poller();
@@ -646,6 +672,16 @@ impl KnockState {
 
     pub(crate) fn set_tx(&self, raw: Arc<dyn AsyncUdpSocket>) {
         *lock(&self.tx) = raw;
+    }
+
+    /// Задать прямую отправку для того же гнезда (вместе с `set_tx`, при создании и `rebind`).
+    pub(crate) fn set_direct(&self, direct: Arc<DirectTx>) {
+        *lock(&self.direct) = Some(direct);
+    }
+
+    /// Нет прямой отправки (дубликат гнезда не получился): пробы дают «отправка не удалась».
+    pub(crate) fn clear_direct(&self) {
+        *lock(&self.direct) = None;
     }
 
     // --- вызываемый ---
@@ -898,6 +934,29 @@ fn cut_segments(
         pos = end;
     }
     out
+}
+
+/// Дубликат дескриптора основного гнезда (`UdpSocket::try_clone`: то же гнездо ОС, те же
+/// привязка и порт) и `UdpSocketState` quinn-udp для отправки без проглатывания ошибок.
+/// Нужен запросам эхо-пробы с подставленным источником (Windows: ошибка `WSASendMsg`, Linux:
+/// `sendmsg`): `AsyncUdpSocket::try_send` гнезда quinn возвращает `Ok` при любой ошибке, кроме
+/// `WouldBlock`, и путь получил бы ложное «отправлено». Новых опций на гнезде не задаёт:
+/// `UdpSocketState::new` повторяет те же опции, что уже выставил quinn.
+pub(crate) struct DirectTx {
+    sock: std::net::UdpSocket,
+    state: quinn::udp::UdpSocketState,
+}
+
+impl DirectTx {
+    pub(crate) fn new(sock: &std::net::UdpSocket) -> io::Result<Self> {
+        let sock = sock.try_clone()?;
+        let state = quinn::udp::UdpSocketState::new((&sock).into())?;
+        Ok(Self { sock, state })
+    }
+
+    fn try_send(&self, t: &Transmit) -> io::Result<()> {
+        self.state.try_send((&self.sock).into(), t)
+    }
 }
 
 /// Адрес назначения в семействе гнезда (IPv4 на двойном гнезде как v4-mapped).

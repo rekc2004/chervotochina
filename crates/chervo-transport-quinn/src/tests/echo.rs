@@ -160,7 +160,9 @@ async fn echo_loopback_default_path() {
 }
 
 /// Адрес источника на один пакет: сервер видит 127.0.0.2, а не 127.0.0.1. Гнездо на 0.0.0.0, как
-/// в продукте. На Windows и Linux это IN_PKTINFO, на macOS нужны алиасы lo0 (есть в CI).
+/// в продукте. На Windows и Linux это IN_PKTINFO. На macOS источник не применяется (решение
+/// владельца), там действует `echo_macos_source_ignored`.
+#[cfg(not(target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn echo_loopback_src_ip() {
     let t =
@@ -172,6 +174,12 @@ async fn echo_loopback_src_ip() {
         .await
         .unwrap();
     assert_eq!(r.len(), 2);
+    let seen: Vec<SocketAddr> = server.requests().iter().map(|(s, _)| *s).collect();
+    assert!(
+        r.iter()
+            .all(|p| matches!(p, EchoPathResult::Observed { .. })),
+        "пути: {r:?}; сервер видел запросы от: {seen:?}"
+    );
     let (default_path, via_other) = (observed(&r[0]).0, observed(&r[1]).0);
     assert_eq!(*default_path.ip(), lo4());
     assert_eq!(*via_other.ip(), other, "адрес источника не применился");
@@ -180,6 +188,61 @@ async fn echo_loopback_src_ip() {
     let mut ips: Vec<_> = server.requests().iter().map(|(s, _)| s.ip()).collect();
     ips.sort();
     assert_eq!(ips, [lo4(), other].map(std::net::IpAddr::V4));
+}
+
+/// macOS: quinn-udp передаёт источник через `IP_RECVDSTADDR`, а macOS при отправке это игнорирует
+/// (CI: сервер видел 127.0.0.1). Решение владельца: принято, обход VPN на macOS не работает.
+/// Тест фиксирует фактическое поведение: кандидат даёт тот же наблюдаемый IP, что путь по
+/// умолчанию, или честное `SendFailed`; адрес источника не применяется. Вердикт ядра на таком
+/// ответе `MaybeVpn` (`echo_verdict_table`: «не сильный хост, все кандидаты дали тот же IP»), а не
+/// `Bypassed`. На других системах источник обязан примениться (`echo_loopback_src_ip`).
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn echo_macos_source_ignored() {
+    let t =
+        QuinnTransport::bind("0.0.0.0:0".parse().unwrap(), cfg(false), Arc::new(AllowAll)).unwrap();
+    let other = Ipv4Addr::new(127, 0, 0, 2);
+    let server = Fake::start(lo4(), honest);
+    let r = t
+        .echo_probe(server.main_addr, &[None, Some(other)])
+        .await
+        .unwrap();
+    let seen: Vec<SocketAddr> = server.requests().iter().map(|(s, _)| *s).collect();
+    let default_path = observed(&r[0]).0;
+    match &r[1] {
+        EchoPathResult::Observed { addr, .. } => {
+            assert_eq!(
+                addr.ip(),
+                default_path.ip(),
+                "пути: {r:?}; сервер: {seen:?}"
+            );
+        }
+        EchoPathResult::SendFailed => {}
+        EchoPathResult::NoAnswer => panic!("отправка принята, ответа нет: {r:?}; сервер: {seen:?}"),
+    }
+}
+
+/// Источник, которого нет на компьютере, ОС отвергает (Windows: `WSAEINVAL` 10022 для
+/// 192.0.2.1, Linux: `EINVAL` при выборе маршрута). Раньше `AsyncUdpSocket::try_send` quinn
+/// проглатывал ошибку и путь получал ложное «отправлено» (`NoAnswer`). Теперь `SendFailed`;
+/// запрос ушёл только по пути по умолчанию. macOS источник игнорирует (см. выше), там проверяется
+/// только путь по умолчанию.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn echo_unusable_source_is_send_failed() {
+    let t =
+        QuinnTransport::bind("0.0.0.0:0".parse().unwrap(), cfg(false), Arc::new(AllowAll)).unwrap();
+    let server = Fake::start(lo4(), honest);
+    let r = t
+        .echo_probe(server.main_addr, &[None, Some(Ipv4Addr::new(192, 0, 2, 1))])
+        .await
+        .unwrap();
+    assert_eq!(r.len(), 2);
+    observed(&r[0]);
+    if !cfg!(target_os = "macos") {
+        assert_eq!(r[1], EchoPathResult::SendFailed, "пути: {r:?}");
+        // у сервера один запрос: с пути по умолчанию
+        assert_eq!(server.requests().len(), 1);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
