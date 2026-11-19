@@ -675,6 +675,12 @@ impl KnockState {
     }
 
     /// Задать прямую отправку для того же гнезда (вместе с `set_tx`, при создании и `rebind`).
+    /// Отправитель эхо для диагностики в тестах (код ошибки ОС при подставленном источнике).
+    #[cfg(test)]
+    pub(crate) fn direct_tx_cfg_test(&self) -> Option<Arc<DirectTx>> {
+        lock(&self.direct).clone()
+    }
+
     pub(crate) fn set_direct(&self, direct: Arc<DirectTx>) {
         *lock(&self.direct) = Some(direct);
     }
@@ -954,7 +960,7 @@ impl DirectTx {
         Ok(Self { sock, state })
     }
 
-    fn try_send(&self, t: &Transmit) -> io::Result<()> {
+    pub(crate) fn try_send(&self, t: &Transmit) -> io::Result<()> {
         self.state.try_send((&self.sock).into(), t)
     }
 }

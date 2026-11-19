@@ -131,6 +131,76 @@ fn nonce_of(data: &[u8]) -> Nonce {
     Nonce(b)
 }
 
+/// Диагностика сбоя подстановки источника (в сообщение assert, один прогон CI читается целиком):
+/// `EchoPathResult::SendFailed` не несёт код ошибки ОС, поэтому те же отправки повторяются
+/// напрямую и печатаются `kind` и `raw_os_error`. Шлёт восьмибайтный мусор, сервер его отбросит.
+/// Вызывать только после снимка `server.requests()`.
+#[cfg(not(target_os = "macos"))]
+fn src_diag(t: &QuinnTransport, server: SocketAddrV4, src: Ipv4Addr) -> String {
+    use quinn::udp::{Transmit, UdpSocketState};
+    use std::fmt::Write as _;
+
+    fn show(r: std::io::Result<()>) -> String {
+        match r {
+            Ok(()) => "Ok".to_owned(),
+            Err(e) => format!("Err(kind={:?}, os={:?}, {e})", e.kind(), e.raw_os_error()),
+        }
+    }
+    let data = [0u8; 8];
+    let tx = |src_ip: Option<Ipv4Addr>| Transmit {
+        destination: SocketAddr::V4(server),
+        ecn: None,
+        contents: &data,
+        segment_size: None,
+        src_ip: src_ip.map(std::net::IpAddr::V4),
+    };
+    let mut out = String::from("диагностика отправки: ");
+    // клон основного гнезда транспорта (то же гнездо ОС, что и у пробы)
+    match t.inner.knock.direct_tx_cfg_test() {
+        Some(d) => {
+            for s in [Some(src), Some(lo4()), None] {
+                let _ = write!(
+                    out,
+                    "[гнездо транспорта, источник {s:?}: {}] ",
+                    show(d.try_send(&tx(s)))
+                );
+            }
+        }
+        None => out.push_str("[DirectTx нет] "),
+    }
+    // новое гнездо 0.0.0.0 с теми же опциями quinn-udp
+    match UdpSocket::bind("0.0.0.0:0") {
+        Ok(sock) => match UdpSocketState::new((&sock).into()) {
+            Ok(state) => {
+                let r = state.try_send((&sock).into(), &tx(Some(src)));
+                let _ = write!(out, "[новое гнездо 0.0.0.0, источник {src}: {}] ", show(r));
+            }
+            Err(e) => {
+                let _ = write!(out, "[UdpSocketState::new: {e}] ");
+            }
+        },
+        Err(e) => {
+            let _ = write!(out, "[bind 0.0.0.0: {e}] ");
+        }
+    }
+    // обычное гнездо, привязанное к самому адресу источника (есть ли адрес у ОС вообще)
+    match UdpSocket::bind((src, 0)) {
+        Ok(sock) => {
+            let r = sock.send_to(&data, server).map(|_| ());
+            let _ = write!(out, "[bind {src}: Ok, send_to: {}] ", show(r));
+        }
+        Err(e) => {
+            let _ = write!(
+                out,
+                "[bind {src}: kind={:?}, os={:?}] ",
+                e.kind(),
+                e.raw_os_error()
+            );
+        }
+    }
+    out
+}
+
 fn observed(r: &EchoPathResult) -> (SocketAddrV4, u16) {
     match r {
         EchoPathResult::Observed { addr, reach_port } => (*addr, *reach_port),
@@ -178,7 +248,8 @@ async fn echo_loopback_src_ip() {
     assert!(
         r.iter()
             .all(|p| matches!(p, EchoPathResult::Observed { .. })),
-        "пути: {r:?}; сервер видел запросы от: {seen:?}"
+        "пути: {r:?}; сервер видел запросы от: {seen:?}; {}",
+        src_diag(&t, server.main_addr, other)
     );
     let (default_path, via_other) = (observed(&r[0]).0, observed(&r[1]).0);
     assert_eq!(*default_path.ip(), lo4());

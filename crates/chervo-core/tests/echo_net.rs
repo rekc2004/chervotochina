@@ -13,7 +13,7 @@
 mod harness;
 
 use std::net::{SocketAddr, SocketAddrV4, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -33,6 +33,8 @@ const LONG: Duration = Duration::from_secs(40);
 struct Server {
     addr: SocketAddrV4,
     counters: Arc<Mutex<Counters>>,
+    /// Сколько раз сервер сообщил счётчики (после записи в `counters`).
+    reports: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
 }
@@ -56,13 +58,17 @@ impl Server {
         let stop = Arc::new(AtomicBool::new(false));
         let counters = Arc::new(Mutex::new(Counters::default()));
         let (tx, rx) = mpsc::channel();
-        let (s2, c2) = (stop.clone(), counters.clone());
+        let reports = Arc::new(AtomicU64::new(0));
+        let (s2, c2, r2) = (stop.clone(), counters.clone(), reports.clone());
         let join = std::thread::spawn(move || {
             serve(
                 cfg,
                 s2,
                 move |a| tx.send(a).unwrap(),
-                move |c| *c2.lock().unwrap() = *c,
+                move |c| {
+                    *c2.lock().unwrap() = *c;
+                    r2.fetch_add(1, Ordering::SeqCst);
+                },
             )
             .unwrap();
         });
@@ -72,6 +78,7 @@ impl Server {
         Self {
             addr,
             counters,
+            reports,
             stop,
             join: Some(join),
         }
@@ -81,9 +88,20 @@ impl Server {
         self.addr.to_string()
     }
 
-    /// Принятых сервером датаграмм (счётчик обновляется раз в 20 мс).
+    /// Принятых сервером датаграмм. Сервер сообщает счётчики раз в 20 мс, но проверяет срок с
+    /// шагом 50 мс, и на нагруженной машине (CI macOS) отчёт запаздывает дольше фиксированной
+    /// паузы. Ждём два новых отчёта: второй целиком снят после вызова, значит, всё, что сервер
+    /// принял до вызова, в нём есть (сервер считает запрос раньше, чем отвечает).
     fn requests(&self) -> u64 {
-        std::thread::sleep(Duration::from_millis(80));
+        let first = self.reports.load(Ordering::SeqCst);
+        let end = Instant::now() + Duration::from_secs(10);
+        while self.reports.load(Ordering::SeqCst) < first + 2 && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            self.reports.load(Ordering::SeqCst) >= first + 2,
+            "сервер не сообщил счётчики за 10 с"
+        );
         self.counters.lock().unwrap().requests
     }
 }
