@@ -68,7 +68,10 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          New-NetIPAddress -InterfaceAlias 'Loopback Pseudo-Interface 1' -IPAddress 127.0.0.2 -PrefixLength 8 -ErrorAction Stop | Out-Null
+          # только текущее состояние (ActiveStore): постоянная запись при включённом DHCP
+          # отвергается («Inconsistent parameters PolicyStore PersistentStore and Dhcp Enabled»)
+          Set-NetIPInterface -InterfaceAlias 'Loopback Pseudo-Interface 1' -AddressFamily IPv4 -Dhcp Disabled -PolicyStore ActiveStore -ErrorAction Stop
+          New-NetIPAddress -InterfaceAlias 'Loopback Pseudo-Interface 1' -IPAddress 127.0.0.2 -PrefixLength 8 -PolicyStore ActiveStore -ErrorAction Stop | Out-Null
           Get-NetIPAddress -InterfaceAlias 'Loopback Pseudo-Interface 1' -AddressFamily IPv4 | Format-Table -Property IPAddress, PrefixLength
       - run: cargo test --workspace --locked
   # Stage 18b: the real GUI binary renders 3 frames and exits 0 (`--render-check`: no node, no keys,
