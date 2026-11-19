@@ -247,7 +247,7 @@ fn external(ui: &mut egui::Ui, set: &SettingsRow, st: &SettingsUi, out: &mut Vec
     if let Some(e) = st.echo.error {
         warn(ui, e);
     }
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if enabled_button_with_help(
             ui,
             st.echo.text.is_some(),
@@ -296,7 +296,7 @@ fn upnp(ui: &mut egui::Ui, model: &Model, set: &SettingsRow, out: &mut Vec<Inten
         }
         UpnpUi::Found => {
             ui.label(core_texts::ENABLE_ON_ROUTER_TEXT);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if plain_button(ui, texts::BTN_YES).clicked() {
                     out.push(s(S::UpnpAllowYes));
                 }
@@ -358,7 +358,7 @@ fn clock(ui: &mut egui::Ui, set: &SettingsRow, st: &SettingsUi, out: &mut Vec<In
                 set.ntp_servers.join(", ")
             ));
         });
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         let busy = matches!(st.clock, ClockUi::Syncing | ClockUi::Proposal(_));
         if enabled_button_with_help(ui, !busy, texts::BTN_SYNC_CLOCK, texts::HELP_SYNC_CLOCK)
             .clicked()
@@ -382,7 +382,7 @@ fn clock(ui: &mut egui::Ui, set: &SettingsRow, st: &SettingsUi, out: &mut Vec<In
         }
         ClockUi::Proposal(ms) => {
             warn(ui, &texts::clock_proposal_text(ms));
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if plain_button(ui, texts::BTN_APPLY_OFFSET).clicked() {
                     out.push(s(S::ClockConfirm));
                 }

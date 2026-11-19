@@ -84,7 +84,7 @@ fn row(ui: &mut egui::Ui, t: &TransferRow, out: &mut Vec<Intent>) {
             copy_box(ui, root);
         }
         if t.result.is_none() {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if matches!(t.state, TransferState::Paused(_))
                     && button_with_help(ui, texts::BTN_RETRY_TRANSFER, texts::HELP_RETRY_TRANSFER)
                         .clicked()

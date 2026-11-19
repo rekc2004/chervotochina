@@ -19,7 +19,7 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
     let mut out = Vec::new();
     let s = &model.send;
     // заголовок раздела и пояснение к нему рисует вкладка «Файлы»
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if enabled_button_with_help(ui, !s.busy, texts::BTN_PICK_FILES, texts::HELP_PICK_FILES)
             .clicked()
         {

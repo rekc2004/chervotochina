@@ -102,7 +102,7 @@ fn problem(ui: &mut egui::Ui, p: &Problem, out: &mut Vec<Intent>) {
         ui.label(RichText::new(n).color(WARN));
     }
     ui.add_space(12.0);
-    ui.horizontal(|ui| match p.kind {
+    ui.horizontal_wrapped(|ui| match p.kind {
         ProblemKind::AlreadyRunning => {
             if plain_button(ui, texts::BTN_QUIT).clicked() {
                 out.push(Intent::Quit);

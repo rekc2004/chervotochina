@@ -114,7 +114,7 @@ fn form(ui: &mut egui::Ui, model: &Model, busy: bool, out: &mut Vec<Intent>) {
         }
     }
     ui.add_space(8.0);
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if enabled_button_with_help(
             ui,
             !busy,
@@ -315,7 +315,7 @@ fn sas(ui: &mut egui::Ui, s: &SasState, out: &mut Vec<Intent>) {
         warn(ui, e);
     }
     ui.add_space(8.0);
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if enabled_button_with_help(ui, !s.busy, texts::BTN_SAS_MATCH, texts::HELP_SAS_MATCH)
             .clicked()
         {

@@ -25,7 +25,7 @@ pub fn consent_card(ui: &mut egui::Ui, out: &mut Vec<Intent>) {
     ui.group(|ui| {
         ui.strong(texts::UPD_CONSENT_TITLE);
         ui.label(texts::UPD_CONSENT_TEXT);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if button_with_help(ui, texts::BTN_UPD_ENABLE, texts::HELP_UPD_ENABLE).clicked() {
                 out.push(u(U::SetConsent(true)));
             }
@@ -43,7 +43,7 @@ pub fn newer_card(ui: &mut egui::Ui, model: &Model, out: &mut Vec<Intent>) {
     };
     ui.group(|ui| {
         ui.strong(texts::upd_newer(v, chervo_core::VERSION));
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if button_with_help(ui, texts::BTN_UPD_WHERE, texts::HELP_UPD_WHERE).clicked() {
                 out.push(u(U::LinkOpen));
             }
@@ -140,7 +140,7 @@ fn verify_section(ui: &mut egui::Ui, model: &Model, out: &mut Vec<Intent>) {
             ui.label(label);
         }
     });
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if enabled_button_with_help(
             ui,
             !st.busy,

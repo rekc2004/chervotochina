@@ -104,7 +104,7 @@ fn auto(ui: &mut egui::Ui, model: &Model, out: &mut Vec<Intent>) {
         // вопрос с предупреждением «только дома» всегда на виду
         AccessStage::Asking => {
             ui.label(texts::ACC_ASK_ROUTER);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if plain_button(ui, texts::BTN_ACC_ALLOW).clicked() {
                     out.push(acc(AccessIntent::AccessAllow));
                 }
@@ -183,7 +183,7 @@ fn manual(ui: &mut egui::Ui, a: &AccessUi) {
             if a.help.as_ref().is_some_and(|h| h.home.len() > 1) {
                 ui.small(texts::ACC_INT_IP_MANY);
             }
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(texts::ACC_STEP5);
                 help_mark(ui, texts::ACC_KEEP_NOTE);
                 help_mark(ui, texts::ACC_PORT_NOTE);
@@ -193,7 +193,7 @@ fn manual(ui: &mut egui::Ui, a: &AccessUi) {
 
 /// «Проверить» и «Правило создано».
 fn check(ui: &mut egui::Ui, a: &AccessUi, out: &mut Vec<Intent>) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if enabled_button_with_help(
             ui,
             a.check != CheckUi::Checking,

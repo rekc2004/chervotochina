@@ -50,7 +50,7 @@ fn status_label(s: FriendStatus) -> &'static str {
 fn list(ui: &mut egui::Ui, model: &Model, out: &mut Vec<Intent>) {
     if model.snapshot.friends.is_empty() {
         ui.label(texts::FRIENDS_EMPTY);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if button_with_help(ui, texts::BTN_INVITE_FRIEND, texts::HELP_INVITE_FRIEND).clicked() {
                 out.push(Intent::GoSection(Section::AddFriend));
             }
@@ -174,7 +174,7 @@ fn dialog(ui: &mut egui::Ui, model: &Model, d: &Dialog, out: &mut Vec<Intent>) {
             if ui.text_edit_singleline(&mut t).changed() {
                 out.push(main(MainIntent::RenameEdited(t)));
             }
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if button_with_help(ui, texts::BTN_SAVE, texts::HELP_SAVE_NAME).clicked() {
                     out.push(main(MainIntent::RenameSubmit));
                 }
@@ -200,7 +200,7 @@ fn dialog(ui: &mut egui::Ui, model: &Model, d: &Dialog, out: &mut Vec<Intent>) {
         Dialog::Trust(id) => {
             ui.heading(friend_name(model, *id));
             ui.label(core_texts::TRUST_QUESTION_TEXT);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if plain_button(ui, texts::BTN_YES_TRUST).clicked() {
                     out.push(main(MainIntent::TrustYes));
                 }
@@ -225,7 +225,7 @@ fn dialog(ui: &mut egui::Ui, model: &Model, d: &Dialog, out: &mut Vec<Intent>) {
                     copy_box(ui, text);
                 }
             });
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if r.rekey
                     && button_with_help(ui, texts::BTN_NEW_INVITE, texts::HELP_NEW_INVITE).clicked()
                 {
@@ -295,7 +295,7 @@ pub fn friend_text_dialog(ui: &mut egui::Ui, p: &PasteDialog, out: &mut Vec<Inte
         out.push(main(MainIntent::FriendTextEdited(t)));
     }
     // кнопки сразу под полем: при узком окне они не уходят за край (Ж5)
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if enabled_button_with_help(ui, !p.busy, texts::BTN_APPLY, texts::HELP_APPLY_TEXT).clicked()
         {
             out.push(main(MainIntent::FriendTextSubmit));
@@ -313,7 +313,7 @@ pub fn friend_text_dialog(ui: &mut egui::Ui, p: &PasteDialog, out: &mut Vec<Inte
 }
 
 fn confirm_buttons(ui: &mut egui::Ui, yes: &str, intent: MainIntent, out: &mut Vec<Intent>) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if plain_button(ui, yes).clicked() {
             out.push(main(intent));
         }

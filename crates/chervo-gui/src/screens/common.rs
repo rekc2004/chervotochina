@@ -46,6 +46,31 @@ pub fn button_with_help(ui: &mut egui::Ui, label: &str, help: &str) -> egui::Res
     enabled_button_with_help(ui, true, label, help)
 }
 
+/// Пара «пункт + ?» в строке с переносом (`horizontal_wrapped`): вложенный `ui.horizontal` сам
+/// на новую строку не переносится и уезжает за край окна (снимок владельца 2026-11-20). Поэтому
+/// ширина пары оценивается заранее, и если она не помещается в остаток строки, строка
+/// заканчивается. Вне строки с переносом ничего не делает.
+fn wrap_before(ui: &mut egui::Ui, label: &str, style: egui::TextStyle, extra: f32) {
+    if !ui.layout().main_wrap() {
+        return;
+    }
+    let text_w = |t: egui::WidgetText, st: egui::TextStyle| {
+        t.into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, st)
+            .size()
+            .x
+    };
+    let mark = text_w(
+        RichText::new(texts::HELP_MARK).strong().into(),
+        egui::TextStyle::Body,
+    );
+    let spacing = ui.spacing().item_spacing.x;
+    let need = text_w(label.into(), style) + extra + spacing + mark + spacing;
+    let at_line_start = ui.cursor().min.x <= ui.max_rect().min.x + 1.0;
+    if !at_line_start && ui.available_width() < need {
+        ui.end_row();
+    }
+}
+
 /// Кнопка (может быть недоступной) с «?» рядом.
 pub fn enabled_button_with_help(
     ui: &mut egui::Ui,
@@ -53,6 +78,8 @@ pub fn enabled_button_with_help(
     label: &str,
     help: &str,
 ) -> egui::Response {
+    let pad = 2.0 * ui.spacing().button_padding.x;
+    wrap_before(ui, label, egui::TextStyle::Button, pad);
     ui.horizontal(|ui| {
         let response = ui.add_enabled(enabled, egui::Button::new(label));
         help_mark(ui, help);
@@ -63,6 +90,8 @@ pub fn enabled_button_with_help(
 
 /// Маленькая кнопка с «?» рядом (строки списков).
 pub fn small_button_with_help(ui: &mut egui::Ui, label: &str, help: &str) -> egui::Response {
+    let pad = 2.0 * ui.spacing().button_padding.x;
+    wrap_before(ui, label, egui::TextStyle::Body, pad);
     ui.horizontal(|ui| {
         let response = ui.small_button(label);
         help_mark(ui, help);
@@ -79,6 +108,8 @@ pub fn checkbox_with_help(
     label: &str,
     help: &str,
 ) -> egui::Response {
+    let icon = ui.spacing().icon_width + ui.spacing().icon_spacing;
+    wrap_before(ui, label, egui::TextStyle::Body, icon);
     ui.horizontal(|ui| {
         let response = ui.add_enabled(enabled, egui::Checkbox::new(checked, label));
         help_mark(ui, help);
