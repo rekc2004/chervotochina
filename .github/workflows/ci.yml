@@ -61,6 +61,15 @@ jobs:
       - name: Алиасы lo0 для тестов chervo-lan
         if: runner.os == 'macOS'
         run: for n in 2 3 4 9 10 11 12 13 14 15 16 17 18 19; do sudo ifconfig lo0 alias "127.0.0.$n" up; done
+      # Windows Server: источник пакета через IP_PKTINFO должен быть адресом, назначенным интерфейсу
+      # (127.0.0.2 без назначения даёт WSAEINVAL 10022, CI 2026-11-19). Тесту
+      # `echo_loopback_src_ip` (этап 13д) нужен второй адрес на петле. Раннер одноразовый.
+      - name: Адрес 127.0.0.2 на петле для теста эха
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-NetIPAddress -InterfaceAlias 'Loopback Pseudo-Interface 1' -IPAddress 127.0.0.2 -PrefixLength 8 -ErrorAction Stop | Out-Null
+          Get-NetIPAddress -InterfaceAlias 'Loopback Pseudo-Interface 1' -AddressFamily IPv4 | Format-Table -Property IPAddress, PrefixLength
       - run: cargo test --workspace --locked
   # Stage 18b: the real GUI binary renders 3 frames and exits 0 (`--render-check`: no node, no keys,
   # no files). Linux runs under xvfb with Mesa software drivers; apt is used in CI only, the program
