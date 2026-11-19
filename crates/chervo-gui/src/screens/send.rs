@@ -5,8 +5,10 @@ use chervo_core::FriendStatus;
 use eframe::egui;
 
 use crate::main_model::MainIntent;
-use crate::model::{Intent, Model, Page};
-use crate::screens::common::warn;
+use crate::model::{Intent, Model, Section};
+use crate::screens::common::{
+    button_with_help, enabled_button_with_help, label_with_help, small_button_with_help, warn,
+};
 use crate::{picker, texts};
 
 fn main(i: MainIntent) -> Intent {
@@ -16,12 +18,9 @@ fn main(i: MainIntent) -> Intent {
 pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
     let mut out = Vec::new();
     let s = &model.send;
-    ui.heading(texts::SEND_TITLE);
-    ui.label(texts::SEND_HINT);
-    ui.add_space(8.0);
+    // заголовок раздела и пояснение к нему рисует вкладка «Файлы»
     ui.horizontal(|ui| {
-        if ui
-            .add_enabled(!s.busy, egui::Button::new(texts::BTN_PICK_FILES))
+        if enabled_button_with_help(ui, !s.busy, texts::BTN_PICK_FILES, texts::HELP_PICK_FILES)
             .clicked()
         {
             let picked = picker::pick_files();
@@ -29,8 +28,7 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
                 out.push(main(MainIntent::PathsAdded(picked)));
             }
         }
-        if ui
-            .add_enabled(!s.busy, egui::Button::new(texts::BTN_PICK_DIR))
+        if enabled_button_with_help(ui, !s.busy, texts::BTN_PICK_DIR, texts::HELP_PICK_DIR)
             .clicked()
             && let Some(p) = picker::pick_dir_to_send()
         {
@@ -49,7 +47,8 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
                 format!("{} ({})", p.path.display(), texts::human_size(p.size))
             };
             ui.label(label);
-            if ui.small_button(texts::BTN_REMOVE_ITEM).clicked() {
+            if small_button_with_help(ui, texts::BTN_REMOVE_ITEM, texts::HELP_REMOVE_ITEM).clicked()
+            {
                 out.push(main(MainIntent::PathRemoved(i)));
             }
         });
@@ -65,7 +64,7 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
         ui.label(texts::send_summary(files, dirs, total));
     }
     ui.add_space(8.0);
-    ui.label(texts::SEND_TO);
+    label_with_help(ui, texts::SEND_TO, texts::HELP_SEND_TO);
     let usable: Vec<_> = model
         .snapshot
         .friends
@@ -74,8 +73,8 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
         .collect();
     if usable.is_empty() {
         ui.label(texts::SEND_NO_ACTIVE_FRIENDS);
-        if ui.button(texts::BTN_GO_ADD_FRIEND).clicked() {
-            out.push(Intent::Go(Page::AddFriend));
+        if button_with_help(ui, texts::BTN_GO_ADD_FRIEND, texts::HELP_GO_ADD_FRIEND).clicked() {
+            out.push(Intent::GoSection(Section::AddFriend));
         }
     }
     ui.horizontal_wrapped(|ui| {
@@ -85,7 +84,8 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
             } else {
                 format!("{} ({})", f.name, texts::STATE_OFFLINE)
             };
-            if ui.selectable_label(s.friend == Some(f.id), label).clicked() {
+            let pick = ui.selectable_label(s.friend == Some(f.id), label); // без ?: «?» у подписи «Кому»
+            if pick.clicked() {
                 out.push(main(MainIntent::SendFriend(f.id)));
             }
         }
@@ -94,9 +94,13 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
         warn(ui, e);
     }
     ui.add_space(8.0);
-    if ui
-        .add_enabled(send_ready(model), egui::Button::new(texts::BTN_SEND))
-        .clicked()
+    if enabled_button_with_help(
+        ui,
+        send_ready(model),
+        texts::BTN_SEND,
+        texts::HELP_SEND_FILES,
+    )
+    .clicked()
     {
         out.push(main(MainIntent::SendSubmit));
     }

@@ -9,7 +9,7 @@ use eframe::egui;
 use crate::main_model::MainIntent;
 use crate::model::{Intent, Model};
 use crate::rows::OfferRow;
-use crate::screens::common::warn;
+use crate::screens::common::{checkbox_with_help, enabled_button_with_help, warn};
 use crate::{picker, texts};
 
 fn main(i: MainIntent) -> Intent {
@@ -22,12 +22,11 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
         ui.label(texts::OFFERS_EMPTY);
         return out;
     }
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        for o in &model.snapshot.offers {
-            offer(ui, model, o, &mut out);
-            ui.add_space(8.0);
-        }
-    });
+    // прокрутку даёт вкладка целиком
+    for o in &model.snapshot.offers {
+        offer(ui, model, o, &mut out);
+        ui.add_space(8.0);
+    }
     out
 }
 
@@ -85,28 +84,48 @@ fn offer(ui: &mut egui::Ui, model: &Model, o: &OfferRow, out: &mut Vec<Intent>) 
         }
         if o.needs_question {
             let mut ack = ui_state.ack;
-            if ui.checkbox(&mut ack, core_texts::ASK_FILE_TEXT).changed() {
+            if checkbox_with_help(
+                ui,
+                true,
+                &mut ack,
+                core_texts::ASK_FILE_TEXT,
+                texts::HELP_OFFER_ACK,
+            )
+            .changed()
+            {
                 out.push(main(MainIntent::OfferAck(o.id, ack)));
             }
         }
         ui.horizontal_wrapped(|ui| {
             let can = !ui_state.busy && (!o.needs_question || ui_state.ack);
-            if ui
-                .add_enabled(can && !o.space.short, egui::Button::new(texts::BTN_ACCEPT))
-                .clicked()
+            if enabled_button_with_help(
+                ui,
+                can && !o.space.short,
+                texts::BTN_ACCEPT,
+                texts::HELP_OFFER_ACCEPT,
+            )
+            .clicked()
             {
                 out.push(main(MainIntent::OfferAccept(o.id)));
             }
-            if ui
-                .add_enabled(can, egui::Button::new(texts::BTN_OTHER_FOLDER))
-                .clicked()
+            if enabled_button_with_help(
+                ui,
+                can,
+                texts::BTN_OTHER_FOLDER,
+                texts::HELP_OFFER_OTHER_FOLDER,
+            )
+            .clicked()
                 && let Some(root) = picker::pick_folder()
             {
                 out.push(main(MainIntent::OfferAcceptInto { id: o.id, root }));
             }
-            if ui
-                .add_enabled(!ui_state.busy, egui::Button::new(texts::BTN_DECLINE))
-                .clicked()
+            if enabled_button_with_help(
+                ui,
+                !ui_state.busy,
+                texts::BTN_DECLINE,
+                texts::HELP_OFFER_DECLINE,
+            )
+            .clicked()
             {
                 out.push(main(MainIntent::OfferDecline(o.id)));
             }

@@ -12,7 +12,10 @@ use crate::access_model::{AccessIntent, GetIpMark, GetIpResult, GetIpUi, InviteE
 use crate::main_model::{AddFriend, AddStage, Dialog, MainIntent, SasState};
 use crate::model::{Intent, Model};
 use crate::qr::QrMatrix;
-use crate::screens::common::{copy_box, help_mark, warn};
+use crate::screens::common::{
+    button_with_help, checkbox_with_help, copy_box, enabled_button_with_help, help_mark,
+    label_with_help, plain_button, warn,
+};
 use crate::screens::friends::friend_text_dialog;
 use crate::texts;
 
@@ -55,7 +58,7 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
         AddStage::Finished(text) => {
             ui.label(*text);
             ui.add_space(8.0);
-            if ui.button(texts::BTN_OK).clicked() {
+            if plain_button(ui, texts::BTN_OK).clicked() {
                 out.push(main(MainIntent::AddDone));
             }
         }
@@ -76,7 +79,7 @@ pub fn invite_ext_note(ext: InviteExt) -> Option<&'static str> {
 }
 
 fn open_access_button(ui: &mut egui::Ui, out: &mut Vec<Intent>) {
-    if ui.button(texts::BTN_OPEN_ACCESS).clicked() {
+    if button_with_help(ui, texts::BTN_OPEN_ACCESS, texts::HELP_OPEN_ACCESS).clicked() {
         out.push(main(MainIntent::Access(AccessIntent::Open)));
     }
 }
@@ -84,20 +87,21 @@ fn open_access_button(ui: &mut egui::Ui, out: &mut Vec<Intent>) {
 fn form(ui: &mut egui::Ui, model: &Model, busy: bool, out: &mut Vec<Intent>) {
     let a: &AddFriend = &model.add;
     // друг уже прислал текст: приглашение, новый адрес или уведомление об удалении
-    if ui
-        .add_enabled(!busy, egui::Button::new(texts::BTN_FRIEND_TEXT))
+    if enabled_button_with_help(ui, !busy, texts::BTN_FRIEND_TEXT, texts::HELP_FRIEND_TEXT)
         .clicked()
     {
         out.push(main(MainIntent::FriendTextOpen));
     }
     ui.separator();
     let mut same = a.same_network;
-    if ui
-        .add_enabled(
-            !busy,
-            egui::Checkbox::new(&mut same, texts::LABEL_SAME_NETWORK),
-        )
-        .changed()
+    if checkbox_with_help(
+        ui,
+        !busy,
+        &mut same,
+        texts::LABEL_SAME_NETWORK,
+        texts::HELP_SAME_NETWORK,
+    )
+    .changed()
     {
         out.push(main(MainIntent::AddSameNetwork(same)));
     }
@@ -111,22 +115,25 @@ fn form(ui: &mut egui::Ui, model: &Model, busy: bool, out: &mut Vec<Intent>) {
     }
     ui.add_space(8.0);
     ui.horizontal(|ui| {
-        if ui
-            .add_enabled(!busy, egui::Button::new(texts::BTN_CREATE_INVITE))
-            .clicked()
+        if enabled_button_with_help(
+            ui,
+            !busy,
+            texts::BTN_CREATE_INVITE,
+            texts::HELP_CREATE_INVITE,
+        )
+        .clicked()
         {
             out.push(main(MainIntent::AddCreate));
         }
-        // «Получить свой IP»: без сервера недоступна, рядом «?» с подсказкой, куда его вписать
+        // «Получить свой IP»: без сервера недоступна, «?» подсказывает, куда вписать адрес
         let enabled = !busy && model.get_ip_enabled();
-        if ui
-            .add_enabled(enabled, egui::Button::new(texts::BTN_GET_IP))
-            .clicked()
-        {
+        let help = if model.echo_server_set() {
+            texts::HELP_GET_IP
+        } else {
+            texts::GETIP_NO_SERVER
+        };
+        if enabled_button_with_help(ui, enabled, texts::BTN_GET_IP, help).clicked() {
             out.push(main(MainIntent::GetIp));
-        }
-        if !model.echo_server_set() {
-            help_mark(ui, texts::GETIP_NO_SERVER);
         }
     });
     if busy && model.echo_server_set() {
@@ -171,13 +178,19 @@ fn vpn_ask(ui: &mut egui::Ui, out: &mut Vec<Intent>) {
     ui.heading(texts::INV_MAYBE_VPN_TITLE);
     warn(ui, texts::INV_MAYBE_VPN_TEXT);
     ui.add_space(8.0);
-    if ui.button(texts::BTN_INV_WITHOUT_ADDR).clicked() {
+    if button_with_help(
+        ui,
+        texts::BTN_INV_WITHOUT_ADDR,
+        texts::HELP_INV_WITHOUT_ADDR,
+    )
+    .clicked()
+    {
         out.push(main(MainIntent::AddVpnWithout));
     }
-    if ui.button(texts::BTN_INV_WITH_ADDR).clicked() {
+    if button_with_help(ui, texts::BTN_INV_WITH_ADDR, texts::HELP_INV_WITH_ADDR).clicked() {
         out.push(main(MainIntent::AddVpnWithAddr));
     }
-    if ui.button(texts::BTN_CANCEL).clicked() {
+    if plain_button(ui, texts::BTN_CANCEL).clicked() {
         out.push(main(MainIntent::AddCancel));
     }
 }
@@ -251,7 +264,7 @@ fn waiting(ui: &mut egui::Ui, w: &Waiting<'_>, out: &mut Vec<Intent>) {
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         ui.spinner();
-        if ui.button(texts::BTN_CANCEL).clicked() {
+        if plain_button(ui, texts::BTN_CANCEL).clicked() {
             out.push(main(MainIntent::AddCancel));
         }
     });
@@ -290,7 +303,7 @@ fn sas(ui: &mut egui::Ui, s: &SasState, out: &mut Vec<Intent>) {
     let digits = digits.interact(Sense::focusable_noninteractive());
     digits.widget_info(|| WidgetInfo::labeled(Role::Label, true, s.spoken.as_str()));
     ui.add_space(12.0);
-    ui.label(texts::LABEL_NAME);
+    label_with_help(ui, texts::LABEL_NAME, texts::HELP_SAS_NAME);
     let mut name = s.name.clone();
     if ui
         .add_enabled(!s.busy, egui::TextEdit::singleline(&mut name))
@@ -303,15 +316,18 @@ fn sas(ui: &mut egui::Ui, s: &SasState, out: &mut Vec<Intent>) {
     }
     ui.add_space(8.0);
     ui.horizontal(|ui| {
-        if ui
-            .add_enabled(!s.busy, egui::Button::new(texts::BTN_SAS_MATCH))
+        if enabled_button_with_help(ui, !s.busy, texts::BTN_SAS_MATCH, texts::HELP_SAS_MATCH)
             .clicked()
         {
             out.push(main(MainIntent::SasMatch));
         }
-        if ui
-            .add_enabled(!s.busy, egui::Button::new(texts::BTN_SAS_MISMATCH))
-            .clicked()
+        if enabled_button_with_help(
+            ui,
+            !s.busy,
+            texts::BTN_SAS_MISMATCH,
+            texts::HELP_SAS_MISMATCH,
+        )
+        .clicked()
         {
             out.push(main(MainIntent::SasMismatch));
         }

@@ -21,7 +21,7 @@ use crate::main_model::{
     AddFriend, AddStage, AddrTokenDialog, Dialog, MainIntent, OfferUi, PasteDialog,
     RevocationDialog,
 };
-use crate::model::{ClockResult, Close, FriendEventKind, Intent, Model, Outcome, Page};
+use crate::model::{ClockResult, Close, FriendEventKind, Intent, Model, Outcome, Page, Section};
 use crate::rows::{
     DiagRow, FileRow, FriendRow, Id, LanRow, OfferRow, PickedPath, RetiredRow, RouterRow,
     SettingsRow, TransferRow,
@@ -490,8 +490,9 @@ pub fn all() -> Vec<Model> {
     }
 
     // экран 3: добавление друга
-    let mut m = open_model(Page::AddFriend);
-    v.push(open_model(Page::AddFriend));
+    let mut m = open_model(Page::Friends);
+    v.push(open_model(Page::Friends));
+    m.scroll_to = Some(Section::AddFriend);
     m.add = AddFriend {
         same_network: true,
         error: Some(chervo_core::texts::NO_ADDRESS_TEXT),
@@ -504,13 +505,14 @@ pub fn all() -> Vec<Model> {
     };
     v.push(m);
     // похоже на VPN: приглашения ещё нет
-    let mut m = open_model(Page::AddFriend);
+    let mut m = open_model(Page::Friends);
+    m.scroll_to = Some(Section::AddFriend);
     m.add.stage = AddStage::VpnAsk {
         addrs: vec!["198.51.100.7:50000".parse().expect("addr")],
     };
     v.push(m);
     // поле «Друг прислал мне текст» на вкладке «Добавить друга»
-    let mut m = open_model(Page::AddFriend);
+    let mut m = open_model(Page::Friends);
     m.dialog = Dialog::FriendText(PasteDialog {
         text: "приглашение".to_owned(),
         too_long: true,
@@ -518,7 +520,7 @@ pub fn all() -> Vec<Model> {
         busy: false,
     });
     v.push(m);
-    let mut m = open_model(Page::AddFriend);
+    let mut m = open_model(Page::Friends);
     m.on_outcome(Outcome::InviteCreated(Ok((
         Id(1),
         "CHERVO1-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -530,14 +532,15 @@ pub fn all() -> Vec<Model> {
     ))));
     m.on_outcome(Outcome::InviteAddrChanged(Id(1)));
     v.push(m);
-    let mut m = open_model(Page::AddFriend);
+    let mut m = open_model(Page::Friends);
     m.on_outcome(Outcome::InviteCreated(Ok((
         Id(1),
         "CHERVO1-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".to_owned(),
         InviteExt::NotSet,
     ))));
     v.push(m);
-    let mut m = open_model(Page::AddFriend);
+    let mut m = open_model(Page::Friends);
+    m.scroll_to = Some(Section::AddFriend);
     m.add.stage = AddStage::Waiting {
         invite: Id(2),
         token: None,
@@ -575,7 +578,7 @@ pub fn all() -> Vec<Model> {
         };
         v.push(m);
     }
-    let mut m = open_model(Page::AddFriend);
+    let mut m = open_model(Page::Friends);
     m.on_outcome(Outcome::InviteSas {
         invite: Id(1),
         digits: "1234 5678".to_owned(),
@@ -589,7 +592,8 @@ pub fn all() -> Vec<Model> {
         InviteOutcome::PeerUnreachable,
         InviteOutcome::Expired,
     ] {
-        let mut m = open_model(Page::AddFriend);
+        let mut m = open_model(Page::Friends);
+        m.scroll_to = Some(Section::AddFriend);
         m.add.stage = AddStage::Waiting {
             invite: Id(1),
             token: None,
@@ -603,8 +607,8 @@ pub fn all() -> Vec<Model> {
     }
 
     // экран 4: отправка
-    v.push(open_model(Page::Send));
-    let mut m = open_model(Page::Send);
+    v.push(open_model(Page::Files));
+    let mut m = open_model(Page::Files);
     m.send.paths = vec![
         PickedPath {
             path: PathBuf::from("D:/Фото/отпуск.jpg"),
@@ -622,8 +626,8 @@ pub fn all() -> Vec<Model> {
     v.push(m);
 
     // экран 5: входящие
-    v.push(open_model(Page::Offers));
-    let mut m = open_model(Page::Offers);
+    v.push(open_model(Page::Files));
+    let mut m = open_model(Page::Files);
     m.offer_ui.insert(
         Id(20),
         OfferUi {
@@ -632,20 +636,20 @@ pub fn all() -> Vec<Model> {
         },
     );
     v.push(m);
-    let mut m = open_model(Page::Offers);
+    let mut m = open_model(Page::Files);
     m.snapshot.offers.clear();
     v.push(m);
 
     // экран 6: передачи
-    v.push(open_model(Page::Transfers));
-    let mut m = open_model(Page::Transfers);
+    v.push(open_model(Page::Files));
+    let mut m = open_model(Page::Files);
     m.snapshot.transfers.clear();
     v.push(m);
 
     // экран 7: диагностика
-    v.push(open_model(Page::Diagnosis));
+    v.push(open_model(Page::Settings));
     for nat in [NatView::Public, NatView::Symmetric, NatView::Unknown] {
-        let mut m = open_model(Page::Diagnosis);
+        let mut m = open_model(Page::Settings);
         m.snapshot.nat = Some(nat);
         v.push(m);
     }

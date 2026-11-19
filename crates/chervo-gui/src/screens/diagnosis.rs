@@ -9,7 +9,7 @@ use eframe::egui;
 use crate::access_model::AccessIntent;
 use crate::main_model::MainIntent;
 use crate::model::{Intent, Model};
-use crate::screens::common::warn;
+use crate::screens::common::{button_with_help, warn};
 use crate::texts;
 
 fn main(i: MainIntent) -> Intent {
@@ -68,7 +68,7 @@ pub fn refresh_label(model: &Model) -> &'static str {
 
 pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
     let mut out = Vec::new();
-    ui.heading(texts::DIAG_TITLE);
+    // заголовок раздела «Диагностика» рисует вкладка «Настройки»
     ui.strong(texts::DIAG_NAT_TITLE);
     if let Some(t) = net_text(model) {
         ui.label(t);
@@ -76,7 +76,7 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
     if let Some(m) = model.snapshot.mapping {
         ui.label(core_texts::mapping_text(m));
     }
-    if ui.button(refresh_label(model)).clicked() {
+    if button_with_help(ui, refresh_label(model), texts::HELP_DIAG_REFRESH).clicked() {
         out.push(main(MainIntent::Settings(
             crate::settings_model::SettingsIntent::MappingRefresh,
         )));
@@ -91,43 +91,48 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
     if friends.is_empty() {
         ui.label(texts::DIAG_NO_FRIENDS);
     }
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        for f in friends {
-            ui.group(|ui| {
-                ui.strong(&f.name);
-                if f.key_problem {
-                    warn(ui, core_texts::KEY_LOST_TEXT);
-                } else if f.online {
-                    ui.label(texts::DIAG_CONNECTED);
-                } else if let Some(d) = model.snapshot.diagnoses.iter().find(|d| d.friend == f.id) {
-                    ui.label(d.text);
-                    if d.lan_hint {
-                        warn(ui, texts::LAN_EXPIRED_HINT);
-                    }
-                    if d.could_help {
-                        // посредника в этой версии нет: ни кнопки, ни поля, только текст
-                        ui.label(texts::MEDIATOR_LATER);
-                    }
-                    // причина в роутере или адресе: помощник ведёт к настройке (С8)
-                    if d.open_access && ui.button(texts::BTN_OPEN_ACCESS).clicked() {
-                        out.push(main(MainIntent::Access(AccessIntent::Open)));
-                    }
-                } else {
-                    ui.label(texts::DIAG_NO_REASON);
+    // прокрутку даёт вкладка целиком
+    for f in friends {
+        ui.group(|ui| {
+            ui.strong(&f.name);
+            if f.key_problem {
+                warn(ui, core_texts::KEY_LOST_TEXT);
+            } else if f.online {
+                ui.label(texts::DIAG_CONNECTED);
+            } else if let Some(d) = model.snapshot.diagnoses.iter().find(|d| d.friend == f.id) {
+                ui.label(d.text);
+                if d.lan_hint {
+                    warn(ui, texts::LAN_EXPIRED_HINT);
                 }
-                if !f.online && !f.key_problem && ui.button(texts::BTN_CONNECT).clicked() {
-                    out.push(main(MainIntent::ConnectNow(f.id)));
+                if d.could_help {
+                    // посредника в этой версии нет: ни кнопки, ни поля, только текст
+                    ui.label(texts::MEDIATOR_LATER);
                 }
-                // С5: до итога «Соединить» показывает, что попытка идёт
-                if !f.online && model.connecting.contains(&f.id) {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label(texts::CONNECTING);
-                    });
+                // причина в роутере или адресе: помощник ведёт к настройке (С8)
+                if d.open_access
+                    && button_with_help(ui, texts::BTN_OPEN_ACCESS, texts::HELP_OPEN_ACCESS)
+                        .clicked()
+                {
+                    out.push(main(MainIntent::Access(AccessIntent::Open)));
                 }
-            });
-        }
-    });
+            } else {
+                ui.label(texts::DIAG_NO_REASON);
+            }
+            if !f.online
+                && !f.key_problem
+                && button_with_help(ui, texts::BTN_CONNECT, texts::HELP_CONNECT).clicked()
+            {
+                out.push(main(MainIntent::ConnectNow(f.id)));
+            }
+            // С5: до итога «Соединить» показывает, что попытка идёт
+            if !f.online && model.connecting.contains(&f.id) {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(texts::CONNECTING);
+                });
+            }
+        });
+    }
     out
 }
 

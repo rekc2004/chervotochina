@@ -516,7 +516,7 @@ mod tests {
                 "лишняя проба"
             );
         }
-        m.update(Intent::Go(crate::model::Page::AddFriend));
+        m.update(Intent::GoSection(crate::model::Section::AddFriend));
         let _ = ask(&mut m, MainIntent::DialogClose);
         let cmds = ask(&mut m, MainIntent::AddCreate);
         assert_eq!(cmds.len(), 1);
@@ -1082,7 +1082,7 @@ mod tests {
         // кнопка есть на «Пригласить» (постоянно) и у друга с причиной в роутере или адресе
         let mut m = model();
         with_server(&mut m, None, None);
-        m.update(Intent::Go(crate::model::Page::AddFriend));
+        m.update(Intent::GoSection(crate::model::Section::AddFriend));
         let seen = crate::screens::rendered_texts(&m);
         assert!(seen.contains(texts::BTN_OPEN_ACCESS), "{seen}");
         assert!(seen.contains(texts::BTN_GET_IP), "{seen}");
@@ -1107,15 +1107,17 @@ mod tests {
             settings: Some(row(None)),
             ..Snapshot::default()
         })));
-        m.update(Intent::Go(crate::model::Page::Diagnosis));
+        m.update(Intent::GoSection(crate::model::Section::Diagnosis));
+        // вкладка «Настройки» уже несёт одну такую кнопку (раздел «Входящие подключения»),
+        // вторая стоит у друга с причиной в роутере
         let seen = crate::screens::rendered_texts(&m);
-        assert!(seen.contains(texts::BTN_OPEN_ACCESS), "{seen}");
-        // у другой причины кнопки нет
+        assert_eq!(seen.matches(texts::BTN_OPEN_ACCESS).count(), 2, "{seen}");
+        // у другой причины второй кнопки нет
         if let Some(d) = m.snapshot.diagnoses.first_mut() {
             d.open_access = false;
         }
         let seen = crate::screens::rendered_texts(&m);
-        assert!(!seen.contains(texts::BTN_OPEN_ACCESS), "{seen}");
+        assert_eq!(seen.matches(texts::BTN_OPEN_ACCESS).count(), 1, "{seen}");
     }
 
     #[test]
@@ -1124,7 +1126,7 @@ mod tests {
         // одна строка в «Настройки», раздел «Входящие подключения»
         let mut m = model();
         with_server(&mut m, None, None);
-        m.update(Intent::Go(crate::model::Page::AddFriend));
+        m.update(Intent::GoSection(crate::model::Section::AddFriend));
         let seen = crate::screens::rendered_texts(&m);
         assert!(!seen.contains("Свой адрес с пробросом"), "{seen}");
         assert!(!seen.contains("IP:порт"), "{seen}");
@@ -1141,7 +1143,7 @@ mod tests {
         let mut m = model();
         with_server(&mut m, None, None);
         // «Пригласить» без сервера: значок есть, текст подсказки на экране не лежит
-        m.update(Intent::Go(crate::model::Page::AddFriend));
+        m.update(Intent::GoSection(crate::model::Section::AddFriend));
         let seen = crate::screens::rendered_texts(&m);
         assert!(seen.contains(texts::HELP_MARK), "{seen}");
         assert!(!seen.contains(texts::GETIP_NO_SERVER), "{seen}");
@@ -1158,7 +1160,7 @@ mod tests {
             "CHV1".to_owned(),
             InviteExt::NotSet,
         ))));
-        m.update(Intent::Go(crate::model::Page::AddFriend));
+        m.update(Intent::GoSection(crate::model::Section::AddFriend));
         let seen = crate::screens::rendered_texts(&m);
         assert!(seen.contains(texts::INV_EXT_NOT_SET_LABEL), "{seen}");
         assert!(!seen.contains(texts::INV_EXT_NOT_SET), "{seen}");

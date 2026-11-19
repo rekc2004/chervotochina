@@ -5,6 +5,9 @@ use chervo_core::texts as core_texts;
 use eframe::egui::{self, Color32, RichText};
 
 use crate::model::{FirstRun, Intent, Problem, ProblemKind, Start};
+use crate::screens::common::{
+    checkbox_with_help, enabled_button_with_help, label_with_help, plain_button,
+};
 use crate::{picker, texts};
 
 const WARN: Color32 = Color32::from_rgb(200, 120, 0);
@@ -31,7 +34,7 @@ fn first_run(ui: &mut egui::Ui, f: &FirstRun, out: &mut Vec<Intent>) {
     // «Ключи хранятся в хранилище ОС» входит в этот текст ядра
     ui.label(core_texts::FIRST_RUN_TEXT);
     ui.add_space(12.0);
-    ui.label(texts::FOLDER_LABEL);
+    label_with_help(ui, texts::FOLDER_LABEL, texts::HELP_FIRST_FOLDER);
     ui.horizontal(|ui| {
         let mut folder = f.folder.clone();
         let edit = ui.add_enabled(
@@ -41,8 +44,7 @@ fn first_run(ui: &mut egui::Ui, f: &FirstRun, out: &mut Vec<Intent>) {
         if edit.changed() {
             out.push(Intent::FolderEdited(folder));
         }
-        if ui
-            .add_enabled(!f.busy, egui::Button::new(texts::BTN_PICK_FOLDER))
+        if enabled_button_with_help(ui, !f.busy, texts::BTN_PICK_FOLDER, texts::HELP_PICK_FOLDER)
             .clicked()
             && let Some(path) = picker::pick_folder()
         {
@@ -55,21 +57,21 @@ fn first_run(ui: &mut egui::Ui, f: &FirstRun, out: &mut Vec<Intent>) {
     }
     if f.outside_warning {
         let mut checked = f.outside_confirmed;
-        if ui
-            .add_enabled(
-                !f.busy,
-                egui::Checkbox::new(&mut checked, texts::CHECK_NO_OTHER_USERS),
-            )
-            .changed()
+        if checkbox_with_help(
+            ui,
+            !f.busy,
+            &mut checked,
+            texts::CHECK_NO_OTHER_USERS,
+            texts::HELP_OUTSIDE_CHECK,
+        )
+        .changed()
         {
             out.push(Intent::OutsideChecked(checked));
         }
     }
     ui.add_space(12.0);
     let can_submit = !f.busy && (!f.outside_warning || f.outside_confirmed);
-    if ui
-        .add_enabled(can_submit, egui::Button::new(texts::BTN_CONTINUE))
-        .clicked()
+    if enabled_button_with_help(ui, can_submit, texts::BTN_CONTINUE, texts::HELP_CONTINUE).clicked()
     {
         out.push(Intent::SubmitFirstRun);
     }
@@ -102,51 +104,56 @@ fn problem(ui: &mut egui::Ui, p: &Problem, out: &mut Vec<Intent>) {
     ui.add_space(12.0);
     ui.horizontal(|ui| match p.kind {
         ProblemKind::AlreadyRunning => {
-            if ui.button(texts::BTN_QUIT).clicked() {
+            if plain_button(ui, texts::BTN_QUIT).clicked() {
                 out.push(Intent::Quit);
             }
         }
         ProblemKind::KeyStoreLocked => {
             if cfg!(target_os = "linux")
-                && ui
-                    .add_enabled(enabled, egui::Button::new(texts::BTN_UNLOCK))
+                && enabled_button_with_help(ui, enabled, texts::BTN_UNLOCK, texts::HELP_UNLOCK)
                     .clicked()
             {
                 out.push(Intent::Unlock);
             }
-            if ui
-                .add_enabled(enabled, egui::Button::new(texts::BTN_RETRY))
+            if enabled_button_with_help(ui, enabled, texts::BTN_RETRY, texts::HELP_RETRY_OPEN)
                 .clicked()
             {
                 out.push(Intent::RetryOpen);
             }
         }
         ProblemKind::KeysLost => {
-            if ui
-                .add_enabled(enabled, egui::Button::new(texts::BTN_START_OVER))
+            if enabled_button_with_help(ui, enabled, texts::BTN_START_OVER, texts::HELP_START_OVER)
                 .clicked()
             {
                 out.push(Intent::StartOver);
             }
         }
         ProblemKind::RolledBack => {
-            if ui
-                .add_enabled(enabled, egui::Button::new(texts::BTN_ACCEPT_OLDER))
-                .clicked()
+            if enabled_button_with_help(
+                ui,
+                enabled,
+                texts::BTN_ACCEPT_OLDER,
+                texts::HELP_ACCEPT_OLDER,
+            )
+            .clicked()
             {
                 out.push(Intent::AcceptOlder);
             }
         }
         ProblemKind::SettingsCorrupt => {
-            if ui
-                .add_enabled(enabled, egui::Button::new(texts::BTN_RESET_SETTINGS))
-                .clicked()
+            if enabled_button_with_help(
+                ui,
+                enabled,
+                texts::BTN_RESET_SETTINGS,
+                texts::HELP_RESET_SETTINGS,
+            )
+            .clicked()
             {
                 out.push(Intent::ResetSettings);
             }
         }
         ProblemKind::PortInUse => {
-            ui.label(texts::PORT_LABEL);
+            label_with_help(ui, texts::PORT_LABEL, texts::HELP_NEW_PORT);
             let mut port = p.port_text.clone();
             if ui
                 .add_enabled(
@@ -157,16 +164,14 @@ fn problem(ui: &mut egui::Ui, p: &Problem, out: &mut Vec<Intent>) {
             {
                 out.push(Intent::PortEdited(port));
             }
-            if ui
-                .add_enabled(enabled, egui::Button::new(texts::BTN_USE_PORT))
+            if enabled_button_with_help(ui, enabled, texts::BTN_USE_PORT, texts::HELP_USE_PORT)
                 .clicked()
             {
                 out.push(Intent::UsePort);
             }
         }
         ProblemKind::Other(_) => {
-            if ui
-                .add_enabled(enabled, egui::Button::new(texts::BTN_RETRY))
+            if enabled_button_with_help(ui, enabled, texts::BTN_RETRY, texts::HELP_RETRY_OPEN)
                 .clicked()
             {
                 out.push(Intent::RetryOpen);

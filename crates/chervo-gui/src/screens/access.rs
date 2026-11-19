@@ -15,7 +15,7 @@ use crate::access_model::{
 };
 use crate::main_model::MainIntent;
 use crate::model::{Intent, Model};
-use crate::screens::common::{copy_line, help_mark, warn};
+use crate::screens::common::{copy_line, enabled_button_with_help, help_mark, plain_button, warn};
 use crate::settings_model::SettingsIntent;
 use crate::texts;
 
@@ -76,7 +76,7 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
         ui.separator();
         check(ui, a, &mut out);
         ui.add_space(8.0);
-        if ui.button(texts::BTN_CLOSE).clicked() {
+        if plain_button(ui, texts::BTN_CLOSE).clicked() {
             out.push(acc(AccessIntent::Close));
         }
     });
@@ -90,10 +90,7 @@ fn auto(ui: &mut egui::Ui, model: &Model, out: &mut Vec<Intent>) {
         a.stage,
         AccessStage::Searching | AccessStage::Asking | AccessStage::Waiting { .. }
     );
-    if ui
-        .add_enabled(!busy, egui::Button::new(texts::BTN_ACC_AUTO))
-        .clicked()
-    {
+    if enabled_button_with_help(ui, !busy, texts::BTN_ACC_AUTO, texts::HELP_ACC_AUTO).clicked() {
         out.push(acc(AccessIntent::AccessAuto));
     }
     match a.stage {
@@ -108,10 +105,10 @@ fn auto(ui: &mut egui::Ui, model: &Model, out: &mut Vec<Intent>) {
         AccessStage::Asking => {
             ui.label(texts::ACC_ASK_ROUTER);
             ui.horizontal(|ui| {
-                if ui.button(texts::BTN_ACC_ALLOW).clicked() {
+                if plain_button(ui, texts::BTN_ACC_ALLOW).clicked() {
                     out.push(acc(AccessIntent::AccessAllow));
                 }
-                if ui.button(texts::BTN_ACC_DENY).clicked() {
+                if plain_button(ui, texts::BTN_ACC_DENY).clicked() {
                     out.push(acc(AccessIntent::AccessDeny));
                 }
             });
@@ -149,7 +146,7 @@ fn permanent_question(ui: &mut egui::Ui, model: &Model, out: &mut Vec<Intent>) {
     };
     if let Some(r) = set.routers.iter().find(|r| r.needs_permanent) {
         ui.label(core_texts::NEED_PERMANENT_TEXT);
-        if ui.button(texts::BTN_YES).clicked() {
+        if plain_button(ui, texts::BTN_YES).clicked() {
             out.push(Intent::Main(MainIntent::Settings(
                 SettingsIntent::UpnpPermanentYes(r.id),
             )));
@@ -197,16 +194,17 @@ fn manual(ui: &mut egui::Ui, a: &AccessUi) {
 /// «Проверить» и «Правило создано».
 fn check(ui: &mut egui::Ui, a: &AccessUi, out: &mut Vec<Intent>) {
     ui.horizontal(|ui| {
-        if ui
-            .add_enabled(
-                a.check != CheckUi::Checking,
-                egui::Button::new(texts::BTN_ACC_CHECK),
-            )
-            .clicked()
+        if enabled_button_with_help(
+            ui,
+            a.check != CheckUi::Checking,
+            texts::BTN_ACC_CHECK,
+            texts::HELP_ACC_CHECK,
+        )
+        .clicked()
         {
             out.push(acc(AccessIntent::AccessCheck));
         }
-        if ui.button(texts::BTN_ACC_DONE).clicked() {
+        if enabled_button_with_help(ui, true, texts::BTN_ACC_DONE, texts::HELP_ACC_DONE).clicked() {
             out.push(acc(AccessIntent::AccessDone));
         }
     });

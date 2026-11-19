@@ -287,12 +287,29 @@ pub enum Outcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Friends,
+    Files,
+    Settings,
+}
+
+/// Раздел внутри вкладки: к нему ведут программные переходы (этап 18г).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Section {
     AddFriend,
-    Send,
     Offers,
+    Send,
     Transfers,
     Diagnosis,
-    Settings,
+}
+
+impl Section {
+    /// Вкладка, в которой лежит раздел.
+    pub fn page(self) -> Page {
+        match self {
+            Section::AddFriend => Page::Friends,
+            Section::Offers | Section::Send | Section::Transfers => Page::Files,
+            Section::Diagnosis => Page::Settings,
+        }
+    }
 }
 
 /// Что сделал пользователь (кнопки и поля).
@@ -311,6 +328,10 @@ pub enum Intent {
     UsePort,
     Quit,
     Go(Page),
+    /// Перейти на вкладку раздела и показать раздел (развернуть, прокрутить).
+    GoSection(Section),
+    /// Экран показал раздел, к которому вёл переход: отметка снимается.
+    SectionShown,
     CloseRequested,
     CloseConfirmed,
     CloseCancelled,
@@ -405,6 +426,8 @@ pub struct Model {
     pub folder_error: Option<&'static str>,
     /// Просьба к окну привлечь внимание (мигание в панели задач); забирает `take_attention`.
     pub(crate) attention: bool,
+    /// Раздел, к которому нужно прокрутить вкладку; снимается после одного кадра.
+    pub scroll_to: Option<Section>,
 }
 
 impl Model {
@@ -430,6 +453,7 @@ impl Model {
             connecting: Vec::new(),
             folder_error: None,
             attention: false,
+            scroll_to: None,
         };
         (
             m,
@@ -462,6 +486,7 @@ impl Model {
             connecting: Vec::new(),
             folder_error: None,
             attention: false,
+            scroll_to: None,
         }
     }
 
@@ -491,6 +516,26 @@ impl Model {
             Start::Problem(p) => Some(p),
             _ => None,
         }
+    }
+
+    /// Переход на вкладку. Адреса поиска в локальной сети меняются без событий: при открытии
+    /// настроек состояние перечитывается.
+    fn go(&mut self, page: Page) -> Vec<Command> {
+        if !self.node_open {
+            return Vec::new();
+        }
+        self.page = page;
+        self.access.open = false;
+        if page == Page::Settings {
+            return vec![Command::RefreshSnapshot];
+        }
+        Vec::new()
+    }
+
+    /// Программный переход к разделу вкладки (без обновления снимка).
+    pub(crate) fn show_section(&mut self, section: Section) {
+        self.page = section.page();
+        self.scroll_to = Some(section);
     }
 
     pub fn update(&mut self, intent: Intent) -> Vec<Command> {
@@ -528,16 +573,16 @@ impl Model {
             return Vec::new();
         }
         match intent {
-            Intent::Go(page) => {
+            Intent::Go(page) => self.go(page),
+            Intent::GoSection(section) => {
+                let cmds = self.go(section.page());
                 if self.node_open {
-                    self.page = page;
-                    self.access.open = false;
-                    // адреса поиска в локальной сети меняются без событий: при открытии
-                    // настроек состояние перечитывается
-                    if page == Page::Settings {
-                        return vec![Command::RefreshSnapshot];
-                    }
+                    self.scroll_to = Some(section);
                 }
+                cmds
+            }
+            Intent::SectionShown => {
+                self.scroll_to = None;
                 Vec::new()
             }
             Intent::Quit => {
@@ -823,6 +868,39 @@ mod tests {
         let (mut m, _) = Model::start();
         assert!(m.on_outcome(Outcome::OpenFailed(e)).is_empty());
         m
+    }
+
+    #[test]
+    fn go_section_picks_tab_marks_section_and_refreshes_settings() {
+        let mut m = Model::preview();
+        // узел не открыт: переходов нет
+        assert!(m.update(Intent::GoSection(Section::Send)).is_empty());
+        assert_eq!(m.scroll_to, None);
+        m.node_open = true;
+        for (section, page) in [
+            (Section::AddFriend, Page::Friends),
+            (Section::Offers, Page::Files),
+            (Section::Send, Page::Files),
+            (Section::Transfers, Page::Files),
+        ] {
+            assert!(m.update(Intent::GoSection(section)).is_empty());
+            assert_eq!((m.page, m.scroll_to), (page, Some(section)));
+        }
+        // «Диагностика» лежит в «Настройках»: снимок перечитывается, как при обычном входе
+        assert_eq!(
+            m.update(Intent::GoSection(Section::Diagnosis)),
+            vec![Command::RefreshSnapshot]
+        );
+        assert_eq!(
+            (m.page, m.scroll_to),
+            (Page::Settings, Some(Section::Diagnosis))
+        );
+        assert_eq!(
+            m.update(Intent::Go(Page::Settings)),
+            vec![Command::RefreshSnapshot]
+        );
+        assert!(m.update(Intent::SectionShown).is_empty());
+        assert_eq!(m.scroll_to, None);
     }
 
     #[test]

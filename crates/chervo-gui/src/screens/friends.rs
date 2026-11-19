@@ -7,9 +7,12 @@ use chervo_core::{FriendStatus, PathKind};
 use eframe::egui;
 
 use crate::main_model::{Dialog, MAX_PASTE, MainIntent, PasteDialog};
-use crate::model::{Intent, Model, Page};
+use crate::model::{Intent, Model, Section};
 use crate::rows::FriendRow;
-use crate::screens::common::{copy_box, warn};
+use crate::screens::common::{
+    button_with_help, checkbox_with_help, copy_box, enabled_button_with_help, label_with_help,
+    plain_button, warn,
+};
 use crate::texts;
 
 fn main(i: MainIntent) -> Intent {
@@ -48,24 +51,23 @@ fn list(ui: &mut egui::Ui, model: &Model, out: &mut Vec<Intent>) {
     if model.snapshot.friends.is_empty() {
         ui.label(texts::FRIENDS_EMPTY);
         ui.horizontal(|ui| {
-            if ui.button(texts::BTN_INVITE_FRIEND).clicked() {
-                out.push(Intent::Go(Page::AddFriend));
+            if button_with_help(ui, texts::BTN_INVITE_FRIEND, texts::HELP_INVITE_FRIEND).clicked() {
+                out.push(Intent::GoSection(Section::AddFriend));
             }
-            if ui.button(texts::BTN_FRIEND_TEXT).clicked() {
+            if button_with_help(ui, texts::BTN_FRIEND_TEXT, texts::HELP_FRIEND_TEXT).clicked() {
                 out.push(main(MainIntent::FriendTextOpen));
             }
         });
         return;
     }
-    if ui.button(texts::BTN_FRIEND_TEXT).clicked() {
+    if button_with_help(ui, texts::BTN_FRIEND_TEXT, texts::HELP_FRIEND_TEXT).clicked() {
         out.push(main(MainIntent::FriendTextOpen));
     }
     ui.separator();
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        for f in &model.snapshot.friends {
-            friend_row(ui, f, model.connecting.contains(&f.id), out);
-        }
-    });
+    // прокрутку даёт вкладка целиком
+    for f in &model.snapshot.friends {
+        friend_row(ui, f, model.connecting.contains(&f.id), out);
+    }
 }
 
 fn friend_row(ui: &mut egui::Ui, f: &FriendRow, connecting: bool, out: &mut Vec<Intent>) {
@@ -93,10 +95,12 @@ fn friend_row(ui: &mut egui::Ui, f: &FriendRow, connecting: bool, out: &mut Vec<
         let usable = f.status == FriendStatus::Active && !f.key_problem;
         ui.horizontal_wrapped(|ui| {
             if usable {
-                if ui.button(texts::BTN_SEND).clicked() {
+                if button_with_help(ui, texts::BTN_SEND, texts::HELP_FRIEND_SEND).clicked() {
                     out.push(main(MainIntent::FriendSend(f.id)));
                 }
-                if !f.online && ui.button(texts::BTN_CONNECT).clicked() {
+                if !f.online
+                    && button_with_help(ui, texts::BTN_CONNECT, texts::HELP_CONNECT).clicked()
+                {
                     out.push(main(MainIntent::ConnectNow(f.id)));
                 }
                 // С5: «Соединить» ничего не показывал
@@ -104,38 +108,46 @@ fn friend_row(ui: &mut egui::Ui, f: &FriendRow, connecting: bool, out: &mut Vec<
                     ui.spinner();
                     ui.label(texts::CONNECTING);
                 }
-                if ui.button(texts::BTN_DIAGNOSE).clicked() {
-                    out.push(Intent::Go(Page::Diagnosis));
+                if button_with_help(ui, texts::BTN_DIAGNOSE, texts::HELP_DIAGNOSE).clicked() {
+                    out.push(Intent::GoSection(Section::Diagnosis));
                 }
             }
-            if f.status != FriendStatus::Retired && ui.button(texts::BTN_RENAME).clicked() {
+            if f.status != FriendStatus::Retired
+                && button_with_help(ui, texts::BTN_RENAME, texts::HELP_RENAME).clicked()
+            {
                 out.push(main(MainIntent::RenameOpen(f.id)));
             }
-            if f.status == FriendStatus::Active && ui.button(texts::BTN_BLOCK).clicked() {
+            if f.status == FriendStatus::Active
+                && button_with_help(ui, texts::BTN_BLOCK, texts::HELP_BLOCK).clicked()
+            {
                 out.push(main(MainIntent::Block(f.id)));
             }
-            if f.status == FriendStatus::Blocked && ui.button(texts::BTN_UNBLOCK).clicked() {
+            if f.status == FriendStatus::Blocked
+                && button_with_help(ui, texts::BTN_UNBLOCK, texts::HELP_UNBLOCK).clicked()
+            {
                 out.push(main(MainIntent::Unblock(f.id)));
             }
             if matches!(f.status, FriendStatus::Active | FriendStatus::Blocked)
-                && ui.button(texts::BTN_REKEY).clicked()
+                && button_with_help(ui, texts::BTN_REKEY, texts::HELP_REKEY).clicked()
             {
                 out.push(main(MainIntent::RekeyAsk(f.id)));
             }
-            if f.status != FriendStatus::Retired && ui.button(texts::BTN_REMOVE).clicked() {
+            if f.status != FriendStatus::Retired
+                && button_with_help(ui, texts::BTN_REMOVE, texts::HELP_REMOVE).clicked()
+            {
                 out.push(main(MainIntent::RemoveAsk(f.id)));
             }
         });
         if usable {
             ui.horizontal_wrapped(|ui| {
                 if f.auto_accept {
-                    if ui.button(texts::BTN_AUTO_OFF).clicked() {
+                    if button_with_help(ui, texts::BTN_AUTO_OFF, texts::HELP_AUTO_OFF).clicked() {
                         out.push(main(MainIntent::AutoAcceptOff(f.id)));
                     }
-                } else if ui.button(texts::BTN_AUTO_ON).clicked() {
+                } else if button_with_help(ui, texts::BTN_AUTO_ON, texts::HELP_AUTO_ON).clicked() {
                     out.push(main(MainIntent::AutoAcceptAsk(f.id)));
                 }
-                if ui.button(texts::BTN_SEND_ADDR).clicked() {
+                if button_with_help(ui, texts::BTN_SEND_ADDR, texts::HELP_SEND_ADDR).clicked() {
                     out.push(main(MainIntent::AddrTokenOpen(f.id)));
                 }
             });
@@ -158,14 +170,15 @@ fn dialog(ui: &mut egui::Ui, model: &Model, d: &Dialog, out: &mut Vec<Intent>) {
         Dialog::Rename { friend: _, text } => {
             ui.heading(texts::BTN_RENAME);
             let mut t = text.clone();
+            label_with_help(ui, texts::LABEL_NAME, texts::HELP_RENAME_FIELD);
             if ui.text_edit_singleline(&mut t).changed() {
                 out.push(main(MainIntent::RenameEdited(t)));
             }
             ui.horizontal(|ui| {
-                if ui.button(texts::BTN_SAVE).clicked() {
+                if button_with_help(ui, texts::BTN_SAVE, texts::HELP_SAVE_NAME).clicked() {
                     out.push(main(MainIntent::RenameSubmit));
                 }
-                if ui.button(texts::BTN_CANCEL).clicked() {
+                if plain_button(ui, texts::BTN_CANCEL).clicked() {
                     out.push(main(MainIntent::DialogClose));
                 }
             });
@@ -188,10 +201,10 @@ fn dialog(ui: &mut egui::Ui, model: &Model, d: &Dialog, out: &mut Vec<Intent>) {
             ui.heading(friend_name(model, *id));
             ui.label(core_texts::TRUST_QUESTION_TEXT);
             ui.horizontal(|ui| {
-                if ui.button(texts::BTN_YES_TRUST).clicked() {
+                if plain_button(ui, texts::BTN_YES_TRUST).clicked() {
                     out.push(main(MainIntent::TrustYes));
                 }
-                if ui.button(texts::BTN_NO).clicked() {
+                if plain_button(ui, texts::BTN_NO).clicked() {
                     out.push(main(MainIntent::DialogClose));
                 }
             });
@@ -213,11 +226,13 @@ fn dialog(ui: &mut egui::Ui, model: &Model, d: &Dialog, out: &mut Vec<Intent>) {
                 }
             });
             ui.horizontal(|ui| {
-                if r.rekey && ui.button(texts::BTN_NEW_INVITE).clicked() {
+                if r.rekey
+                    && button_with_help(ui, texts::BTN_NEW_INVITE, texts::HELP_NEW_INVITE).clicked()
+                {
                     out.push(main(MainIntent::DialogClose));
-                    out.push(Intent::Go(Page::AddFriend));
+                    out.push(Intent::GoSection(Section::AddFriend));
                 }
-                if ui.button(texts::BTN_OK).clicked() {
+                if plain_button(ui, texts::BTN_OK).clicked() {
                     out.push(main(MainIntent::DialogClose));
                 }
             });
@@ -229,22 +244,34 @@ fn dialog(ui: &mut egui::Ui, model: &Model, d: &Dialog, out: &mut Vec<Intent>) {
             match &a.token {
                 None => {
                     let mut same = a.same_network;
-                    if ui.checkbox(&mut same, texts::LABEL_SAME_NETWORK).changed() {
+                    if checkbox_with_help(
+                        ui,
+                        true,
+                        &mut same,
+                        texts::LABEL_SAME_NETWORK,
+                        texts::HELP_SAME_NETWORK,
+                    )
+                    .changed()
+                    {
                         out.push(main(MainIntent::AddrTokenNetwork(same)));
                     }
                     if let Some(e) = a.error {
                         warn(ui, e);
                     }
-                    if ui
-                        .add_enabled(!a.busy, egui::Button::new(texts::BTN_CREATE_TOKEN))
-                        .clicked()
+                    if enabled_button_with_help(
+                        ui,
+                        !a.busy,
+                        texts::BTN_CREATE_TOKEN,
+                        texts::HELP_CREATE_TOKEN,
+                    )
+                    .clicked()
                     {
                         out.push(main(MainIntent::AddrTokenIssue));
                     }
                 }
                 Some(t) => copy_box(ui, t),
             }
-            if ui.button(texts::BTN_OK).clicked() {
+            if plain_button(ui, texts::BTN_OK).clicked() {
                 out.push(main(MainIntent::DialogClose));
             }
         }
@@ -256,7 +283,7 @@ fn dialog(ui: &mut egui::Ui, model: &Model, d: &Dialog, out: &mut Vec<Intent>) {
 /// Показывается и на «Друзьях», и на «Добавить друга».
 pub fn friend_text_dialog(ui: &mut egui::Ui, p: &PasteDialog, out: &mut Vec<Intent>) {
     ui.heading(texts::FRIEND_TEXT_TITLE);
-    ui.label(texts::LABEL_PASTE_HERE);
+    label_with_help(ui, texts::LABEL_PASTE_HERE, texts::HELP_PASTE_FIELD);
     let mut t = p.text.clone();
     // egui 0.37: `char_limit` действует только у однострочного поля. Предел на один символ
     // больше 4096, чтобы слишком длинный текст был виден как «слишком длинный».
@@ -269,13 +296,11 @@ pub fn friend_text_dialog(ui: &mut egui::Ui, p: &PasteDialog, out: &mut Vec<Inte
     }
     // кнопки сразу под полем: при узком окне они не уходят за край (Ж5)
     ui.horizontal(|ui| {
-        if ui
-            .add_enabled(!p.busy, egui::Button::new(texts::BTN_APPLY))
-            .clicked()
+        if enabled_button_with_help(ui, !p.busy, texts::BTN_APPLY, texts::HELP_APPLY_TEXT).clicked()
         {
             out.push(main(MainIntent::FriendTextSubmit));
         }
-        if ui.button(texts::BTN_CANCEL).clicked() {
+        if plain_button(ui, texts::BTN_CANCEL).clicked() {
             out.push(main(MainIntent::DialogClose));
         }
     });
@@ -289,10 +314,10 @@ pub fn friend_text_dialog(ui: &mut egui::Ui, p: &PasteDialog, out: &mut Vec<Inte
 
 fn confirm_buttons(ui: &mut egui::Ui, yes: &str, intent: MainIntent, out: &mut Vec<Intent>) {
     ui.horizontal(|ui| {
-        if ui.button(yes).clicked() {
+        if plain_button(ui, yes).clicked() {
             out.push(main(intent));
         }
-        if ui.button(texts::BTN_CANCEL).clicked() {
+        if plain_button(ui, texts::BTN_CANCEL).clicked() {
             out.push(main(MainIntent::DialogClose));
         }
     });

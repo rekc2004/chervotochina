@@ -10,7 +10,7 @@ use eframe::egui;
 use crate::main_model::MainIntent;
 use crate::model::{Intent, Model};
 use crate::rows::TransferRow;
-use crate::screens::common::{copy_box, warn};
+use crate::screens::common::{button_with_help, copy_box, warn};
 use crate::texts;
 
 fn main(i: MainIntent) -> Intent {
@@ -21,7 +21,7 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
     let mut out = Vec::new();
     // Н7: открывается только папка приёма из настроек; ошибка запуска показана рядом
     ui.horizontal_wrapped(|ui| {
-        if ui.button(texts::BTN_OPEN_FOLDER).clicked() {
+        if button_with_help(ui, texts::BTN_OPEN_FOLDER, texts::HELP_OPEN_FOLDER).clicked() {
             out.push(main(MainIntent::OpenReceiveFolder));
         }
         if let Some(e) = model.folder_error {
@@ -33,12 +33,11 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
         ui.label(texts::TRANSFERS_EMPTY);
         return out;
     }
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        for t in model.snapshot.transfers.iter().rev() {
-            row(ui, t, &mut out);
-            ui.add_space(6.0);
-        }
-    });
+    // прокрутку даёт вкладка целиком
+    for t in model.snapshot.transfers.iter().rev() {
+        row(ui, t, &mut out);
+        ui.add_space(6.0);
+    }
     out
 }
 
@@ -87,11 +86,14 @@ fn row(ui: &mut egui::Ui, t: &TransferRow, out: &mut Vec<Intent>) {
         if t.result.is_none() {
             ui.horizontal(|ui| {
                 if matches!(t.state, TransferState::Paused(_))
-                    && ui.button(texts::BTN_RETRY_TRANSFER).clicked()
+                    && button_with_help(ui, texts::BTN_RETRY_TRANSFER, texts::HELP_RETRY_TRANSFER)
+                        .clicked()
                 {
                     out.push(main(MainIntent::TransferRetry(t.id)));
                 }
-                if ui.button(texts::BTN_CANCEL_TRANSFER).clicked() {
+                if button_with_help(ui, texts::BTN_CANCEL_TRANSFER, texts::HELP_CANCEL_TRANSFER)
+                    .clicked()
+                {
                     out.push(main(MainIntent::TransferCancel(t.id)));
                 }
             });

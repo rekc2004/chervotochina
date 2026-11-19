@@ -102,7 +102,7 @@ pub const RESULT_PROTOCOL_TEXT: &str = "Передача прервана из-�
 pub const RESULT_BUSY_TEXT: &str = "Друг сейчас занят другой передачей. Попробуйте позже.";
 pub const RESULT_LIMITS_TEXT: &str =
     "Предложение не подошло под ограничения приёма (число файлов, размер или имена).";
-pub const RESULT_NOT_FRIEND_TEXT: &str = "Друг не признал это соединение. Добавьте друга заново: вкладка «Добавить друга», затем «Создать приглашение».";
+pub const RESULT_NOT_FRIEND_TEXT: &str = "Друг не признал это соединение. Добавьте друга заново: вкладка «Друзья», раздел «Добавить друга», кнопка «Создать приглашение».";
 pub const RESULT_CANCELLED_BY_US_TEXT: &str = "Вы отменили передачу.";
 
 fn root_text(e: RootError) -> &'static str {

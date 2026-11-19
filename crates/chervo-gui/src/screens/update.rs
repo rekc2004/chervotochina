@@ -9,7 +9,10 @@ use eframe::egui;
 use crate::main_model::MainIntent;
 use crate::model::{Intent, Model};
 use crate::picker;
-use crate::screens::common::{copy_box, warn};
+use crate::screens::common::{
+    button_with_help, checkbox_with_help, copy_box, enabled_button_with_help, help_mark,
+    plain_button, warn,
+};
 use crate::texts;
 use crate::update_model::{FileLine, UpdateIntent as U, VerifyResult};
 
@@ -23,10 +26,10 @@ pub fn consent_card(ui: &mut egui::Ui, out: &mut Vec<Intent>) {
         ui.strong(texts::UPD_CONSENT_TITLE);
         ui.label(texts::UPD_CONSENT_TEXT);
         ui.horizontal(|ui| {
-            if ui.button(texts::BTN_UPD_ENABLE).clicked() {
+            if button_with_help(ui, texts::BTN_UPD_ENABLE, texts::HELP_UPD_ENABLE).clicked() {
                 out.push(u(U::SetConsent(true)));
             }
-            if ui.button(texts::BTN_UPD_DISABLE).clicked() {
+            if button_with_help(ui, texts::BTN_UPD_DISABLE, texts::HELP_UPD_DISABLE).clicked() {
                 out.push(u(U::SetConsent(false)));
             }
         });
@@ -41,17 +44,17 @@ pub fn newer_card(ui: &mut egui::Ui, model: &Model, out: &mut Vec<Intent>) {
     ui.group(|ui| {
         ui.strong(texts::upd_newer(v, chervo_core::VERSION));
         ui.horizontal(|ui| {
-            if ui.button(texts::BTN_UPD_WHERE).clicked() {
+            if button_with_help(ui, texts::BTN_UPD_WHERE, texts::HELP_UPD_WHERE).clicked() {
                 out.push(u(U::LinkOpen));
             }
-            if ui.button(texts::NOTICES_HIDE).clicked() {
+            if plain_button(ui, texts::NOTICES_HIDE).clicked() {
                 out.push(u(U::DismissNewer));
             }
         });
         if model.update.link_open {
             ui.label(texts::UPD_LINK_TEXT);
             copy_box(ui, RELEASES_PAGE);
-            if ui.button(texts::BTN_OK).clicked() {
+            if plain_button(ui, texts::BTN_OK).clicked() {
                 out.push(u(U::LinkClose));
             }
         }
@@ -76,12 +79,11 @@ fn check_section(ui: &mut egui::Ui, model: &Model, out: &mut Vec<Intent>) {
     ui.label(format!("{}: {}", texts::UPD_RUNNING, chervo_core::VERSION));
     let consent = model.update_consent();
     let mut on = consent == UpdateConsent::Enabled;
-    if ui.checkbox(&mut on, texts::UPD_TOGGLE).changed() {
+    if checkbox_with_help(ui, true, &mut on, texts::UPD_TOGGLE, texts::HELP_UPD_TOGGLE).changed() {
         out.push(u(U::SetConsent(on)));
     }
     let can = consent == UpdateConsent::Enabled && !model.update.checking;
-    if ui
-        .add_enabled(can, egui::Button::new(texts::BTN_UPD_CHECK_NOW))
+    if enabled_button_with_help(ui, can, texts::BTN_UPD_CHECK_NOW, texts::HELP_UPD_CHECK_NOW)
         .clicked()
     {
         out.push(u(U::CheckNow));
@@ -102,12 +104,18 @@ fn check_section(ui: &mut egui::Ui, model: &Model, out: &mut Vec<Intent>) {
 
 fn verify_section(ui: &mut egui::Ui, model: &Model, out: &mut Vec<Intent>) {
     let st = &model.update;
-    ui.heading(texts::UPD_VERIFY_TITLE);
-    ui.label(texts::UPD_VERIFY_HINT);
     ui.horizontal(|ui| {
-        if ui
-            .add_enabled(!st.busy, egui::Button::new(texts::BTN_UPD_PICK_MANIFEST))
-            .clicked()
+        ui.heading(texts::UPD_VERIFY_TITLE);
+        help_mark(ui, texts::HELP_UPD_VERIFY_SECTION);
+    });
+    ui.horizontal(|ui| {
+        if enabled_button_with_help(
+            ui,
+            !st.busy,
+            texts::BTN_UPD_PICK_MANIFEST,
+            texts::HELP_UPD_PICK_MANIFEST,
+        )
+        .clicked()
             && let Some(p) = picker::pick_file()
         {
             out.push(u(U::PickManifest(p)));
@@ -117,9 +125,13 @@ fn verify_section(ui: &mut egui::Ui, model: &Model, out: &mut Vec<Intent>) {
         }
     });
     ui.horizontal(|ui| {
-        if ui
-            .add_enabled(!st.busy, egui::Button::new(texts::BTN_UPD_PICK_SIG))
-            .clicked()
+        if enabled_button_with_help(
+            ui,
+            !st.busy,
+            texts::BTN_UPD_PICK_SIG,
+            texts::HELP_UPD_PICK_SIG,
+        )
+        .clicked()
             && let Some(p) = picker::pick_file()
         {
             out.push(u(U::PickSignature(p)));
@@ -129,9 +141,13 @@ fn verify_section(ui: &mut egui::Ui, model: &Model, out: &mut Vec<Intent>) {
         }
     });
     ui.horizontal(|ui| {
-        if ui
-            .add_enabled(!st.busy, egui::Button::new(texts::BTN_UPD_PICK_FILES))
-            .clicked()
+        if enabled_button_with_help(
+            ui,
+            !st.busy,
+            texts::BTN_UPD_PICK_FILES,
+            texts::HELP_UPD_PICK_FILES,
+        )
+        .clicked()
         {
             let picked = picker::pick_files()
                 .into_iter()
@@ -143,9 +159,13 @@ fn verify_section(ui: &mut egui::Ui, model: &Model, out: &mut Vec<Intent>) {
             }
         }
         if !st.files.is_empty()
-            && ui
-                .add_enabled(!st.busy, egui::Button::new(texts::BTN_REMOVE_ITEM))
-                .clicked()
+            && enabled_button_with_help(
+                ui,
+                !st.busy,
+                texts::BTN_REMOVE_ITEM,
+                texts::HELP_UPD_CLEAR_FILES,
+            )
+            .clicked()
         {
             out.push(u(U::ClearFiles));
         }
@@ -154,19 +174,19 @@ fn verify_section(ui: &mut egui::Ui, model: &Model, out: &mut Vec<Intent>) {
         ui.label(label);
     }
     let mut downgrade = st.allow_downgrade;
-    if ui
-        .add_enabled(
-            !st.busy,
-            egui::Checkbox::new(&mut downgrade, texts::UPD_ALLOW_DOWNGRADE),
-        )
-        .changed()
+    if checkbox_with_help(
+        ui,
+        !st.busy,
+        &mut downgrade,
+        texts::UPD_ALLOW_DOWNGRADE,
+        texts::HELP_UPD_DOWNGRADE,
+    )
+    .changed()
     {
         out.push(u(U::AllowDowngrade(downgrade)));
     }
     let ready = st.manifest.is_some() && st.minisig.is_some() && !st.files.is_empty() && !st.busy;
-    if ui
-        .add_enabled(ready, egui::Button::new(texts::BTN_UPD_VERIFY))
-        .clicked()
+    if enabled_button_with_help(ui, ready, texts::BTN_UPD_VERIFY, texts::HELP_UPD_VERIFY).clicked()
     {
         out.push(u(U::Verify));
     }

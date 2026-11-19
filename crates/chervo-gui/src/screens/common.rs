@@ -35,6 +35,58 @@ pub fn label_with_help(ui: &mut egui::Ui, label: &str, help: &str) {
     });
 }
 
+/// Кнопка без «?»: только очевидные («Отмена», «Закрыть», «Готово», «Да»/«Нет» в вопросах
+/// подтверждения). Всё остальное идёт через `button_with_help` и его родственников.
+pub fn plain_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.button(label)
+}
+
+/// Кнопка с «?» рядом: значок и кнопка остаются одной группой при переносе строки.
+pub fn button_with_help(ui: &mut egui::Ui, label: &str, help: &str) -> egui::Response {
+    enabled_button_with_help(ui, true, label, help)
+}
+
+/// Кнопка (может быть недоступной) с «?» рядом.
+pub fn enabled_button_with_help(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    label: &str,
+    help: &str,
+) -> egui::Response {
+    ui.horizontal(|ui| {
+        let response = ui.add_enabled(enabled, egui::Button::new(label));
+        help_mark(ui, help);
+        response
+    })
+    .inner
+}
+
+/// Маленькая кнопка с «?» рядом (строки списков).
+pub fn small_button_with_help(ui: &mut egui::Ui, label: &str, help: &str) -> egui::Response {
+    ui.horizontal(|ui| {
+        let response = ui.small_button(label);
+        help_mark(ui, help);
+        response
+    })
+    .inner
+}
+
+/// Галочка с «?» рядом.
+pub fn checkbox_with_help(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    checked: &mut bool,
+    label: &str,
+    help: &str,
+) -> egui::Response {
+    ui.horizontal(|ui| {
+        let response = ui.add_enabled(enabled, egui::Checkbox::new(checked, label));
+        help_mark(ui, help);
+        response
+    })
+    .inner
+}
+
 /// Текст только для чтения с кнопкой «Копировать». Копирование идёт в системный буфер через
 /// egui; исключение из истории буфера здесь недоступно (см. отчёт этапа).
 pub fn copy_box(ui: &mut egui::Ui, text: &str) {

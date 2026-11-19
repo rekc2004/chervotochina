@@ -12,7 +12,10 @@ use crate::main_model::MainIntent;
 use crate::model::{Intent, Model, Page};
 use crate::picker;
 use crate::rows::SettingsRow;
-use crate::screens::common::{copy_box, label_with_help, warn};
+use crate::screens::common::{
+    button_with_help, checkbox_with_help, copy_box, enabled_button_with_help, help_mark,
+    label_with_help, plain_button, warn,
+};
 use crate::settings_model::{ClockUi, NumEdit, SettingsIntent as S, SettingsUi, UpnpUi};
 use crate::texts;
 
@@ -22,30 +25,29 @@ fn s(i: S) -> Intent {
 
 pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
     let mut out = Vec::new();
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        if let Some(set) = &model.snapshot.settings {
-            if set.restart_needed {
-                warn(ui, texts::SET_RESTART);
-            }
-            folders(ui, set, &model.settings_ui, &mut out);
-            ui.separator();
-            numbers(ui, set, &model.settings_ui, &mut out);
-            ui.separator();
-            lan(ui, set, &mut out);
-            ui.separator();
-            external(ui, set, &model.settings_ui, &mut out);
-            ui.separator();
-            upnp(ui, model, set, &mut out);
-            ui.separator();
-            clock(ui, set, &model.settings_ui, &mut out);
-            ui.separator();
-            keys(ui, model, set, &mut out);
-            ui.separator();
+    // прокрутку даёт вкладка целиком
+    if let Some(set) = &model.snapshot.settings {
+        if set.restart_needed {
+            warn(ui, texts::SET_RESTART);
         }
-        about(ui);
+        folders(ui, set, &model.settings_ui, &mut out);
         ui.separator();
-        crate::screens::update::section(ui, model, &mut out);
-    });
+        numbers(ui, set, &model.settings_ui, &mut out);
+        ui.separator();
+        lan(ui, set, &mut out);
+        ui.separator();
+        external(ui, set, &model.settings_ui, &mut out);
+        ui.separator();
+        upnp(ui, model, set, &mut out);
+        ui.separator();
+        clock(ui, set, &model.settings_ui, &mut out);
+        ui.separator();
+        keys(ui, model, set, &mut out);
+        ui.separator();
+    }
+    about(ui);
+    ui.separator();
+    crate::screens::update::section(ui, model, &mut out);
     out
 }
 
@@ -66,6 +68,7 @@ fn folders(ui: &mut egui::Ui, set: &SettingsRow, st: &SettingsUi, out: &mut Vec<
             !r.busy,
             egui::TextEdit::singleline(&mut text).desired_width(360.0),
         );
+        help_mark(ui, texts::HELP_SET_ROOT);
         if resp.changed() {
             out.push(s(S::RootEdited(text.clone())));
         }
@@ -77,9 +80,13 @@ fn folders(ui: &mut egui::Ui, set: &SettingsRow, st: &SettingsUi, out: &mut Vec<
             out.push(s(S::RootSubmit));
         }
         // выбор в окне сразу меняет папку, с теми же проверками, что и ввод пути
-        if ui
-            .add_enabled(!r.busy, egui::Button::new(texts::BTN_PICK_FOLDER))
-            .clicked()
+        if enabled_button_with_help(
+            ui,
+            !r.busy,
+            texts::BTN_PICK_FOLDER,
+            texts::HELP_SET_PICK_ROOT,
+        )
+        .clicked()
             && let Some(p) = picker::pick_folder()
         {
             out.push(s(S::RootEdited(p.to_string_lossy().into_owned())));
@@ -91,12 +98,14 @@ fn folders(ui: &mut egui::Ui, set: &SettingsRow, st: &SettingsUi, out: &mut Vec<
     }
     if r.outside_warning {
         let mut checked = r.outside_confirmed;
-        if ui
-            .add_enabled(
-                !r.busy,
-                egui::Checkbox::new(&mut checked, texts::CHECK_NO_OTHER_USERS),
-            )
-            .changed()
+        if checkbox_with_help(
+            ui,
+            !r.busy,
+            &mut checked,
+            texts::CHECK_NO_OTHER_USERS,
+            texts::HELP_SET_OUTSIDE,
+        )
+        .changed()
         {
             out.push(s(S::RootOutsideChecked(checked)));
             if checked {
@@ -110,12 +119,13 @@ fn folders(ui: &mut egui::Ui, set: &SettingsRow, st: &SettingsUi, out: &mut Vec<
 fn num_row(
     ui: &mut egui::Ui,
     label: &str,
+    help: &str,
     edit: &NumEdit,
     current: String,
     on_edit: fn(String) -> S,
     out: &mut Vec<Intent>,
 ) {
-    ui.label(label);
+    label_with_help(ui, label, help);
     let mut text = edit.text.clone().unwrap_or(current);
     if ui
         .add(egui::TextEdit::singleline(&mut text).desired_width(100.0))
@@ -134,6 +144,7 @@ fn numbers(ui: &mut egui::Ui, set: &SettingsRow, st: &SettingsUi, out: &mut Vec<
     num_row(
         ui,
         texts::SET_MIN_FREE,
+        texts::HELP_SET_MIN_FREE,
         &st.min_free,
         set.min_free_percent.to_string(),
         S::MinFreeEdited,
@@ -142,6 +153,7 @@ fn numbers(ui: &mut egui::Ui, set: &SettingsRow, st: &SettingsUi, out: &mut Vec<
     num_row(
         ui,
         texts::SET_PORT,
+        texts::HELP_SET_PORT,
         &st.port,
         set.port.to_string(),
         S::PortEdited,
@@ -150,6 +162,7 @@ fn numbers(ui: &mut egui::Ui, set: &SettingsRow, st: &SettingsUi, out: &mut Vec<
     num_row(
         ui,
         texts::ACC_MANUAL_FORWARD_LABEL,
+        texts::HELP_SET_FORWARD,
         &st.forward,
         set.manual_forward
             .map(|p| p.to_string())
@@ -158,10 +171,7 @@ fn numbers(ui: &mut egui::Ui, set: &SettingsRow, st: &SettingsUi, out: &mut Vec<
         out,
     );
     let edited = st.min_free.text.is_some() || st.port.text.is_some() || st.forward.text.is_some();
-    if ui
-        .add_enabled(edited, egui::Button::new(texts::BTN_SAVE))
-        .clicked()
-    {
+    if enabled_button_with_help(ui, edited, texts::BTN_SAVE, texts::HELP_SET_SAVE).clicked() {
         if st.min_free.text.is_some() {
             out.push(s(S::MinFreeSubmit));
         }
@@ -184,9 +194,17 @@ fn lan(ui: &mut egui::Ui, set: &SettingsRow, out: &mut Vec<Intent>) {
             LanMode::Listen => texts::LAN_SHORT_LISTEN,
             _ => texts::LAN_SHORT_ANNOUNCE,
         };
-        if ui.radio(set.lan.mode == mode, short).clicked() {
-            out.push(s(S::LanChoose(mode)));
-        }
+        let help = match mode {
+            LanMode::Off => texts::HELP_LAN_OFF,
+            LanMode::Listen => texts::HELP_LAN_LISTEN,
+            _ => texts::HELP_LAN_ANNOUNCE,
+        };
+        ui.horizontal(|ui| {
+            if ui.radio(set.lan.mode == mode, short).clicked() {
+                out.push(s(S::LanChoose(mode)));
+            }
+            help_mark(ui, help);
+        });
     }
     ui.label(core_texts::lan_status_text(
         set.lan.status.unwrap_or(LanStatus::Off),
@@ -230,18 +248,23 @@ fn external(ui: &mut egui::Ui, set: &SettingsRow, st: &SettingsUi, out: &mut Vec
         warn(ui, e);
     }
     ui.horizontal(|ui| {
-        if ui
-            .add_enabled(st.echo.text.is_some(), egui::Button::new(texts::BTN_SAVE))
-            .clicked()
+        if enabled_button_with_help(
+            ui,
+            st.echo.text.is_some(),
+            texts::BTN_SAVE,
+            texts::HELP_EXT_SAVE,
+        )
+        .clicked()
         {
             out.push(s(S::EchoSave));
         }
-        if ui
-            .add_enabled(
-                set.echo_server.is_some() || st.echo.text.is_some(),
-                egui::Button::new(texts::BTN_CLEAR),
-            )
-            .clicked()
+        if enabled_button_with_help(
+            ui,
+            set.echo_server.is_some() || st.echo.text.is_some(),
+            texts::BTN_CLEAR,
+            texts::HELP_EXT_CLEAR,
+        )
+        .clicked()
         {
             out.push(s(S::EchoClear));
         }
@@ -250,19 +273,20 @@ fn external(ui: &mut egui::Ui, set: &SettingsRow, st: &SettingsUi, out: &mut Vec
 
 fn upnp(ui: &mut egui::Ui, model: &Model, set: &SettingsRow, out: &mut Vec<Intent>) {
     ui.heading(texts::SET_TITLE_UPNP);
-    if ui.button(texts::BTN_OPEN_ACCESS).clicked() {
+    if button_with_help(ui, texts::BTN_OPEN_ACCESS, texts::HELP_OPEN_ACCESS).clicked() {
         out.push(Intent::Main(MainIntent::Access(AccessIntent::Open)));
     }
     if let Some(m) = model.snapshot.mapping {
         ui.label(core_texts::mapping_text(m));
     }
     let state = model.settings_ui.upnp;
-    if ui
-        .add_enabled(
-            state != UpnpUi::Searching,
-            egui::Button::new(texts::BTN_FIND_ROUTER),
-        )
-        .clicked()
+    if enabled_button_with_help(
+        ui,
+        state != UpnpUi::Searching,
+        texts::BTN_FIND_ROUTER,
+        texts::HELP_FIND_ROUTER,
+    )
+    .clicked()
     {
         out.push(s(S::UpnpFind));
     }
@@ -273,10 +297,10 @@ fn upnp(ui: &mut egui::Ui, model: &Model, set: &SettingsRow, out: &mut Vec<Inten
         UpnpUi::Found => {
             ui.label(core_texts::ENABLE_ON_ROUTER_TEXT);
             ui.horizontal(|ui| {
-                if ui.button(texts::BTN_YES).clicked() {
+                if plain_button(ui, texts::BTN_YES).clicked() {
                     out.push(s(S::UpnpAllowYes));
                 }
-                if ui.button(texts::BTN_NO).clicked() {
+                if plain_button(ui, texts::BTN_NO).clicked() {
                     out.push(s(S::UpnpDecline));
                 }
             });
@@ -295,7 +319,7 @@ fn upnp(ui: &mut egui::Ui, model: &Model, set: &SettingsRow, out: &mut Vec<Inten
     {
         ui.strong(format!("{} {}", texts::SET_ROUTER_ITEM, n + 1));
         ui.label(core_texts::NEED_PERMANENT_TEXT);
-        if ui.button(texts::BTN_YES).clicked() {
+        if plain_button(ui, texts::BTN_YES).clicked() {
             out.push(s(S::UpnpPermanentYes(r.id)));
         }
     }
@@ -311,7 +335,7 @@ fn upnp(ui: &mut egui::Ui, model: &Model, set: &SettingsRow, out: &mut Vec<Inten
                 t.push_str(texts::SET_ROUTER_PERMANENT);
             }
             ui.label(t);
-            if ui.button(texts::BTN_FORGET).clicked() {
+            if button_with_help(ui, texts::BTN_FORGET, texts::HELP_FORGET_ROUTER).clicked() {
                 out.push(s(S::UpnpForget(r.id)));
             }
         });
@@ -319,8 +343,10 @@ fn upnp(ui: &mut egui::Ui, model: &Model, set: &SettingsRow, out: &mut Vec<Inten
 }
 
 fn clock(ui: &mut egui::Ui, set: &SettingsRow, st: &SettingsUi, out: &mut Vec<Intent>) {
-    ui.heading(texts::SET_TITLE_CLOCK);
-    ui.label(texts::SET_CLOCK_NOTE);
+    ui.horizontal(|ui| {
+        ui.heading(texts::SET_TITLE_CLOCK);
+        help_mark(ui, texts::HELP_CLOCK_NOTE);
+    });
     egui::CollapsingHeader::new(texts::DETAILS)
         .id_salt("clock-details")
         .default_open(false)
@@ -334,18 +360,18 @@ fn clock(ui: &mut egui::Ui, set: &SettingsRow, st: &SettingsUi, out: &mut Vec<In
         });
     ui.horizontal(|ui| {
         let busy = matches!(st.clock, ClockUi::Syncing | ClockUi::Proposal(_));
-        if ui
-            .add_enabled(!busy, egui::Button::new(texts::BTN_SYNC_CLOCK))
+        if enabled_button_with_help(ui, !busy, texts::BTN_SYNC_CLOCK, texts::HELP_SYNC_CLOCK)
             .clicked()
         {
             out.push(s(S::ClockSync));
         }
-        if ui
-            .add_enabled(
-                !matches!(st.clock, ClockUi::Syncing),
-                egui::Button::new(texts::BTN_RESET_CLOCK),
-            )
-            .clicked()
+        if enabled_button_with_help(
+            ui,
+            !matches!(st.clock, ClockUi::Syncing),
+            texts::BTN_RESET_CLOCK,
+            texts::HELP_RESET_CLOCK,
+        )
+        .clicked()
         {
             out.push(s(S::ClockReset));
         }
@@ -357,10 +383,10 @@ fn clock(ui: &mut egui::Ui, set: &SettingsRow, st: &SettingsUi, out: &mut Vec<In
         ClockUi::Proposal(ms) => {
             warn(ui, &texts::clock_proposal_text(ms));
             ui.horizontal(|ui| {
-                if ui.button(texts::BTN_APPLY_OFFSET).clicked() {
+                if plain_button(ui, texts::BTN_APPLY_OFFSET).clicked() {
                     out.push(s(S::ClockConfirm));
                 }
-                if ui.button(texts::BTN_CANCEL).clicked() {
+                if plain_button(ui, texts::BTN_CANCEL).clicked() {
                     out.push(s(S::ClockDismiss));
                 }
             });
@@ -394,8 +420,8 @@ fn keys(ui: &mut egui::Ui, model: &Model, set: &SettingsRow, out: &mut Vec<Inten
             ));
         });
     // режима «локальные ключи» нет: ни переключателя, ни кнопки
-    if ui.button(texts::BTN_REKEY_ALL).clicked() {
-        // диалог подтверждения живёт на экране «Друзья»
+    if button_with_help(ui, texts::BTN_REKEY_ALL, texts::HELP_REKEY_ALL).clicked() {
+        // диалог подтверждения живёт на вкладке «Друзья»
         out.push(Intent::Main(MainIntent::RekeyAllAsk));
         out.push(Intent::Go(Page::Friends));
     }
@@ -408,7 +434,8 @@ fn keys(ui: &mut egui::Ui, model: &Model, set: &SettingsRow, out: &mut Vec<Inten
         ui.group(|ui| {
             ui.strong(&r.friend);
             crate::screens::common::copy_box(ui, &r.text);
-            if ui.button(texts::BTN_FORGET_RETIRED).clicked() {
+            if button_with_help(ui, texts::BTN_FORGET_RETIRED, texts::HELP_FORGET_RETIRED).clicked()
+            {
                 out.push(s(S::ForgetRetired(r.id)));
             }
         });

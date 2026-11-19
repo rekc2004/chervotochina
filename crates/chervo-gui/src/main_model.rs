@@ -11,7 +11,7 @@ use std::time::Instant;
 use chervo_core::{FriendStatus, InviteOutcome};
 
 use crate::access_model::{AccessIntent, ExternalMode, GetIpUi, InviteExt};
-use crate::model::{Command, FriendTextOutcome, Model, Outcome, Page};
+use crate::model::{Command, FriendTextOutcome, Model, Outcome, Section};
 use crate::qr::{self, QrMatrix};
 use crate::redact::redacted_debug_enum;
 use crate::rows::{Id, PickedPath};
@@ -453,7 +453,7 @@ impl Model {
             I::FriendSend(id) => {
                 if self.usable_friend(id) {
                     self.send.friend = Some(id);
-                    self.page = Page::Send;
+                    self.show_section(Section::Send);
                 }
                 Vec::new()
             }
@@ -597,7 +597,7 @@ impl Model {
                     }
                 }
                 self.send.error = None;
-                self.page = Page::Send;
+                self.show_section(Section::Send);
                 Vec::new()
             }
             I::PathRemoved(i) => {
@@ -761,7 +761,7 @@ impl Model {
                 match done {
                     FriendTextOutcome::InviteAccepted(invite) => {
                         // к сверке кода: она показывается на «Добавить друга»
-                        self.page = Page::AddFriend;
+                        self.show_section(Section::AddFriend);
                         // могла прийти раньше проверочного кода: не затираем его
                         if !matches!(self.add.stage, AddStage::Sas(_)) {
                             self.add.stage = AddStage::Waiting {
@@ -808,7 +808,7 @@ impl Model {
                 if matches!(self.dialog, Dialog::FriendText(_)) {
                     self.dialog = Dialog::None;
                 }
-                self.page = Page::AddFriend;
+                self.show_section(Section::AddFriend);
                 self.attention = true;
             }
             Outcome::SasAnswered(Err(e)) => {
@@ -865,7 +865,7 @@ impl Model {
                     Ok(()) => {
                         self.send.paths.clear();
                         self.send.error = None;
-                        self.page = Page::Transfers;
+                        self.show_section(Section::Transfers);
                     }
                     Err(e) => self.send.error = Some(e.user_text()),
                 }
@@ -900,7 +900,7 @@ fn invite_text(o: InviteOutcome) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Intent, Snapshot};
+    use crate::model::{Intent, Page, Snapshot};
     use crate::rows::{FileRow, FriendRow, OfferRow, TransferRow};
     use chervo_core::{FileKind, PauseReason, Side, SpaceView, TransferState};
 
@@ -969,7 +969,8 @@ mod tests {
             })
             .is_empty()
         );
-        assert_eq!(m.page, Page::AddFriend);
+        assert_eq!(m.page, Page::Friends);
+        assert_eq!(m.scroll_to, Some(Section::AddFriend));
         assert!(m.take_attention());
         // «Совпадает» без имени не подтверждает
         assert!(ask(&mut m, MainIntent::SasMatch).is_empty());
@@ -1133,7 +1134,8 @@ mod tests {
         ask(&mut m, MainIntent::FriendTextSubmit);
         m.on_outcome(Outcome::FriendText(Ok(F::InviteAccepted(Id(4)))));
         assert!(matches!(m.dialog, Dialog::None));
-        assert_eq!(m.page, Page::AddFriend);
+        assert_eq!(m.page, Page::Friends);
+        assert_eq!(m.scroll_to, Some(Section::AddFriend));
         assert!(matches!(
             m.add.stage,
             AddStage::Waiting {
@@ -1179,7 +1181,7 @@ mod tests {
     fn friend_text_dialog_is_one_for_friends_and_add_friend() {
         // кнопка одна и та же на обеих вкладках: одно намерение, один диалог
         let mut m = model();
-        m.update(Intent::Go(Page::AddFriend));
+        m.update(Intent::GoSection(Section::AddFriend));
         ask(&mut m, MainIntent::FriendTextOpen);
         assert!(matches!(m.dialog, Dialog::FriendText(_)));
         ask(&mut m, MainIntent::DialogClose);
@@ -1372,7 +1374,8 @@ mod tests {
             }]
         );
         m.on_outcome(Outcome::Sent(Ok(())));
-        assert_eq!(m.page, Page::Transfers);
+        assert_eq!(m.page, Page::Files);
+        assert_eq!(m.scroll_to, Some(Section::Transfers));
         assert!(m.send.paths.is_empty());
     }
 
