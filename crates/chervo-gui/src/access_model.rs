@@ -443,6 +443,7 @@ mod tests {
             update_consent: chervo_core::update::UpdateConsent::NotAsked,
             lan: LanRow::default(),
             echo_server: echo.map(str::to_owned),
+            notify_incoming: true,
         }
     }
 

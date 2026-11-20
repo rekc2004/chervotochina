@@ -143,6 +143,26 @@ fn settings_roundtrip() {
         assert!(out.contains(&format!("lan={text}\n")), "{out}");
         assert_eq!(parse(out.as_bytes()).unwrap().lan_mode, mode);
     }
+    // уведомление о входящих (этап 18е): по умолчанию включено и в файл не пишется; выключенное
+    // пишется строкой `notify=0` и читается обратно; чужое значение и повтор отвергаются
+    assert!(d.notify_incoming);
+    assert!(!serialize(&d).unwrap().contains("notify"));
+    let mut off = Settings::new(49152, abs(&["recv"]), false);
+    off.notify_incoming = false;
+    let text_off = serialize(&off).unwrap();
+    assert!(text_off.contains("notify=0\n"), "{text_off}");
+    assert!(!parse(text_off.as_bytes()).unwrap().notify_incoming);
+    assert!(
+        parse(format!("{}notify=1\n", base()).as_bytes())
+            .unwrap()
+            .notify_incoming
+    );
+    for bad in ["notify=2\n", "notify=\n", "notify=0\nnotify=0\n"] {
+        assert!(
+            parse(format!("{}{bad}", base()).as_bytes()).is_err(),
+            "{bad}"
+        );
+    }
     // граница: строка ровно 4096 байт проходит
     let prefix = format!("receive_root={}", abs_text(&["a"]));
     let pad = 4096 - prefix.len();

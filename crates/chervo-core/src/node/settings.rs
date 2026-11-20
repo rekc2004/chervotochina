@@ -63,6 +63,9 @@ pub(crate) struct Settings {
     /// интернете. `None`: сервера нет, к нему ни одного пакета. Строка проверена
     /// `parse_echo_server`.
     pub(crate) echo_server: Option<String>,
+    /// Системное уведомление о входящих файлах (`notify=0|1`, этап 18е). По умолчанию включено;
+    /// строка пишется в файл только при выключенном, чтобы прежние файлы остались прежними.
+    pub(crate) notify_incoming: bool,
 }
 
 impl std::fmt::Debug for Settings {
@@ -90,6 +93,7 @@ impl Settings {
             ntp_servers: Vec::new(),
             lan_mode: DEFAULT_LAN_MODE,
             echo_server: None,
+            notify_incoming: true,
         }
     }
 }
@@ -274,6 +278,7 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Settings, NodeError> {
     let mut update_check = None;
     let mut checked_at = None;
     let mut lan = None;
+    let mut notify = None;
     let mut echo = None;
     let mut extra_roots: Vec<PathBuf> = Vec::new();
     let mut routers: Vec<AllowedRouter> = Vec::new();
@@ -317,6 +322,7 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Settings, NodeError> {
             "update_check" => set_once(&mut update_check, parse_bool(value)?)?,
             "update_checked_at" => set_once(&mut checked_at, parse_u64(value)?)?,
             "lan" => set_once(&mut lan, parse_lan_mode(value)?)?,
+            "notify" => set_once(&mut notify, parse_bool(value)?)?,
             "echo" => {
                 if parse_echo_server(value).is_none() {
                     return bad();
@@ -372,6 +378,7 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Settings, NodeError> {
         ntp_servers: ntp,
         lan_mode: lan.unwrap_or(DEFAULT_LAN_MODE),
         echo_server: echo,
+        notify_incoming: notify.unwrap_or(true),
     })
 }
 
@@ -427,6 +434,9 @@ pub(crate) fn serialize(s: &Settings) -> Result<String, NodeError> {
     line("lan", lan_mode_text(s.lan_mode));
     if let Some(e) = &s.echo_server {
         line("echo", e);
+    }
+    if !s.notify_incoming {
+        line("notify", "0");
     }
     // то, что записали, должно читаться обратно тем же разбором
     if parse(out.as_bytes()).as_ref() != Ok(s) {

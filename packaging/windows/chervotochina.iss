@@ -60,7 +60,7 @@ Source: "{#SrcDir}\chervotochina.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SrcDir}\chervotochina.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\Червоточина"; Filename: "{app}\chervotochina.exe"; IconFilename: "{app}\chervotochina.ico"; WorkingDir: "{app}"
+Name: "{autoprograms}\Червоточина"; Filename: "{app}\chervotochina.exe"; IconFilename: "{app}\chervotochina.ico"; WorkingDir: "{app}"; AppUserModelID: "Chervotochina.App"
 
 [Run]
 Filename: "{app}\chervotochina.exe"; Description: "Запустить Червоточину"; Flags: nowait postinstall skipifsilent

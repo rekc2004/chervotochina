@@ -76,6 +76,9 @@ eframe = { version = "=0.37.0", default-features = false, features = ["clipboard
 rfd = { version = "=0.17.2", default-features = false }
 qrcode = { version = "=0.14.1", default-features = false }
 unicode-normalization = { version = "=0.1.26", default-features = false, features = ["std"] }
+# Stage 18e (owner decision, SPEC 5): Windows toast for incoming files, only for chervo-gui and only on
+# Windows. MIT OR Apache-2.0. XML is built through the DOM (text is set as a value, not concatenated).
+tauri-winrt-notification = { version = "=0.8.1", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

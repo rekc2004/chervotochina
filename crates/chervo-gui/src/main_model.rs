@@ -67,6 +67,8 @@ pub enum MainIntent {
     ConnectNow(Id),
     FriendSend(Id),
     DialogClose,
+    /// Щелчок по системному уведомлению о входящих файлах.
+    ShowOffers,
     /// «Скрыть все».
     DismissNotices,
     /// «×» у одной строки (номер строки в списке).
@@ -281,6 +283,34 @@ impl Model {
             !(n.kind == NoticeKind::FriendUnreachable
                 && n.friend.is_some_and(|f| online.contains(&f)))
         });
+    }
+
+    /// Уведомлять ли о входящих файлах: галочка в настройках (до первого снимка включено).
+    fn notify_enabled(&self) -> bool {
+        self.snapshot
+            .settings
+            .as_ref()
+            .is_none_or(|s| s.notify_incoming)
+    }
+
+    /// Уведомление о новом предложении: если включено и по этому предложению ещё не было.
+    fn toast_incoming(&mut self, n: &crate::notify::OfferNote) {
+        if self.notify_enabled() && self.notified.insert(n.transfer) {
+            self.toasts.push(crate::notify::Toast {
+                text: crate::notify::incoming_text(n),
+            });
+        }
+    }
+
+    fn push_toast(&mut self, text: String) {
+        if self.notify_enabled() {
+            self.toasts.push(crate::notify::Toast { text });
+        }
+    }
+
+    /// Уведомления, которые нужно показать системе (каждое один раз).
+    pub fn take_toasts(&mut self) -> Vec<crate::notify::Toast> {
+        std::mem::take(&mut self.toasts)
     }
 
     /// Нужно ли мигнуть окном в панели задач (один раз на событие).
@@ -512,6 +542,11 @@ impl Model {
             }
             I::DialogClose => {
                 self.dialog = Dialog::None;
+                Vec::new()
+            }
+            // щелчок по системному уведомлению: вкладка «Файлы», раздел «Предложения»
+            I::ShowOffers => {
+                self.show_section(Section::Offers);
                 Vec::new()
             }
             I::DismissNotices => {
@@ -949,8 +984,23 @@ impl Model {
                     Err(e) => self.send.error = Some(e.user_text()),
                 }
             }
-            Outcome::OfferIncoming => self.attention = true,
-            Outcome::AutoAccepted => self.push_notice(texts::AUTO_ACCEPTED),
+            Outcome::OfferIncoming(note) => {
+                self.attention = true;
+                if let Some(n) = note {
+                    self.toast_incoming(&n);
+                }
+            }
+            Outcome::AutoAccepted(note) => {
+                self.push_notice(texts::AUTO_ACCEPTED);
+                if let Some(n) = note {
+                    self.auto_pending.insert(n.transfer, n.friend);
+                }
+            }
+            Outcome::TransferCompleted(id) => {
+                if let Some(friend) = self.auto_pending.remove(&id) {
+                    self.push_toast(crate::notify::auto_text(&friend));
+                }
+            }
             Outcome::Done(Err(e)) => {
                 self.clear_busy();
                 self.connecting.clear();

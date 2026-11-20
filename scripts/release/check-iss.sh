@@ -8,7 +8,8 @@
 #     [InstallDelete], [UninstallDelete], [UninstallRun], [Tasks], [Types], [Components];
 #   - every non-comment line of each section is one of the EXPECTED lines and every expected line is there (so:
 #     PrivilegesRequired=lowest, no PrivilegesRequiredOverridesAllowed, DefaultDirName={autopf}\Chervotochina,
-#     exactly 2 lines in [Files], 1 in [Icons], 1 in [Run]);
+#     exactly 2 lines in [Files], 1 in [Icons] (with AppUserModelID: "Chervotochina.App", stage 18e: the same
+#     string is the toast id in crates/chervo-gui/src/notify.rs, a Rust test compares them), 1 in [Run]);
 #   - AppId equals packaging/windows/APPID (never changes: updates in place depend on it);
 #   - preprocessor lines: only `#ifndef <Define>`, `#endif`, `#error ...` for the four /D parameters; no #include;
 #   - constants in braces only {app} {autopf} {autoprograms} {#AppVersion} {#SrcDir} {#TouchDate} {#TouchTime}
@@ -65,7 +66,7 @@ expected_files() {
     'Source: "{#SrcDir}\chervotochina.ico"; DestDir: "{app}"; Flags: ignoreversion'
 }
 expected_icons() {
-  printf '%s\n' 'Name: "{autoprograms}\Червоточина"; Filename: "{app}\chervotochina.exe"; IconFilename: "{app}\chervotochina.ico"; WorkingDir: "{app}"'
+  printf '%s\n' 'Name: "{autoprograms}\Червоточина"; Filename: "{app}\chervotochina.exe"; IconFilename: "{app}\chervotochina.ico"; WorkingDir: "{app}"; AppUserModelID: "Chervotochina.App"'
 }
 expected_run() {
   printf '%s\n' 'Filename: "{app}\chervotochina.exe"; Description: "Запустить Червоточину"; Flags: nowait postinstall skipifsilent'
@@ -214,6 +215,8 @@ self_test() {
   mutate third-files-line '/chervotochina.ico"; DestDir/a Source: "{#SrcDir}\\extra.dll"; DestDir: "{app}"; Flags: ignoreversion'
   mutate files-line-removed '/chervotochina.ico"; DestDir/d'
   mutate icons-desktop-added '/^Name: "{autoprograms}/a Name: "{autodesktop}\\Червоточина"; Filename: "{app}\\chervotochina.exe"'
+  mutate icons-aumid-changed 's/AppUserModelID: "Chervotochina.App"/AppUserModelID: "Other.App"/'
+  mutate icons-aumid-removed 's/; AppUserModelID: "Chervotochina.App"//'
   mutate run-http 's#^Filename: "{app}\\chervotochina.exe"; Description: "Запустить Червоточину"#Filename: "https://example.invalid/x.exe"; Description: "Запустить Червоточину"#'
   mutate http-in-url 's#^AppSupportURL=.*#AppSupportURL=http://example.invalid/#'
   mutate other-https-url 's#^AppPublisherURL=.*#AppPublisherURL=https://example.invalid/#'

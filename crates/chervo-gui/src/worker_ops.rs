@@ -8,11 +8,12 @@ use std::hash::Hash;
 use chervo_core::{
     ClockProposal, ClockSync, EchoFailure, ExternalPlan, FriendRef, FriendStatus, FriendText,
     FriendsError, InviteRef, NoDirectPath, Node, NodeError, NodeEvent, PathKind, RouterCandidate,
-    Side, TransferRef, TransferState, TrustConfirmation, plan_invite_external,
+    Side, TransferRef, TransferResult, TransferState, TrustConfirmation, plan_invite_external,
 };
 
 use crate::access_model::{ExternalMode, GetIpResult, InviteExt};
 use crate::model::{ClockResult, Command, FriendEventKind, FriendTextOutcome, Outcome, Snapshot};
+use crate::notify::OfferNote;
 use crate::rows::{
     DiagRow, FileRow, FriendRow, Id, LanRow, OfferRow, RetiredRow, RouterRow, SettingsRow,
     TransferRow,
@@ -246,6 +247,7 @@ pub fn snapshot(node: &Node, refs: &mut Refs) -> Snapshot {
             addrs: node.lan_addrs(),
         },
         echo_server: sv.echo_server,
+        notify_incoming: sv.notify_incoming,
     };
     Snapshot {
         friends,
@@ -343,8 +345,38 @@ pub fn event_outcome(node: Option<&Node>, refs: &mut Refs, ev: NodeEvent) -> Out
         NodeEvent::InviteAddressChanged { invite } => {
             Outcome::InviteAddrChanged(refs.invites.id(invite))
         }
-        NodeEvent::OfferIncoming { .. } => Outcome::OfferIncoming,
-        NodeEvent::OfferAutoAccepted { .. } => Outcome::AutoAccepted,
+        NodeEvent::OfferIncoming { transfer } => {
+            let id = refs.transfers.id(transfer);
+            let note = node.and_then(|n| {
+                let o = n.offer(transfer).ok()?;
+                Some(OfferNote {
+                    transfer: id,
+                    friend: friend_name(n, o.friend),
+                    files: o.files.len(),
+                    total: o.total,
+                    first_name: o.files.first().map(|f| f.name.clone()),
+                })
+            });
+            Outcome::OfferIncoming(note)
+        }
+        NodeEvent::OfferAutoAccepted { transfer } => {
+            let id = refs.transfers.id(transfer);
+            let note = node.and_then(|n| {
+                let t = n.transfers().into_iter().find(|t| t.transfer == transfer)?;
+                Some(OfferNote {
+                    transfer: id,
+                    friend: friend_name(n, t.friend),
+                    files: 0,
+                    total: t.total,
+                    first_name: None,
+                })
+            });
+            Outcome::AutoAccepted(note)
+        }
+        NodeEvent::TransferFinished {
+            transfer,
+            result: TransferResult::Completed,
+        } => Outcome::TransferCompleted(refs.transfers.id(transfer)),
         other => Outcome::Event(other),
     }
 }
@@ -650,6 +682,8 @@ pub fn exec(node: &Node, refs: &mut Refs, cmd: Command) -> Option<Outcome> {
             let r = node.set_lan_mode(mode);
             done(r)
         }
+        // галочка «Уведомлять о входящих файлах»: только запись в настройки
+        Command::SetNotify(on) => done(node.set_notify_incoming(on)),
         // только новый снимок (его присылает цикл после любой команды)
         Command::RefreshSnapshot => None,
         // кнопка «Сверить часы»: автоматической сверки нет

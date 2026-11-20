@@ -310,6 +310,15 @@ impl Node {
         Ok(())
     }
 
+    /// Галочка «Уведомлять о входящих файлах» (этап 18е). Только запись в настройки: сеть не
+    /// затрагивается, уведомление показывает оболочка.
+    pub fn set_notify_incoming(&self, on: bool) -> Result<(), NodeError> {
+        self.update_settings(|s| {
+            s.notify_incoming = on;
+            Ok(())
+        })
+    }
+
     /// Сменить основную папку приёма; действует сразу. Порядок: открыть новую папку (те же
     /// проверки `ReceiveRoot::open`) → сохранить настройки → подменить живую. Любая ошибка
     /// до подмены оставляет прежнюю. Идущие передачи продолжают писать в старую папку (они
@@ -414,6 +423,7 @@ impl Node {
             },
             lan_mode: s.lan_mode,
             echo_server: s.echo_server.clone(),
+            notify_incoming: s.notify_incoming,
             restart_needed,
         }
     }

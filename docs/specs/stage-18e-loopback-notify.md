@@ -42,3 +42,11 @@
 5. `bash scripts/check-forbidden.sh`, `bash scripts/check-gui-linux-tree.sh`
 6. `cargo build --release -p chervo-gui --locked`, `--render-check` → 0.
 Отчёт до 25 строк. Коммит не делать.
+
+## 5. Решение владельца по п.2 (2026-11-20): вариант A
+Builder в первом заходе остановил п.2: `unsafe_code = "forbid"` в workspace, охрана `manifest_only_core` в GUI. Владелец выбрал **A: крейт `tauri-winrt-notification` 0.8.1** (MIT OR Apache-2.0, tauri-apps; зависимости: `windows ^0.62` — 0.62.2 уже в Cargo.lock через eframe/accesskit, `thiserror ^2`, `windows-version ^0.1` — новый).
+- Зависимость только `[target.'cfg(windows)'.dependencies]` у chervo-gui, версия закреплена `=0.8.1`. Обновить охрану `manifest_only_core` (разрешить ровно этот крейт и только под cfg(windows)), прогнать `cargo deny check` и `cargo audit` локально (если установлены; иначе записать — CI их прогонит), `scripts/check-gui-linux-tree.sh` (дерево Linux не меняется).
+- AUMID: использовать устойчивый идентификатор приложения (как в установщике/ярлыке, если задан; иначе описать, что показывает Windows в заголовке уведомления, и предложить вариант).
+- Щелчок по уведомлению: если крейт даёт обратный вызов активации — вывести окно вперёд и открыть «Файлы»; если нет — записать.
+- Текст: санитизация как в п.2 (крейт строит XML — проверить в его исходниках, экранирует ли он текст; в любом случае своя санитизация до передачи).
+- Linux через D-Bus и macOS — не в этом заходе (записать в отчёт как не сделанное).

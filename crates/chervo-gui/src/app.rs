@@ -9,7 +9,7 @@ use eframe::egui;
 use crate::main_model::MainIntent;
 use crate::model::{Close, Intent, Model};
 use crate::worker::Worker;
-use crate::{picker, screens};
+use crate::{notify, picker, screens};
 
 /// Сколько кадров рисуется на каждое состояние в `--render-check` (второй кадр нужен, чтобы
 /// раскладка установилась).
@@ -115,6 +115,21 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
                 egui::UserAttentionType::Informational,
             ));
+        }
+
+        // системные уведомления о входящих файлах (этап 18е); при проверке отрисовки узла нет
+        let toasts = self.model.take_toasts();
+        if !self.render_check {
+            for t in &toasts {
+                let wake = ctx.clone();
+                notify::show(t, move || wake.request_repaint());
+            }
+        }
+        // щелчок по уведомлению: окно вперёд и раздел «Предложения» вкладки «Файлы»
+        if notify::take_clicked() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            self.dispatch(vec![Intent::Main(MainIntent::ShowOffers)]);
         }
 
         let mut intents = Vec::new();

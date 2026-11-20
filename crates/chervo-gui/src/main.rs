@@ -7,6 +7,7 @@ mod app;
 mod fixtures;
 mod main_model;
 mod model;
+mod notify;
 mod picker;
 mod qr;
 mod redact;

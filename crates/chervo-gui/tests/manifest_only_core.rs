@@ -10,6 +10,10 @@ use std::fs;
 
 const PATH_DEPS: [&str; 1] = ["chervo-core"];
 const EXTERNAL: [&str; 3] = ["eframe", "qrcode", "rfd"];
+/// Этап 18е (решение владельца, SPEC 5): уведомление Windows о входящих файлах. Ровно один
+/// пакет и только в таблице для Windows (на Linux и macOS его в дереве нет).
+const WINDOWS_ONLY: [&str; 1] = ["tauri-winrt-notification"];
+const WINDOWS_TABLE: &str = "target.'cfg(windows)'.dependencies";
 /// Точный набор возможностей eframe в корне (DECISION 2.9): без `persistence` и прочего.
 const EFRAME_FEATURES: [&str; 6] = [
     "clipboard",
@@ -103,6 +107,7 @@ fn violations(manifest: &str, root: &str, has_build_rs: bool) -> Vec<String> {
         bad.push("есть build.rs".to_owned());
     }
     let mut names = BTreeSet::new();
+    let mut windows_seen: Vec<String> = Vec::new();
     for (table, rows) in tables(manifest) {
         let is_deps = table.ends_with("dependencies");
         if table.contains("build-dependencies") || table.contains("dev-dependencies") {
@@ -138,6 +143,13 @@ fn violations(manifest: &str, root: &str, has_build_rs: bool) -> Vec<String> {
                 if v.contains("accesskit") && table != NOT_LINUX {
                     bad.push(format!("accesskit вне таблицы не-Linux: [{table}] {key}"));
                 }
+                if WINDOWS_ONLY.contains(&key.as_str()) {
+                    if table != WINDOWS_TABLE {
+                        bad.push(format!("{key} вне таблицы Windows: [{table}]"));
+                    }
+                    windows_seen.push(key);
+                    continue;
+                }
                 names.insert(key);
             }
         }
@@ -153,13 +165,18 @@ fn violations(manifest: &str, root: &str, has_build_rs: bool) -> Vec<String> {
     for n in allowed.difference(&names) {
         bad.push(format!("нет зависимости: {n}"));
     }
+    for n in WINDOWS_ONLY {
+        if windows_seen.iter().filter(|k| k.as_str() == n).count() != 1 {
+            bad.push(format!("{n}: нужна ровно одна запись в таблице Windows"));
+        }
+    }
     // версии и свойства берутся из корня: точные и без свойств по умолчанию
     let root_rows: Vec<(String, String)> = tables(root)
         .into_iter()
         .filter(|(t, _)| t == "workspace.dependencies")
         .flat_map(|(_, rows)| rows)
         .collect();
-    for n in EXTERNAL {
+    for n in EXTERNAL.iter().chain(WINDOWS_ONLY.iter()).copied() {
         match root_rows.iter().find(|(k, _)| k == n) {
             None => bad.push(format!("{n} не объявлен в [workspace.dependencies]")),
             Some((_, v)) => {
@@ -205,10 +222,38 @@ fn control_guard_can_fail() {
     let root = "[workspace.dependencies]\nchervo-core = { path = \"crates/chervo-core\", version = \"0.0.0\" }\n\
                 eframe = { version = \"=0.37.0\", default-features = false, features = [\"clipboard\", \"default_fonts\", \"wgpu\", \"glow\", \"wayland\", \"x11\"] }\n\
                 rfd = { version = \"=0.17.2\", default-features = false }\n\
-                qrcode = { version = \"=0.14.1\", default-features = false }\n";
+                qrcode = { version = \"=0.14.1\", default-features = false }\n\
+                tauri-winrt-notification = { version = \"=0.8.1\", default-features = false }\n";
     let good = "[dependencies]\nchervo-core.workspace = true\neframe.workspace = true\nrfd.workspace = true\nqrcode.workspace = true\n\
-                [target.'cfg(not(target_os = \"linux\"))'.dependencies]\neframe = { workspace = true, features = [\"accesskit\"] }\n";
+                [target.'cfg(not(target_os = \"linux\"))'.dependencies]\neframe = { workspace = true, features = [\"accesskit\"] }\n\
+                [target.'cfg(windows)'.dependencies]\ntauri-winrt-notification.workspace = true\n";
     assert_eq!(violations(good, root, false), Vec::<String>::new());
+
+    // уведомление Windows: только в таблице Windows, ровно одно, версия закреплена
+    let everywhere = good.replace(
+        "[target.'cfg(windows)'.dependencies]\ntauri-winrt-notification.workspace = true\n",
+        "[dependencies.x]\n",
+    );
+    assert!(
+        violations(&everywhere, root, false)
+            .iter()
+            .any(|v| v.contains("tauri-winrt-notification"))
+    );
+    let wrong_table = good.replace(
+        "[target.'cfg(windows)'.dependencies]",
+        "[target.'cfg(unix)'.dependencies]",
+    );
+    assert!(
+        violations(&wrong_table, root, false)
+            .iter()
+            .any(|v| v.contains("вне таблицы Windows"))
+    );
+    let unpinned = root.replace("\"=0.8.1\"", "\"0.8.1\"");
+    assert!(
+        violations(good, &unpinned, false)
+            .iter()
+            .any(|v| v.contains("tauri-winrt-notification: версия не закреплена"))
+    );
 
     // лишний внешний пакет
     let extra = format!("{good}[target.'cfg(unix)'.dependencies]\nreqwest = \"1\"\n");

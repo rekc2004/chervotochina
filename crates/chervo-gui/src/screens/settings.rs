@@ -36,6 +36,8 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
         ui.separator();
         lan(ui, set, &mut out);
         ui.separator();
+        notify(ui, set, &mut out);
+        ui.separator();
         external(ui, set, &model.settings_ui, &mut out);
         ui.separator();
         upnp(ui, model, set, &mut out);
@@ -181,6 +183,15 @@ fn numbers(ui: &mut egui::Ui, set: &SettingsRow, st: &SettingsUi, out: &mut Vec<
         if st.forward.text.is_some() {
             out.push(s(S::ForwardSubmit));
         }
+    }
+}
+
+/// Галочка «Уведомлять о входящих файлах» (по умолчанию включена).
+fn notify(ui: &mut egui::Ui, set: &SettingsRow, out: &mut Vec<Intent>) {
+    ui.heading(texts::SET_TITLE_NOTIFY);
+    let mut on = set.notify_incoming;
+    if checkbox_with_help(ui, true, &mut on, texts::NOTIFY_LABEL, texts::HELP_NOTIFY).clicked() {
+        out.push(s(S::NotifyChoose(on)));
     }
 }
 

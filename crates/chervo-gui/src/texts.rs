@@ -145,6 +145,7 @@ pub const HELP_SET_PORT: &str = "Номер, по которому друзья 
 pub const HELP_SET_FORWARD: &str =
     "Нужен, только если правило в роутере вы создали сами и там другой номер. Обычно поле пустое.";
 pub const HELP_SET_SAVE: &str = "Сохраняет числа, которые вы изменили выше.";
+pub const HELP_NOTIFY: &str = "Когда друг присылает файлы, программа покажет сообщение в углу экрана (пока только в Windows). Файлы сами не принимаются: решаете вы. Выключите, если мешает.";
 pub const HELP_LAN_OFF: &str =
     "Программа не ищет друзей в вашей домашней сети. Друзья подключаются только через интернет.";
 pub const HELP_LAN_LISTEN: &str =
@@ -369,6 +370,8 @@ pub const SET_MIN_FREE: &str = "Запас свободного места, % д
 pub const SET_PORT: &str = "Номер порта программы (обычно не трогать; меняется после перезапуска)";
 pub const SET_RESTART: &str = "Есть изменения, которые вступят в силу после перезапуска программы.";
 pub const SET_TITLE_LAN: &str = "Локальная сеть";
+pub const SET_TITLE_NOTIFY: &str = "Уведомления";
+pub const NOTIFY_LABEL: &str = "Уведомлять о входящих файлах";
 pub const SET_TITLE_UPNP: &str = "Входящие подключения";
 pub const BTN_FIND_ROUTER: &str = "Найти мой роутер";
 pub const BTN_YES: &str = "Да";

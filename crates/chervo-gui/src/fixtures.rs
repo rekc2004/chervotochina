@@ -190,6 +190,7 @@ fn open_model(page: Page) -> Model {
             ],
         },
         echo_server: Some("203.0.113.5:45900".to_owned()),
+        notify_incoming: true,
     });
     m.snapshot.nat = Some(NatView::BehindCgnat);
     m.snapshot.mapping = Some(MapStatus::Mapped);
@@ -717,7 +718,7 @@ pub fn all() -> Vec<Model> {
             kind,
         });
     }
-    m.on_outcome(Outcome::AutoAccepted);
+    m.on_outcome(Outcome::AutoAccepted(None));
     m.on_outcome(Outcome::ClockSynced(Ok(ClockResult::Applied(0))));
     v.push(m);
     v

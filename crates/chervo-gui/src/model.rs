@@ -136,6 +136,8 @@ pub enum Command {
     /// Только из ветки выбора режима поиска в локальной сети (охрана `gated_node_actions`):
     /// «Сообщать о себе» включает рассылку в сеть, поэтому только по явному выбору человека.
     SetLanMode(LanMode),
+    /// Галочка «Уведомлять о входящих файлах» (этап 18е); сети не касается.
+    SetNotify(bool),
     /// Перечитать состояние узла без действий (например, при открытии раздела настроек).
     RefreshSnapshot,
     /// Только из обработчика кнопки «Сверить часы» (охрана `gated_node_actions`).
@@ -266,8 +268,12 @@ pub enum Outcome {
     /// `Ok(true)`: найденный роутер уже разрешён раньше.
     UpnpFound(Result<bool, NodeError>),
     ClockSynced(Result<ClockResult, NodeError>),
-    OfferIncoming,
-    AutoAccepted,
+    /// Новое предложение (`None`: подробности узнать не удалось).
+    OfferIncoming(Option<crate::notify::OfferNote>),
+    /// Автоприём начат (имя друга для уведомления «файлы приняты» по завершении).
+    AutoAccepted(Option<crate::notify::OfferNote>),
+    /// Передача завершена успешно.
+    TransferCompleted(Id),
     /// Прочие действия: при ошибке показывается её текст.
     Done(Result<(), NodeError>),
     // обновления (этап 19г-2)
@@ -431,6 +437,13 @@ pub struct Model {
     pub folder_error: Option<&'static str>,
     /// Просьба к окну привлечь внимание (мигание в панели задач); забирает `take_attention`.
     pub(crate) attention: bool,
+    /// Системные уведомления о входящих файлах, ещё не показанные (этап 18е); забирает
+    /// `take_toasts`.
+    pub(crate) toasts: Vec<crate::notify::Toast>,
+    /// Предложения, о которых уже уведомили: одно уведомление на предложение.
+    pub(crate) notified: std::collections::HashSet<Id>,
+    /// Автоприёмы, ждущие завершения: имя друга для уведомления по номеру передачи.
+    pub(crate) auto_pending: HashMap<Id, String>,
     /// Раздел, к которому нужно прокрутить вкладку; снимается после одного кадра.
     pub scroll_to: Option<Section>,
 }
@@ -458,6 +471,9 @@ impl Model {
             connecting: Vec::new(),
             folder_error: None,
             attention: false,
+            toasts: Vec::new(),
+            notified: std::collections::HashSet::new(),
+            auto_pending: HashMap::new(),
             scroll_to: None,
         };
         (
@@ -491,6 +507,9 @@ impl Model {
             connecting: Vec::new(),
             folder_error: None,
             attention: false,
+            toasts: Vec::new(),
+            notified: std::collections::HashSet::new(),
+            auto_pending: HashMap::new(),
             scroll_to: None,
         }
     }

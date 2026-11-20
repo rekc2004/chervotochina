@@ -88,6 +88,8 @@ pub enum SettingsIntent {
     MappingRefresh,
     /// Выбор режима поиска друзей в локальной сети.
     LanChoose(LanMode),
+    /// Галочка «Уведомлять о входящих файлах».
+    NotifyChoose(bool),
     ClockSync,
     ClockConfirm,
     ClockDismiss,
@@ -299,6 +301,14 @@ impl Model {
                     Vec::new()
                 }
             }
+            S::NotifyChoose(on) => {
+                let current = self.snapshot.settings.as_ref().map(|s| s.notify_incoming);
+                if current.is_some_and(|c| c != on) {
+                    vec![Command::SetNotify(on)]
+                } else {
+                    Vec::new()
+                }
+            }
             // «Сверить часы»: единственное место, где появляется `Command::SyncClock`
             S::ClockSync => {
                 if matches!(
@@ -461,7 +471,109 @@ mod tests {
             update_consent: chervo_core::update::UpdateConsent::NotAsked,
             lan: crate::rows::LanRow::default(),
             echo_server: None,
+            notify_incoming: true,
         }
+    }
+
+    fn note(id: u32, friend: &str) -> crate::notify::OfferNote {
+        crate::notify::OfferNote {
+            transfer: Id(id),
+            friend: friend.to_owned(),
+            files: 2,
+            total: 2048,
+            first_name: None,
+        }
+    }
+
+    fn with_notify(m: &mut Model, on: bool) {
+        let mut row = settings_row(0);
+        row.notify_incoming = on;
+        m.on_outcome(Outcome::Snapshot(Box::new(Snapshot {
+            settings: Some(row),
+            ..Snapshot::default()
+        })));
+    }
+
+    /// Уведомление о входящем предложении: одно на предложение, при выключенной галочке нет,
+    /// мигание окна остаётся в любом случае.
+    #[test]
+    fn incoming_offer_toast_once_per_offer() {
+        let mut m = model();
+        with_notify(&mut m, true);
+        m.on_outcome(Outcome::OfferIncoming(Some(note(7, "Аня"))));
+        assert!(m.take_attention());
+        let t = m.take_toasts();
+        assert_eq!(t.len(), 1);
+        assert!(
+            t[0].text.starts_with("Аня прислал файлы: 2 шт."),
+            "{}",
+            t[0].text
+        );
+        // то же предложение повторно: ещё одного уведомления нет
+        m.on_outcome(Outcome::OfferIncoming(Some(note(7, "Аня"))));
+        assert!(m.take_toasts().is_empty());
+        // другое предложение: новое уведомление
+        m.on_outcome(Outcome::OfferIncoming(Some(note(8, "Аня"))));
+        assert_eq!(m.take_toasts().len(), 1);
+        // без подробностей узла уведомления нет, окно мигает
+        m.on_outcome(Outcome::OfferIncoming(None));
+        assert!(m.take_attention());
+        assert!(m.take_toasts().is_empty());
+    }
+
+    #[test]
+    fn toast_respects_the_setting() {
+        let mut m = model();
+        with_notify(&mut m, false);
+        m.on_outcome(Outcome::OfferIncoming(Some(note(1, "Аня"))));
+        assert!(m.take_attention());
+        assert!(m.take_toasts().is_empty());
+        // включили: следующее предложение уведомляет, прежнее не «догоняется»
+        with_notify(&mut m, true);
+        assert!(m.take_toasts().is_empty());
+        m.on_outcome(Outcome::OfferIncoming(Some(note(2, "Аня"))));
+        assert_eq!(m.take_toasts().len(), 1);
+        // галочка: команда только при смене
+        assert!(ask(&mut m, SettingsIntent::NotifyChoose(true)).is_empty());
+        assert_eq!(
+            ask(&mut m, SettingsIntent::NotifyChoose(false)),
+            vec![Command::SetNotify(false)]
+        );
+    }
+
+    /// Автоприём: уведомление «файлы приняты» только по завершении и один раз.
+    #[test]
+    fn auto_accept_toast_after_completion() {
+        let mut m = model();
+        with_notify(&mut m, true);
+        m.on_outcome(Outcome::AutoAccepted(Some(note(5, "Боря"))));
+        assert!(m.take_toasts().is_empty());
+        // завершилась чужая передача: ничего
+        m.on_outcome(Outcome::TransferCompleted(Id(6)));
+        assert!(m.take_toasts().is_empty());
+        m.on_outcome(Outcome::TransferCompleted(Id(5)));
+        let t = m.take_toasts();
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].text, "Боря: файлы приняты");
+        m.on_outcome(Outcome::TransferCompleted(Id(5)));
+        assert!(m.take_toasts().is_empty());
+        // галочка выключена к моменту завершения: уведомления нет
+        m.on_outcome(Outcome::AutoAccepted(Some(note(9, "Боря"))));
+        with_notify(&mut m, false);
+        m.on_outcome(Outcome::TransferCompleted(Id(9)));
+        assert!(m.take_toasts().is_empty());
+    }
+
+    /// Щелчок по уведомлению ведёт к предложениям вкладки «Файлы».
+    #[test]
+    fn toast_click_opens_offers() {
+        let mut m = model();
+        assert!(
+            m.update(Intent::Main(MainIntent::ShowOffers)).is_empty(),
+            "команд нет"
+        );
+        assert_eq!(m.page, crate::model::Page::Files);
+        assert_eq!(m.scroll_to, Some(crate::model::Section::Offers));
     }
 
     /// Выбор режима поиска в локальной сети: команда только при смене, режим берётся из снимка

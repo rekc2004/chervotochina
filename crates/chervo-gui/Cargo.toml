@@ -22,6 +22,10 @@ qrcode.workspace = true
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 eframe = { workspace = true, features = ["accesskit"] }
 
+# Stage 18e (SPEC 5): Windows toast for an incoming offer. Windows only; the Linux/macOS tree is unchanged.
+[target.'cfg(windows)'.dependencies]
+tauri-winrt-notification.workspace = true
+
 [target.'cfg(target_os = "linux")'.dependencies]
 rfd = { workspace = true, features = ["xdg-portal"] }
 
