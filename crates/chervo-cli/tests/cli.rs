@@ -107,12 +107,13 @@ fn run_with_stdin(mut c: Command, input: &str) -> std::process::Output {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(input.as_bytes())
-        .unwrap();
+    // Программа может отказать и выйти, не дочитав ввод (так и задумано в тестах отказа): тогда
+    // запись получает BrokenPipe, это не ошибка теста (CI ubuntu 2026-11-20).
+    match child.stdin.take().unwrap().write_all(input.as_bytes()) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+        Err(e) => panic!("запись во ввод программы: {e}"),
+    }
     child.wait_with_output().unwrap()
 }
 
