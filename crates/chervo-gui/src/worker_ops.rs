@@ -314,16 +314,19 @@ pub fn event_outcome(node: Option<&Node>, refs: &mut Refs, ev: NodeEvent) -> Out
     };
     match ev {
         NodeEvent::FriendKeyProblem { friend } => Outcome::FriendEvent {
+            friend: refs.friends.id(friend),
             name: view(friend).map(|v| v.0).unwrap_or_default(),
             kind: FriendEventKind::KeyProblem,
         },
         NodeEvent::ClockSkewSuspected { friend } => Outcome::FriendEvent {
+            friend: refs.friends.id(friend),
             name: view(friend).map(|v| v.0).unwrap_or_default(),
             kind: FriendEventKind::ClockSkew,
         },
         NodeEvent::Unreachable { friend, diagnosis } => {
             let (name, path) = view(friend).unwrap_or_default();
             Outcome::FriendEvent {
+                friend: refs.friends.id(friend),
                 name,
                 kind: FriendEventKind::Unreachable {
                     text: diagnosis.text,
@@ -589,6 +592,15 @@ pub fn exec(node: &Node, refs: &mut Refs, cmd: Command) -> Option<Outcome> {
             Some(t) => node.retry(t),
             None => Err(unknown()),
         }),
+        // очистка списка: файлы на диске не трогаются, идущие передачи не убираются
+        Command::ForgetTransfer(id) => done(match refs.transfers.get(id) {
+            Some(t) => node.forget_transfer(t),
+            None => Err(unknown()),
+        }),
+        Command::ForgetFinished => {
+            let _ = node.forget_finished();
+            done(Ok(()))
+        }
         Command::SetReceiveRoot {
             root,
             confirm_shared,

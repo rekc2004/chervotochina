@@ -233,3 +233,47 @@ fn other_root_session_is_found_after_restart_when_the_root_is_known() {
     assert_eq!(fs::read(&path).unwrap(), data);
     assert!(tops(&env).is_empty());
 }
+
+/// Этап 18д, п.1: основную папку можно заменить на лету. Привязанная передача остаётся в своей
+/// папке, новая идёт в новую основную, прежняя основная становится известной.
+#[test]
+fn set_root_switches_new_transfers_and_keeps_bound_ones() {
+    let env = Env::new("set-root");
+    let first = env.root.clone();
+    let second = second_root(&env, "second");
+    let p = placement(&env, None);
+    let bound = key(1);
+    let later = key(2);
+
+    // до смены отдельной базы нет (временные данные идут в `partial_dir` из настроек передач)
+    assert_eq!(p.partial_base(&later), None);
+    // передача, принятая до смены, привязывается к основной папке сейчас
+    assert_eq!(p.bind_current_root(&bound).root(), first.root());
+
+    p.set_root(second.clone());
+    assert_eq!(p.root().root(), second.root());
+    // привязанная осталась в прежней, новая идёт во вторую; прежняя известна для поиска после запуска
+    assert_eq!(
+        p.partial_base(&bound),
+        Some(first.partial_dir().to_path_buf())
+    );
+    assert_eq!(
+        p.partial_base(&later),
+        Some(second.partial_dir().to_path_buf())
+    );
+    assert_eq!(
+        p.extra_partial_dirs(),
+        vec![first.partial_dir().to_path_buf()]
+    );
+
+    // возврат на первую: вторая становится известной, прежняя из известных уходит
+    p.set_root(first.clone());
+    assert_eq!(p.root().root(), first.root());
+    assert_eq!(
+        p.extra_partial_dirs(),
+        vec![second.partial_dir().to_path_buf()]
+    );
+    // смена на ту же папку ничего не дублирует
+    p.set_root(first.clone());
+    assert_eq!(p.extra_partial_dirs().len(), 1);
+}

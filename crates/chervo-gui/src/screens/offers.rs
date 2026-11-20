@@ -2,7 +2,6 @@
 //! (так их отдаёт узел), тип файла, предупреждения этапа 15, вопрос о доверии для рискованных
 //! файлов, проверка места. Ничего не открывается и не запускается.
 
-use chervo_core::FileKind;
 use chervo_core::texts as core_texts;
 use eframe::egui;
 
@@ -30,14 +29,6 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
     out
 }
 
-fn kind_label(k: FileKind) -> &'static str {
-    match k {
-        FileKind::Safe => texts::KIND_SAFE,
-        FileKind::ExecutableLike => texts::KIND_EXEC,
-        _ => texts::KIND_UNKNOWN,
-    }
-}
-
 fn offer(ui: &mut egui::Ui, model: &Model, o: &OfferRow, out: &mut Vec<Intent>) {
     let ui_state = model.offer_ui.get(&o.id).copied().unwrap_or_default();
     ui.group(|ui| {
@@ -59,7 +50,7 @@ fn offer(ui: &mut egui::Ui, model: &Model, o: &OfferRow, out: &mut Vec<Intent>) 
                         "{mark}{} ({}, {})",
                         f.name,
                         texts::human_size(f.size),
-                        kind_label(f.kind)
+                        texts::kind_label(f.kind, &f.name)
                     ));
                 }
             });
@@ -68,12 +59,24 @@ fn offer(ui: &mut egui::Ui, model: &Model, o: &OfferRow, out: &mut Vec<Intent>) 
             ui.label(texts::RISKY_LEGEND);
         }
         for w in &o.warnings {
-            warn(ui, w);
+            // мягкий текст только если все такие файлы это `.bin`; иначе прежний текст узла
+            if *w == core_texts::EXECUTABLE_TEXT && texts::exec_warning_is_soft(&o.files) {
+                warn(ui, texts::OFFER_MAYBE_PROGRAM);
+            } else {
+                warn(ui, w);
+            }
         }
-        // место: сколько нужно и сколько есть
+        // место: размер, сколько свободно, сколько останется; правило отдельно
+        let min_free = model.snapshot.settings.as_ref().map(|s| s.min_free_percent);
         match o.space.available {
             Some(avail) => {
-                ui.label(texts::space_line(o.space.needed, avail));
+                ui.label(texts::space_line(
+                    o.total,
+                    o.space.needed,
+                    avail,
+                    o.space.short,
+                    min_free,
+                ));
             }
             None => {
                 ui.label(texts::OFFER_SPACE_UNKNOWN);

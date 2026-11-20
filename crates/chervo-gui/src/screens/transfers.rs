@@ -27,6 +27,12 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
         if let Some(e) = model.folder_error {
             warn(ui, e);
         }
+        // «Очистить завершённые» видна, только если есть что очищать
+        if model.snapshot.transfers.iter().any(|t| t.result.is_some())
+            && button_with_help(ui, texts::BTN_CLEAR_FINISHED, texts::HELP_CLEAR_FINISHED).clicked()
+        {
+            out.push(main(MainIntent::TransferForgetFinished));
+        }
     });
     ui.separator();
     if model.snapshot.transfers.is_empty() {
@@ -83,7 +89,13 @@ fn row(ui: &mut egui::Ui, t: &TransferRow, out: &mut Vec<Intent>) {
             ui.label(texts::SAVED_TO);
             copy_box(ui, root);
         }
-        if t.result.is_none() {
+        if t.result.is_some() {
+            if button_with_help(ui, texts::BTN_FORGET_TRANSFER, texts::HELP_FORGET_TRANSFER)
+                .clicked()
+            {
+                out.push(main(MainIntent::TransferForget(t.id)));
+            }
+        } else {
             ui.horizontal_wrapped(|ui| {
                 if matches!(t.state, TransferState::Paused(_))
                     && button_with_help(ui, texts::BTN_RETRY_TRANSFER, texts::HELP_RETRY_TRANSFER)

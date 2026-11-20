@@ -16,7 +16,7 @@ use chervo_core::{
 };
 
 use crate::access_model::{AccessUi, ExternalMode, GetIpResult, InviteExt, UpnpOrigin};
-use crate::main_model::{AddFriend, Dialog, MainIntent, OfferUi, SendUi};
+use crate::main_model::{AddFriend, Dialog, MainIntent, Notice, OfferUi, SendUi};
 use crate::redact::{redacted_debug_enum, redacted_debug_struct};
 use crate::rows::{DiagRow, FriendRow, Id, OfferRow, RetiredRow, SettingsRow, TransferRow};
 use crate::settings_model::SettingsUi;
@@ -111,6 +111,10 @@ pub enum Command {
     Decline(Id),
     CancelTransfer(Id),
     Retry(Id),
+    /// «Убрать» у завершённой передачи: запись уходит из списка, файлы остаются.
+    ForgetTransfer(Id),
+    /// «Очистить завершённые».
+    ForgetFinished,
     // настройки, сеть, часы (экран 8)
     SetReceiveRoot {
         root: PathBuf,
@@ -253,6 +257,7 @@ pub enum Outcome {
     SasAnswered(Result<(), NodeError>),
     /// Событие, относящееся к другу (имя берёт фоновый поток).
     FriendEvent {
+        friend: Id,
         name: String,
         kind: FriendEventKind,
     },
@@ -404,7 +409,7 @@ pub struct Model {
     open_pending: bool,
     pub page: Page,
     pub snapshot: Snapshot,
-    pub notices: Vec<String>,
+    pub notices: Vec<Notice>,
     /// Предложить «Сверить часы» рядом с уведомлениями (`ClockSkewSuspected`).
     pub clock_hint: bool,
     pub settings_ui: SettingsUi,
@@ -619,6 +624,10 @@ impl Model {
                     && !f.busy
                 {
                     f.outside_confirmed = v;
+                    if v {
+                        // отметка поставлена: упрёк «папка вне профиля» больше не нужен
+                        f.error = None;
+                    }
                 }
                 Vec::new()
             }
@@ -811,6 +820,9 @@ impl Model {
                 let friends = &self.snapshot.friends;
                 self.connecting
                     .retain(|id| friends.iter().any(|f| f.id == *id && !f.online));
+                // «друг недоступен» гаснет сама, когда друг на связи
+                let online: Vec<Id> = friends.iter().filter(|f| f.online).map(|f| f.id).collect();
+                self.friend_reachable(&online);
                 // помощник ждёт открытия проброса: новый снимок может его закончить
                 self.access_progress()
             }
@@ -1101,6 +1113,6 @@ mod tests {
             path: None,
         });
         m.on_outcome(Outcome::Event(NodeEvent::OwnAddressChanged));
-        assert_eq!(m.notices, vec![texts::OWN_ADDR_CHANGED.to_owned()]);
+        assert_eq!(m.notice_texts(), vec![texts::OWN_ADDR_CHANGED.to_owned()]);
     }
 }

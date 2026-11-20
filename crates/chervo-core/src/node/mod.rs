@@ -544,7 +544,6 @@ fn build_core(cfg: &NodeConfig, p: Parts) -> Result<Built, NodeError> {
 
     let live = LiveConfig {
         port_setting: st.port,
-        receive_root: st.receive_root.clone(),
         min_free_percent: st.min_free_percent,
         manual_forward: st.manual_forward,
     };
@@ -560,7 +559,8 @@ fn build_core(cfg: &NodeConfig, p: Parts) -> Result<Built, NodeError> {
         placement,
         policy,
         rcfg,
-        root,
+        root: Mutex::new(Arc::new(root)),
+        root_change: Mutex::new(()),
         sink,
         settings: Mutex::new(st),
         live,

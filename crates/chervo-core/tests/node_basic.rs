@@ -352,7 +352,8 @@ fn set_receive_root_keeps_the_old_one_as_extra() {
     std::fs::create_dir_all(&second).unwrap();
     node.set_receive_root(&second, false).unwrap();
     let s = node.settings();
-    assert!(s.restart_needed);
+    // папка приёма меняется на лету: перезапуск не нужен
+    assert!(!s.restart_needed);
     assert_eq!(s.extra_roots.len(), 1);
     // не папка: ошибка, настройки не тронуты
     let missing = rig.dir.join("no-such-folder");

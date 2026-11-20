@@ -67,7 +67,10 @@ pub enum MainIntent {
     ConnectNow(Id),
     FriendSend(Id),
     DialogClose,
+    /// «Скрыть все».
     DismissNotices,
+    /// «×» у одной строки (номер строки в списке).
+    DismissNotice(usize),
     // добавление друга
     AddSameNetwork(bool),
     AddCreate,
@@ -100,6 +103,10 @@ pub enum MainIntent {
     // передачи
     TransferCancel(Id),
     TransferRetry(Id),
+    /// «Убрать» у завершённой передачи (файлы на диске остаются).
+    TransferForget(Id),
+    /// «Очистить завершённые» над списком передач.
+    TransferForgetFinished,
     /// Кнопка «Открыть папку»: только папка приёма из настроек (Н7).
     OpenReceiveFolder,
     Settings(SettingsIntent),
@@ -218,16 +225,62 @@ pub struct OfferUi {
     pub busy: bool,
 }
 
+/// Что за уведомление: от этого зависит, когда оно гаснет само.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NoticeKind {
+    /// Гаснет только по «×» и «Скрыть все».
+    General,
+    /// «Друг недоступен»: гаснет, когда друг снова на связи.
+    FriendUnreachable,
+    /// «Папка приёма изменена.»: гаснет при следующем действии в настройках.
+    RootChanged,
+}
+
+/// Строка уведомления в шапке. `friend`: друг, о котором она (если о друге).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Notice {
+    pub text: String,
+    pub friend: Option<Id>,
+    pub kind: NoticeKind,
+}
+
 impl Model {
     pub fn push_notice(&mut self, text: impl Into<String>) {
-        let text = text.into();
-        if self.notices.last() == Some(&text) {
+        self.push_notice_for(text, None, NoticeKind::General);
+    }
+
+    pub fn push_notice_for(
+        &mut self,
+        text: impl Into<String>,
+        friend: Option<Id>,
+        kind: NoticeKind,
+    ) {
+        let n = Notice {
+            text: text.into(),
+            friend,
+            kind,
+        };
+        if self.notices.last() == Some(&n) {
             return;
         }
         if self.notices.len() >= MAX_NOTICES {
             self.notices.remove(0);
         }
-        self.notices.push(text);
+        self.notices.push(n);
+    }
+
+    /// Тексты уведомлений по порядку (для проверок в тестах).
+    #[cfg(test)]
+    pub fn notice_texts(&self) -> Vec<String> {
+        self.notices.iter().map(|n| n.text.clone()).collect()
+    }
+
+    /// Друзья `online` снова на связи: уведомления «недоступен» о них больше не нужны.
+    pub fn friend_reachable(&mut self, online: &[Id]) {
+        self.notices.retain(|n| {
+            !(n.kind == NoticeKind::FriendUnreachable
+                && n.friend.is_some_and(|f| online.contains(&f)))
+        });
     }
 
     /// Нужно ли мигнуть окном в панели задач (один раз на событие).
@@ -465,6 +518,12 @@ impl Model {
                 self.notices.clear();
                 Vec::new()
             }
+            I::DismissNotice(i) => {
+                if i < self.notices.len() {
+                    self.notices.remove(i);
+                }
+                Vec::new()
+            }
             I::Settings(s) => self.update_settings(s),
             I::Update(u) => self.update_updates(u),
             I::Access(a) => self.update_access(a),
@@ -679,6 +738,26 @@ impl Model {
             I::TransferCancel(id) => {
                 if self.snapshot.transfers.iter().any(|t| t.id == id) {
                     vec![Command::CancelTransfer(id)]
+                } else {
+                    Vec::new()
+                }
+            }
+            // убрать из списка можно только завершённую (с итогом); идущая остаётся
+            I::TransferForget(id) => {
+                let finished = self
+                    .snapshot
+                    .transfers
+                    .iter()
+                    .any(|t| t.id == id && t.result.is_some());
+                if finished {
+                    vec![Command::ForgetTransfer(id)]
+                } else {
+                    Vec::new()
+                }
+            }
+            I::TransferForgetFinished => {
+                if self.snapshot.transfers.iter().any(|t| t.result.is_some()) {
+                    vec![Command::ForgetFinished]
                 } else {
                     Vec::new()
                 }
@@ -1157,7 +1236,7 @@ mod tests {
             m.on_outcome(Outcome::FriendText(Ok(o)));
             assert!(matches!(m.dialog, Dialog::None));
             assert_eq!(m.page, Page::Friends);
-            assert_eq!(m.notices, vec![want.to_owned()]);
+            assert_eq!(m.notice_texts(), vec![want.to_owned()]);
         }
         // ошибка остаётся в окне вставки, текст ошибки не повторяет вставленное
         let mut m = model();
@@ -1464,5 +1543,115 @@ mod tests {
                 .is_empty()
         );
         assert!(matches!(m.dialog, Dialog::None));
+    }
+
+    fn finished_row(id: u32, result: Option<chervo_core::TransferResult>) -> TransferRow {
+        TransferRow {
+            id: Id(id),
+            friend: "друг".to_owned(),
+            side: Side::Receiver,
+            state: TransferState::Finished,
+            done: 1,
+            total: 1,
+            pause: None,
+            preparing: None,
+            result,
+            dest_root: None,
+        }
+    }
+
+    /// Этап 18д, п.2: уведомление о недоступном друге гаснет, когда друг на связи; чужие и общие
+    /// строки остаются.
+    #[test]
+    fn friend_notice_clears_when_friend_comes_online() {
+        use crate::model::FriendEventKind;
+        let mut m = model();
+        with_snapshot(&mut m, |s| {
+            s.friends.push(friend(1, FriendStatus::Active, false));
+            s.friends.push(friend(2, FriendStatus::Active, false));
+        });
+        m.push_notice("общая строка");
+        for f in [Id(1), Id(2)] {
+            m.on_outcome(Outcome::FriendEvent {
+                friend: f,
+                name: format!("друг{}", f.0),
+                kind: FriendEventKind::Unreachable {
+                    text: "не отвечает",
+                    lan_hint: true,
+                },
+            });
+        }
+        // две строки на друга и общая
+        assert_eq!(m.notices.len(), 5);
+        // оба ещё не в сети: снимок ничего не убирает
+        with_snapshot(&mut m, |s| {
+            s.friends.push(friend(1, FriendStatus::Active, false));
+            s.friends.push(friend(2, FriendStatus::Active, false));
+        });
+        assert_eq!(m.notices.len(), 5);
+        // друг 1 на связи: его две строки ушли, друг 2 и общая остались
+        with_snapshot(&mut m, |s| {
+            s.friends.push(friend(1, FriendStatus::Active, true));
+            s.friends.push(friend(2, FriendStatus::Active, false));
+        });
+        assert_eq!(m.notices.len(), 3);
+        assert!(m.notices.iter().all(|n| n.friend != Some(Id(1))));
+        assert!(m.notice_texts().contains(&"общая строка".to_owned()));
+    }
+
+    /// Этап 18д, п.2: «×» убирает одну строку, «Скрыть все» все.
+    #[test]
+    fn notice_cross_removes_one_and_hide_all_removes_all() {
+        let mut m = model();
+        m.push_notice("раз");
+        m.push_notice("два");
+        m.push_notice("три");
+        assert!(ask(&mut m, MainIntent::DismissNotice(1)).is_empty());
+        assert_eq!(m.notice_texts(), vec!["раз".to_owned(), "три".to_owned()]);
+        // номер за пределами списка ничего не ломает
+        ask(&mut m, MainIntent::DismissNotice(9));
+        assert_eq!(m.notices.len(), 2);
+        ask(&mut m, MainIntent::DismissNotices);
+        assert!(m.notices.is_empty());
+    }
+
+    /// Этап 18д, п.1/п.2: «Папка приёма изменена.» без слов о перезапуске и гаснет при следующем
+    /// действии в настройках.
+    #[test]
+    fn root_changed_notice_is_short_and_goes_away_on_next_settings_action() {
+        let mut m = model();
+        m.on_outcome(Outcome::RootSet(Ok(())));
+        assert_eq!(m.notice_texts(), vec!["Папка приёма изменена.".to_owned()]);
+        ask(
+            &mut m,
+            MainIntent::Settings(SettingsIntent::RootEdited("x".to_owned())),
+        );
+        assert!(m.notices.is_empty());
+    }
+
+    /// Этап 18д, п.6: убрать можно только завершённую; общая очистка есть, только если есть что
+    /// очищать.
+    #[test]
+    fn forget_is_offered_only_for_finished_transfers() {
+        let mut m = model();
+        with_snapshot(&mut m, |s| {
+            s.transfers.push(finished_row(1, None));
+            s.transfers.push(finished_row(
+                2,
+                Some(chervo_core::TransferResult::Completed),
+            ));
+        });
+        assert!(ask(&mut m, MainIntent::TransferForget(Id(1))).is_empty());
+        assert_eq!(
+            ask(&mut m, MainIntent::TransferForget(Id(2))),
+            vec![Command::ForgetTransfer(Id(2))]
+        );
+        assert!(ask(&mut m, MainIntent::TransferForget(Id(9))).is_empty());
+        assert_eq!(
+            ask(&mut m, MainIntent::TransferForgetFinished),
+            vec![Command::ForgetFinished]
+        );
+        with_snapshot(&mut m, |s| s.transfers.push(finished_row(1, None)));
+        assert!(ask(&mut m, MainIntent::TransferForgetFinished).is_empty());
     }
 }

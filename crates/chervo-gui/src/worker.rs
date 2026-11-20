@@ -401,7 +401,7 @@ mod tests {
         }
         // уведомление только от контрольной команды (узла в этом тесте нет)
         assert_eq!(model.notices.len(), 1);
-        assert_eq!(model.notices[0], NodeError::Shutdown.user_text());
+        assert_eq!(model.notices[0].text, NodeError::Shutdown.user_text());
         assert!(worker.finish());
     }
 

@@ -14,8 +14,8 @@
 //! числами и предлагает выбрать другую папку, см. `ReceivePlacement::choose_root`). Место
 //! узнать нельзя: автоприёма нет, обычный вопрос.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use chervo_friends::Permission;
 use chervo_identity::PairId;
@@ -38,7 +38,8 @@ pub enum ReceiveDecision {
 }
 
 pub struct ReceivePolicy {
-    root: ReceiveRoot,
+    /// Основная папка приёма; заменяется на лету (`set_root`).
+    root: Mutex<ReceiveRoot>,
     limits: ReceiveLimits,
     min_free_percent: u8,
     declined: AtomicU64,
@@ -74,12 +75,25 @@ impl ReceivePolicy {
             ReceiveLimits::default()
         };
         Self {
-            root,
+            root: Mutex::new(root),
             limits,
             min_free_percent: cfg.min_free_percent,
             declined: AtomicU64::new(0),
             probe,
         }
+    }
+
+    fn root(&self) -> ReceiveRoot {
+        self.root
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Заменяет основную папку приёма (уже открытую и проверенную `ReceiveRoot::open`): новые
+    /// предложения оцениваются по ней.
+    pub fn set_root(&self, root: ReceiveRoot) {
+        *self.root.lock().unwrap_or_else(PoisonError::into_inner) = root;
     }
 
     /// Сколько предложений отклонено автоматически как враждебные (для экрана, этап 18).
@@ -97,7 +111,7 @@ impl ReceivePolicy {
             .fold(0u64, |acc, f| acc.saturating_add(f.size));
         check_space(
             &*self.probe,
-            self.root.root(),
+            self.root().root(),
             total,
             self.min_free_percent,
             &offer.inbound,
@@ -107,13 +121,14 @@ impl ReceivePolicy {
     /// Полное решение. `decide` сводит его к `PolicyVerdict`: `InsufficientSpace` там это `Ask`
     /// (пользователь решает; экран зовёт `space_check` и показывает предупреждение).
     pub fn evaluate(&self, p: Permission, offer: &OfferView) -> ReceiveDecision {
-        let Ok(plan) = plan_offer_for_root(&offer.files, &self.limits, &self.root) else {
+        let root = self.root();
+        let Ok(plan) = plan_offer_for_root(&offer.files, &self.limits, &root) else {
             self.declined.fetch_add(1, Ordering::SeqCst);
             return ReceiveDecision::Decline;
         };
         let space = check_space(
             &*self.probe,
-            self.root.root(),
+            root.root(),
             plan.total,
             self.min_free_percent,
             &offer.inbound,

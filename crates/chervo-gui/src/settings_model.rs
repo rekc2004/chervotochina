@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use chervo_core::{LanMode, RootError};
 
-use crate::main_model::cap_paste;
+use crate::main_model::{NoticeKind, cap_paste};
 use crate::model::{ClockResult, Command, FriendEventKind, Model, Outcome};
 use crate::redact::redacted_debug_enum;
 use crate::texts;
@@ -98,6 +98,8 @@ pub enum SettingsIntent {
 impl Model {
     pub fn update_settings(&mut self, intent: SettingsIntent) -> Vec<Command> {
         use SettingsIntent as S;
+        // «Папка приёма изменена.» относится к уже сделанному: следующее действие её снимает
+        self.notices.retain(|n| n.kind != NoticeKind::RootChanged);
         match intent {
             S::RootEdited(t) => {
                 let r = &mut self.settings_ui.root;
@@ -114,6 +116,10 @@ impl Model {
                 let r = &mut self.settings_ui.root;
                 if r.outside_warning && !r.busy {
                     r.outside_confirmed = v;
+                    if v {
+                        // отметка поставлена: упрёк «папка вне профиля» больше не нужен
+                        r.error = None;
+                    }
                 }
                 Vec::new()
             }
@@ -341,7 +347,8 @@ impl Model {
         match outcome {
             Outcome::RootSet(Ok(())) => {
                 self.settings_ui.root = RootEdit::default();
-                self.push_notice(texts::ROOT_CHANGED);
+                // исчезает при следующем действии в настройках (`update_settings`)
+                self.push_notice_for(texts::ROOT_CHANGED, None, NoticeKind::RootChanged);
             }
             Outcome::RootSet(Err(e)) => {
                 let r = &mut self.settings_ui.root;
@@ -376,20 +383,36 @@ impl Model {
                     Err(e) => ClockUi::Message(e.user_text()),
                 };
             }
-            Outcome::FriendEvent { name, kind } => match kind {
+            Outcome::FriendEvent { friend, name, kind } => match kind {
                 FriendEventKind::KeyProblem => {
-                    self.push_notice(format!("{name}: {}", chervo_core::texts::KEY_LOST_TEXT));
+                    self.push_notice_for(
+                        format!("{name}: {}", chervo_core::texts::KEY_LOST_TEXT),
+                        Some(friend),
+                        NoticeKind::General,
+                    );
                 }
                 FriendEventKind::ClockSkew => {
                     self.clock_hint = true;
-                    self.push_notice(format!("{name}: {}", texts::CLOCK_SKEW_HINT));
+                    self.push_notice_for(
+                        format!("{name}: {}", texts::CLOCK_SKEW_HINT),
+                        Some(friend),
+                        NoticeKind::General,
+                    );
                 }
                 FriendEventKind::Unreachable { text, lan_hint } => {
-                    // итог попытки соединиться получен
+                    // итог попытки соединиться получен; строки гаснут сами, когда друг на связи
                     self.connecting.clear();
-                    self.push_notice(format!("{name}: {text}"));
+                    self.push_notice_for(
+                        format!("{name}: {text}"),
+                        Some(friend),
+                        NoticeKind::FriendUnreachable,
+                    );
                     if lan_hint {
-                        self.push_notice(format!("{name}: {}", texts::LAN_EXPIRED_HINT));
+                        self.push_notice_for(
+                            format!("{name}: {}", texts::LAN_EXPIRED_HINT),
+                            Some(friend),
+                            NoticeKind::FriendUnreachable,
+                        );
                     }
                 }
             },
@@ -668,7 +691,7 @@ mod tests {
         });
         assert!(m.settings_ui.echo.text.is_none());
         assert_eq!(
-            m.notices.last().map(String::as_str),
+            m.notices.last().map(|n| n.text.as_str()),
             Some(texts::EXT_SERVER_SAVED)
         );
         // узел отверг: текст ошибки остаётся у строки, правка не теряется
@@ -692,7 +715,7 @@ mod tests {
             result: Ok(()),
         });
         assert_eq!(
-            m.notices.last().map(String::as_str),
+            m.notices.last().map(|n| n.text.as_str()),
             Some(texts::EXT_SERVER_CLEARED)
         );
     }
@@ -703,22 +726,24 @@ mod tests {
         m.on_outcome(Outcome::Event(NodeEvent::Warning(
             NodeWarning::AnchorNotUpdated,
         )));
-        let last = m.notices.last().cloned().unwrap_or_default();
+        let last = m.notices.last().map(|n| n.text.clone()).unwrap_or_default();
         assert_eq!(last, chervo_core::texts::ANCHOR_NOT_UPDATED_TEXT);
         // не «не удалось», а «сохранено ... перезапустите»
         assert!(last.contains("сохранены") && last.contains("перезапустить"));
         assert!(!last.to_lowercase().contains("не удалось"));
         m.on_outcome(Outcome::Event(NodeEvent::Internal));
         assert_eq!(
-            m.notices.last().map(String::as_str),
+            m.notices.last().map(|n| n.text.as_str()),
             Some(texts::INTERNAL_NOTICE)
         );
         m.on_outcome(Outcome::FriendEvent {
+            friend: Id(1),
             name: "Маша".to_owned(),
             kind: FriendEventKind::ClockSkew,
         });
         assert!(m.clock_hint);
         m.on_outcome(Outcome::FriendEvent {
+            friend: Id(1),
             name: "Маша".to_owned(),
             kind: FriendEventKind::Unreachable {
                 text: "текст",
@@ -728,7 +753,7 @@ mod tests {
         assert!(
             m.notices
                 .last()
-                .is_some_and(|n| n.contains(texts::LAN_EXPIRED_HINT))
+                .is_some_and(|n| n.text.contains(texts::LAN_EXPIRED_HINT))
         );
         // подсказка про часы не запускает сверку сама
         assert!(m.clock_hint && matches!(m.settings_ui.clock, ClockUi::Idle));

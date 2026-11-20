@@ -3,6 +3,8 @@
 //! (ошибки, предупреждения, итоги передач) берутся из `chervo_core::texts` и здесь не
 //! дублируются.
 
+use chervo_core::FileKind;
+
 /// Заголовок окна: константа, никогда не имя друга и не имя файла.
 pub const WINDOW_TITLE: &str = "Червоточина";
 
@@ -125,13 +127,18 @@ pub const HELP_OPEN_FOLDER: &str =
     "Открывает в проводнике папку, куда программа складывает принятые файлы.";
 pub const HELP_RETRY_TRANSFER: &str =
     "Продолжает приостановленную передачу с того места, где она остановилась.";
+pub const HELP_FORGET_TRANSFER: &str =
+    "Убирает эту строку из списка. Принятые файлы остаются в папке приёма.";
+pub const HELP_CLEAR_FINISHED: &str =
+    "Убирает из списка все законченные передачи. Идущие остаются, файлы на диске не трогаются.";
 pub const HELP_CANCEL_TRANSFER: &str =
     "Останавливает передачу совсем. Уже переданные части могут остаться в папке приёма.";
 
 // Диагностика и настройки
 pub const HELP_DIAG_REFRESH: &str = "Просит роутер пропускать к вам друзей из интернета. Нужно, если друзья не могут подключиться. Делайте это только дома.";
-pub const HELP_SET_ROOT: &str = "Папка, куда попадают принятые файлы. Новая папка начнёт работать после перезапуска программы. Изменение применяется по Enter.";
-pub const HELP_SET_PICK_ROOT: &str = "Открывает окно выбора папки приёма. Выбранная папка применится сразу, после перезапуска программы.";
+pub const HELP_SET_ROOT: &str = "Папка, куда попадают принятые файлы. Новая папка начинает работать сразу; файлы, которые уже принимаются, дойдут в прежнюю. Изменение применяется по Enter.";
+pub const HELP_SET_PICK_ROOT: &str =
+    "Открывает окно выбора папки приёма. Выбранная папка начинает работать сразу.";
 pub const HELP_SET_OUTSIDE: &str = "Папка вне вашей личной папки: в неё могут заглянуть другие пользователи компьютера. Отметьте, только если их нет.";
 pub const HELP_SET_MIN_FREE: &str = "Сколько места на диске программа оставит свободным. Если места не хватит, принять файлы не получится.";
 pub const HELP_SET_PORT: &str = "Номер, по которому друзья находят вашу программу. Если всё работает, не меняйте. Новый номер вступит в силу после перезапуска.";
@@ -208,7 +215,9 @@ pub const INVITE_ADDED: &str = "Друг добавлен.";
 pub const INVITE_DECLINED: &str = "Код не совпал или вы отказались: друг не добавлен.";
 pub const INVITE_EXPIRED: &str = "Срок приглашения истёк. Создайте новое: «Друзья», затем «Добавить друга», затем «Создать приглашение».";
 pub const INVITE_FAILED: &str = "Не удалось добавить друга.";
-pub const NOTICES_HIDE: &str = "Скрыть";
+pub const NOTICES_HIDE: &str = "Скрыть все";
+/// Кнопка у одной строки уведомления (убирает только её); общая это «Скрыть все».
+pub const NOTICE_DISMISS: &str = "Скрыть";
 /// Приглашения и новые адреса содержат ваш адрес: кто увидит текст, узнает, где вы в интернете.
 pub const IP_WARNING: &str =
     "Внимание: по этому тексту можно узнать ваш адрес в интернете. Отправляйте его только другу.";
@@ -297,11 +306,19 @@ pub const MARK_RISKY: &str = "(!) ";
 pub const RISKY_LEGEND: &str = "(!) означает, что файл требует вашего решения: принимайте его, только если доверяете отправителю.";
 pub const KIND_SAFE: &str = "обычный файл";
 pub const KIND_EXEC: &str = "программа или опасный тип";
+/// Только для `.bin` (решение владельца 18д): тип по-прежнему требует вопроса, но не обязательно
+/// программа.
+pub const KIND_MAYBE_PROGRAM: &str = "может оказаться программой";
+/// Оранжевое предупреждение над кнопками вместо текста узла про программы, когда среди таких
+/// файлов только `.bin` (решение владельца 18д).
+pub const OFFER_MAYBE_PROGRAM: &str = "Среди файлов есть такие, которые могут оказаться программами. Принимайте их, только если ждёте их от этого друга.";
 pub const KIND_UNKNOWN: &str = "неизвестный тип";
 
 pub const TRANSFERS_EMPTY: &str = "Здесь будут видны отправки и приёмы файлов.";
 pub const BTN_RETRY_TRANSFER: &str = "Повторить";
 pub const BTN_CANCEL_TRANSFER: &str = "Отменить передачу";
+pub const BTN_FORGET_TRANSFER: &str = "Убрать";
+pub const BTN_CLEAR_FINISHED: &str = "Очистить завершённые";
 pub const SIDE_SEND: &str = "отправка";
 pub const SIDE_RECEIVE: &str = "приём";
 pub const STATE_AWAITING_ANSWER: &str = "ждём ответа друга";
@@ -322,8 +339,7 @@ pub const FORWARD_BAD: &str = "Внешний порт: число от 1 до 6
 pub const UPNP_ALLOWED: &str = "Роутер разрешён. Состояние проброса показано в этом разделе.";
 pub const CLOCK_APPLIED: &str = "Поправка часов применена.";
 pub const CLOCK_RESET: &str = "Поправка часов сброшена.";
-pub const ROOT_CHANGED: &str =
-    "Папка приёма изменена. Изменение вступит в силу после перезапуска программы.";
+pub const ROOT_CHANGED: &str = "Папка приёма изменена.";
 pub const CLOCK_SKEW_HINT: &str =
     "Возможно, часы у вас или у друга идут неверно. Сверьте свои часы в настройках.";
 pub const LAN_EXPIRED_HINT: &str = "Адрес в локальной сети устарел (он живёт сутки). Отправьте новый адрес с отметкой «Мы подключены к одному роутеру или Wi-Fi» («Друзья», затем «Отправить другу мой новый адрес») или на домашнем компьютере включите «Настройки», затем «Локальная сеть», затем «Слушать и сообщать о себе».";
@@ -553,16 +569,78 @@ pub fn clock_offset_text(offset_ms: i64) -> String {
     format!("Текущая поправка: {} мс", offset_ms)
 }
 
+/// Имя оканчивается на `.bin` (регистр не важен).
+fn is_bin(name: &str) -> bool {
+    name.len() > 4
+        && name
+            .get(name.len() - 4..)
+            .is_some_and(|t| t.eq_ignore_ascii_case(".bin"))
+}
+
+/// Подпись типа файла в списке предложения. Мягкая подпись только у `.bin`; `.exe`, сценарии и
+/// прочее остаются «программа или опасный тип».
+pub fn kind_label(kind: FileKind, name: &str) -> &'static str {
+    match kind {
+        FileKind::Safe => KIND_SAFE,
+        FileKind::ExecutableLike if is_bin(name) => KIND_MAYBE_PROGRAM,
+        FileKind::ExecutableLike => KIND_EXEC,
+        _ => KIND_UNKNOWN,
+    }
+}
+
+/// Мягкое предупреждение вместо текста узла про программы: только если каждый файл такого типа
+/// в предложении это `.bin`. Хоть один другой: прежний текст узла.
+pub fn exec_warning_is_soft(files: &[crate::rows::FileRow]) -> bool {
+    let mut any = false;
+    for f in files.iter().filter(|f| f.kind == FileKind::ExecutableLike) {
+        if !is_bin(&f.name) {
+            return false;
+        }
+        any = true;
+    }
+    any
+}
+
 pub fn offer_summary(count: usize, total: u64) -> String {
     format!("Файлов: {count}, всего {}", human_size(total))
 }
 
-pub fn space_line(needed: u64, available: u64) -> String {
-    format!(
-        "Места нужно (с запасом, чтобы диск не заполнился до конца): {}, свободно: {}",
-        human_size(needed),
-        human_size(available)
-    )
+/// Правило запаса места: отдельным предложением (число из настроек, если оно известно).
+fn space_rule(min_free_percent: Option<u8>) -> String {
+    match min_free_percent {
+        Some(p) => {
+            format!("Программа не заполняет диск дальше, чем до {p}% свободного места.")
+        }
+        None => "Программа не заполняет диск до конца: часть места остаётся свободной.".to_owned(),
+    }
+}
+
+/// Строка о месте у предложения: размер файлов, сколько свободно и сколько останется после
+/// приёма; правило запаса отдельно. `needed` (размер с запасом) нужен только когда места не
+/// хватает: тогда сказано, на сколько.
+pub fn space_line(
+    total: u64,
+    needed: u64,
+    available: u64,
+    short: bool,
+    min_free_percent: Option<u8>,
+) -> String {
+    let rule = space_rule(min_free_percent);
+    if short {
+        format!(
+            "Размер: {}. Свободно {}. Места не хватает ещё на {}. {rule}",
+            human_size(total),
+            human_size(available),
+            human_size(needed.saturating_sub(available).max(1))
+        )
+    } else {
+        format!(
+            "Размер: {}. Свободно {}, после приёма останется {}. {rule}",
+            human_size(total),
+            human_size(available),
+            human_size(available.saturating_sub(total))
+        )
+    }
 }
 
 pub fn progress_text(done: u64, total: u64) -> String {
@@ -873,6 +951,73 @@ mod tests {
         assert!(human_size(u64::MAX).ends_with("ТБ"));
         // одни единицы на всё окно: ни КиБ, ни МиБ
         assert!(!human_size(3 * 1024 * 1024).contains("иБ"));
+    }
+
+    /// Этап 18д, п.4: размер, свободно, останется, правило отдельно; при нехватке причина.
+    #[test]
+    fn space_line_shows_size_free_left_and_the_rule() {
+        let mb = 1024 * 1024;
+        let gb = 1024 * mb;
+        let fits = texts::space_line(512 * mb, 0, 75 * gb, false, Some(10));
+        assert_eq!(
+            fits,
+            "Размер: 512,0 МБ. Свободно 75,0 ГБ, после приёма останется 74,5 ГБ. \
+             Программа не заполняет диск дальше, чем до 10% свободного места."
+        );
+        let short = texts::space_line(512 * mb, 900 * mb, 300 * mb, true, Some(10));
+        assert!(short.starts_with("Размер: 512,0 МБ. Свободно 300,0 МБ. Места не хватает ещё на"));
+        assert!(short.ends_with("до 10% свободного места."));
+        // число запаса неизвестно: правило остаётся без числа
+        assert!(!texts::space_line(1, 0, 10, false, None).contains('%'));
+    }
+
+    /// Этап 18д, п.3: подписи «может оказаться программой» без жаргона и без прежней жёсткой.
+    #[test]
+    fn maybe_program_texts_are_soft_only_for_bin() {
+        use crate::rows::FileRow;
+        use chervo_core::FileKind;
+        assert!(texts::OFFER_MAYBE_PROGRAM.contains("могут оказаться программами"));
+        assert_eq!(texts::ROOT_CHANGED, "Папка приёма изменена.");
+        // подпись у каждого файла своя
+        let exec = FileKind::ExecutableLike;
+        assert_eq!(
+            texts::kind_label(exec, "data.bin"),
+            "может оказаться программой"
+        );
+        assert_eq!(
+            texts::kind_label(exec, "DATA.BIN"),
+            "может оказаться программой"
+        );
+        assert_eq!(
+            texts::kind_label(exec, "setup.exe"),
+            "программа или опасный тип"
+        );
+        assert_eq!(
+            texts::kind_label(exec, "run.bat"),
+            "программа или опасный тип"
+        );
+        assert_eq!(texts::kind_label(exec, ".bin"), "программа или опасный тип");
+        assert_eq!(texts::kind_label(FileKind::Safe, "a.txt"), "обычный файл");
+        let row = |name: &str, kind| FileRow {
+            name: name.to_owned(),
+            size: 1,
+            kind,
+            needs_question: true,
+        };
+        // мягкое предупреждение: только когда все такие файлы это .bin
+        assert!(texts::exec_warning_is_soft(&[
+            row("a.bin", exec),
+            row("b.txt", FileKind::Safe)
+        ]));
+        assert!(!texts::exec_warning_is_soft(&[
+            row("a.bin", exec),
+            row("b.exe", exec)
+        ]));
+        assert!(!texts::exec_warning_is_soft(&[row("b.exe", exec)]));
+        assert!(!texts::exec_warning_is_soft(&[row(
+            "b.txt",
+            FileKind::Safe
+        )]));
     }
 
     #[test]

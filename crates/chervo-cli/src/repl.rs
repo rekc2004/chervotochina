@@ -42,6 +42,8 @@ const HELP: &[&str] = &[
     "  decline N                       отклонить предложение N",
     "  transfers                       список передач",
     "  retry N | cancel N              повторить или отменить передачу N",
+    "  forget N                        убрать завершённую передачу N из списка (файлы остаются)",
+    "  forget-done                     убрать из списка все завершённые передачи",
     "  diag ДРУГ                       почему друг недоступен",
     "  connect ДРУГ                    соединиться сейчас",
     "  token-for ДРУГ [--lan]          текст с вашим адресом для друга",
@@ -373,6 +375,12 @@ impl Repl {
             "decline" => self.with_transfer(args, |n, t| n.decline(t), "Предложение отклонено."),
             "cancel" => self.with_transfer(args, |n, t| n.cancel(t), "Передача отменена."),
             "retry" => self.with_transfer(args, |n, t| n.retry(t), "Пробую продолжить."),
+            "forget" => self.with_transfer(
+                args,
+                |n, t| n.forget_transfer(t),
+                "Убрано из списка. Файлы на диске не тронуты.",
+            ),
+            "forget-done" => self.cmd_forget_done(args),
             "transfers" => self.cmd_transfers(),
             "diag" => self.cmd_diag(args),
             "connect" => self.with_friend(args, |n, f| n.connect_now(f), "Пробую соединиться."),
@@ -671,6 +679,17 @@ impl Repl {
             Ok(()) => out::line("Приём начат. Ход: transfers."),
             Err(e) => fail(e),
         }
+    }
+
+    fn cmd_forget_done(&self, args: &[String]) {
+        if !args.is_empty() {
+            out::err("Использование: forget-done");
+            return;
+        }
+        let n = self.node.forget_finished();
+        out::line(&format!(
+            "Убрано завершённых передач: {n}. Файлы на диске не тронуты."
+        ));
     }
 
     fn cmd_transfers(&self) {

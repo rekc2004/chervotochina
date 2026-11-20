@@ -527,7 +527,7 @@ mod tests {
         });
         assert_eq!(m.update.newer, Some(ver(9, 8, 7)));
         assert_eq!(
-            m.notices,
+            m.notice_texts(),
             vec![texts::upd_newer(&ver(9, 8, 7), chervo_core::VERSION)]
         );
         assert!(m.update.manual_status.is_none());

@@ -67,7 +67,11 @@ struct SessionPlan {
 }
 
 pub struct ReceivePlacement {
-    root: ReceiveRoot,
+    /// Основная папка приёма. Заменяется на лету (`set_root`): передача, уже привязанная к
+    /// папке (`choices` или сеанс), остаётся в ней.
+    root: Mutex<ReceiveRoot>,
+    /// Основная папка при создании: её `.chervo-partial` это `TransferConfig::partial_dir`.
+    initial_root: PathBuf,
     /// Другие известные папки приёма: выбранные для отдельных предложений и заданные при
     /// запуске (чтобы найти недокачанные передачи после перезапуска).
     known: Mutex<Vec<ReceiveRoot>>,
@@ -224,7 +228,8 @@ impl ReceivePlacement {
             ReceiveLimits::default()
         };
         Self {
-            root,
+            initial_root: root.root().to_path_buf(),
+            root: Mutex::new(root),
             known: Mutex::new(Vec::new()),
             choices: Mutex::new(HashMap::new()),
             limits,
@@ -251,7 +256,7 @@ impl ReceivePlacement {
     /// передачи не найдутся после перезапуска (их данные остаются в `.chervo-partial` этой
     /// папки). Папка выбранная через `choose_root` запоминается сама, до перезапуска.
     pub fn add_known_root(&self, root: ReceiveRoot) {
-        if root.root() == self.root.root() {
+        if root.root() == self.root().root() {
             return;
         }
         let mut known = lock(&self.known);
@@ -260,6 +265,35 @@ impl ReceivePlacement {
         }
         sweep(root.journal_dir(), root.partial_dir());
         known.push(root);
+    }
+
+    /// Основная папка приёма сейчас.
+    pub fn root(&self) -> ReceiveRoot {
+        lock(&self.root).clone()
+    }
+
+    /// Заменяет основную папку приёма на лету (папка уже открыта и проверена `ReceiveRoot::open`).
+    /// Прежняя основная остаётся среди известных: передачи, начатые в ней, находят свои
+    /// временные данные и продолжают писать туда (их сеанс держит свою папку). Новые
+    /// предложения идут в новую основную.
+    pub fn set_root(&self, root: ReceiveRoot) {
+        sweep(root.journal_dir(), root.partial_dir());
+        let mut known = lock(&self.known);
+        let old = std::mem::replace(&mut *lock(&self.root), root.clone());
+        known.retain(|r| r.root() != root.root());
+        if old.root() != root.root() && !known.iter().any(|r| r.root() == old.root()) {
+            known.push(old);
+        }
+    }
+
+    /// Привязывает передачу к основной папке (если выбора нет): после этого смена основной
+    /// папки её не затрагивает. Возвращает папку передачи.
+    pub fn bind_current_root(&self, key: &TransferKey) -> ReceiveRoot {
+        let mut choices = lock(&self.choices);
+        choices
+            .entry(*key)
+            .or_insert_with(|| lock(&self.root).clone())
+            .clone()
     }
 
     /// Принять это предложение в другую папку приёма (Рев. 5, решение владельца 2026-10-18).
@@ -298,11 +332,12 @@ impl ReceivePlacement {
             return r.clone();
         }
         let hex = state_dir_name(&key.pair, &key.id);
+        let current = self.root();
         let known = lock(&self.known).clone();
-        std::iter::once(&self.root)
+        std::iter::once(&current)
             .chain(known.iter())
             .find(|r| is_real_dir(&r.partial_dir().join(&hex)))
-            .unwrap_or(&self.root)
+            .unwrap_or(&current)
             .clone()
     }
 
@@ -676,7 +711,7 @@ impl Placement for ReceivePlacement {
         // журналы лежат у папки этой передачи; без плана (сеанс снят до `prepare`) чистятся у всех
         let roots: Vec<ReceiveRoot> = match &sess {
             Some(s) => vec![s.root.clone()],
-            None => std::iter::once(self.root.clone())
+            None => std::iter::once(self.root())
                 .chain(lock(&self.known).iter().cloned())
                 .collect(),
         };
@@ -717,9 +752,17 @@ impl Placement for ReceivePlacement {
     }
 
     fn partial_base(&self, key: &TransferKey) -> Option<PathBuf> {
-        lock(&self.choices)
-            .get(key)
-            .map(|r| r.partial_dir().to_path_buf())
+        if let Some(r) = lock(&self.choices).get(key) {
+            return Some(r.partial_dir().to_path_buf());
+        }
+        // основная папка не менялась: временные данные идут в `TransferConfig::partial_dir`
+        // (это её каталог), отдельной базы нет. После `set_root` каталог по умолчанию уже не её:
+        // передача привязывается к основной папке прямо сейчас, и временные данные, сеанс и
+        // итоговые файлы остаются в одной папке, даже если основную потом сменят снова
+        if self.root().root() == self.initial_root {
+            return None;
+        }
+        Some(self.bind_current_root(key).partial_dir().to_path_buf())
     }
 
     fn extra_partial_dirs(&self) -> Vec<PathBuf> {

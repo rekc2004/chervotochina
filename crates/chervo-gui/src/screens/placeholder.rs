@@ -44,8 +44,14 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Intent> {
         ui.separator();
     }
     if !model.notices.is_empty() {
-        for notice in &model.notices {
-            ui.label(notice);
+        for (i, notice) in model.notices.iter().enumerate() {
+            ui.horizontal_wrapped(|ui| {
+                let close = ui.small_button(texts::NOTICE_DISMISS); // без ?: очевидная
+                if close.clicked() {
+                    out.push(Intent::Main(MainIntent::DismissNotice(i)));
+                }
+                ui.label(&notice.text);
+            });
         }
         if model.clock_hint
             && button_with_help(ui, texts::BTN_CLOCK_HINT, texts::HELP_SYNC_CLOCK).clicked()

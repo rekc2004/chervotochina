@@ -6,6 +6,7 @@
 
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use chervo_receive::{
     ACTIVE_DOC_TEXT, DECEPTIVE_TEXT, DISK_IMAGE_TEXT, EXECUTABLE_TEXT, LONG_PATH_TEXT,
@@ -124,8 +125,9 @@ impl Node {
             .transfers
             .offer(&key)
             .ok_or(NodeError::Transfer(TransferError::NoSuchTransfer))?;
+        let root = self.core.root();
         let limits = effective_limits(self.core.rcfg.limits);
-        let plan = plan_offer_for_root(&ov.files, &limits, &self.core.root)
+        let plan = plan_offer_for_root(&ov.files, &limits, &root)
             .map_err(|_| NodeError::Transfer(TransferError::BadName))?;
         let files = offer_files(&plan);
         let min_free = self.core.rcfg.min_free_percent;
@@ -136,7 +138,7 @@ impl Node {
                 short: true,
             },
             SpaceCheck::Fits => {
-                let d = disk_space(self.core.root.root());
+                let d = disk_space(root.root());
                 SpaceView {
                     needed: d.map_or(plan.total, |d| d.needed(plan.total, min_free)),
                     available: d.map(|d| d.available_bytes),
@@ -163,9 +165,18 @@ impl Node {
     /// Принять в основную папку приёма.
     pub fn accept(&self, transfer: TransferRef) -> Result<(), NodeError> {
         let key = *transfer.inner();
-        lock(&self.core.reg).entry(key, Side::Receiver).dest_root =
-            Some(self.core.root.root().to_path_buf());
-        self.core.transfers.respond(&key, true)?;
+        // убранная запись и предложение, которого уже нет (принято, отклонено, чужая привязка
+        // папки от `accept_into`), ничего не создают и ничьей привязки не снимают
+        if lock(&self.core.reg).is_forgotten(&key) || self.core.transfers.offer(&key).is_none() {
+            return Err(NodeError::Transfer(TransferError::NoSuchTransfer));
+        }
+        // передача привязывается к основной папке сейчас: смена папки позже её не переносит
+        let root = self.core.placement.bind_current_root(&key);
+        lock(&self.core.reg).entry(key, Side::Receiver).dest_root = Some(root.root().to_path_buf());
+        if let Err(e) = self.core.transfers.respond(&key, true) {
+            self.core.placement.unchoose_root(&key);
+            return Err(e.into());
+        }
         Ok(())
     }
 
@@ -181,7 +192,7 @@ impl Node {
         rc.allow_shared_root |= lock(&self.core.settings).shared_root_confirmed;
         let target = ReceiveRoot::open(&rc).map_err(NodeError::ReceiveRoot)?;
         let target_root = target.root().to_path_buf();
-        let is_primary = target.root() == self.core.root.root();
+        let is_primary = target.root() == self.core.root().root();
         let known =
             |s: &Settings| s.receive_root == target_root || s.extra_roots.contains(&target_root);
         if !is_primary {
@@ -236,6 +247,19 @@ impl Node {
         Ok(())
     }
 
+    /// Убрать из списка одну завершённую передачу (завершена, отменена, отклонена, ошибка).
+    /// Идущая или ожидающая ответа: `Transfer(WrongState)`, список не меняется. Принятые файлы
+    /// на диске не трогаются никогда.
+    pub fn forget_transfer(&self, transfer: TransferRef) -> Result<(), NodeError> {
+        lock(&self.core.reg).forget_one(transfer.inner())
+    }
+
+    /// Убрать из списка все завершённые передачи; возвращает, сколько убрано. Идущие и ожидающие
+    /// остаются, файлы на диске не трогаются.
+    pub fn forget_finished(&self) -> usize {
+        lock(&self.core.reg).forget_all_finished()
+    }
+
     /// Снимок передач (по порядку появления).
     pub fn transfers(&self) -> Vec<TransferView> {
         let mut rows: Vec<(chervo_transfer::TransferKey, TEntrySnap)> = {
@@ -286,8 +310,11 @@ impl Node {
         Ok(())
     }
 
-    /// Сменить основную папку приёма (вступает в силу после перезапуска). Прежняя основная
-    /// остаётся среди дополнительных. Вне профиля Windows нужно `confirm_shared_root`.
+    /// Сменить основную папку приёма; действует сразу. Порядок: открыть новую папку (те же
+    /// проверки `ReceiveRoot::open`) → сохранить настройки → подменить живую. Любая ошибка
+    /// до подмены оставляет прежнюю. Идущие передачи продолжают писать в старую папку (они
+    /// привязаны к ней), новые предложения и `accept` идут в новую. Прежняя основная остаётся
+    /// среди дополнительных. Вне профиля Windows нужно `confirm_shared_root`.
     pub fn set_receive_root(
         &self,
         root: &Path,
@@ -296,8 +323,14 @@ impl Node {
         let mut rc = self.core.rcfg.clone();
         rc.root = root.to_path_buf();
         rc.allow_shared_root |= confirm_shared_root;
-        ReceiveRoot::open(&rc).map_err(NodeError::ReceiveRoot)?;
-        self.update_settings(|s| settings::replace_root(s, root, confirm_shared_root))
+        let _one_at_a_time = lock(&self.core.root_change);
+        let opened = ReceiveRoot::open(&rc).map_err(NodeError::ReceiveRoot)?;
+        self.update_settings(|s| settings::replace_root(s, root, confirm_shared_root))?;
+        // сохранено: теперь подмена (политика и размещение читают ту же папку)
+        self.core.placement.set_root(opened.clone());
+        self.core.policy.set_root(opened.clone());
+        *lock(&self.core.root) = Arc::new(opened);
+        Ok(())
     }
 
     /// Запас свободного места после приёма, процентов объёма тома (0..=100). Вступает в силу
@@ -343,7 +376,6 @@ impl Node {
         let s = lock(&self.core.settings).clone();
         let live = &self.core.live;
         let restart_needed = s.port != live.port_setting
-            || s.receive_root != live.receive_root
             || s.min_free_percent != live.min_free_percent
             || s.manual_forward != live.manual_forward;
         let ntp_servers = if s.ntp_servers.is_empty() {

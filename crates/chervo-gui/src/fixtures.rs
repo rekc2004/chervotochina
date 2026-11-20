@@ -712,6 +712,7 @@ pub fn all() -> Vec<Model> {
         },
     ] {
         m.on_outcome(Outcome::FriendEvent {
+            friend: crate::rows::Id(1),
             name: "Маша".to_owned(),
             kind,
         });
