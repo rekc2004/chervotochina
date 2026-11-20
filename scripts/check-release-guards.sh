@@ -50,6 +50,13 @@ guard_build_form() { # files...
         echo "$f: forbidden cargo flag in: ${line#"${line%%[![:space:]]*}"}" >&2
         bad=1
       fi
+      # 18e: no feature selection when building our packages (test-net/test-store/fuzzing are
+      # test hooks); `cargo install` of pinned tools may select their own features.
+      if [[ "$line" =~ (^|[^A-Za-z0-9_-])cargo[[:space:]] ]] && ! [[ "$line" =~ cargo[[:space:]]+install[[:space:]] ]] &&
+         [[ "$line" =~ (--features|[[:space:]]-F[[:space:]=]) ]]; then
+        echo "$f: --features in a build of our packages: ${line#"${line%%[![:space:]]*}"}" >&2
+        bad=1
+      fi
       # Stage 19g: one package per cargo call.
       if [[ "$line" =~ (^|[^A-Za-z0-9_-])cargo[[:space:]] ]] && [[ "$line" =~ $p_pair_re ]]; then
         echo "$f: two -p in one cargo call: ${line#"${line%%[![:space:]]*}"}" >&2

@@ -54,8 +54,9 @@ export CARGO_PROFILE_RELEASE_DEBUG=0
 check_tree() { # package
   local tree
   tree="$(cargo tree --locked -e no-dev,features -p "$1" --target "$triple")"
-  if grep -qF 'feature "test-store"' <<<"$tree"; then
-    echo "build-release: feature test-store is enabled for $1; refusing to build" >&2
+  # 18e: test-net (loopback-only node and LAN beacon) and fuzzing are test hooks as well
+  if grep -qE 'feature "(test-store|test-net|fuzzing)"' <<<"$tree"; then
+    echo "build-release: a test feature (test-store, test-net or fuzzing) is enabled for $1; refusing to build" >&2
     return 1
   fi
 }

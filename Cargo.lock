@@ -672,6 +672,7 @@ version = "0.0.0"
 dependencies = [
  "blake2",
  "chervo-core",
+ "chervo-lan",
  "chervo-update",
  "chervo-update-check",
  "ed25519-dalek",

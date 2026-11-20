@@ -13,6 +13,13 @@ use super::views::ClockSync;
 use super::{Node, NodeConfig, OpenMode, StoreSource, open_node};
 use crate::HardenReport;
 
+/// Тестовый узел слушает только петлю (этап 18е): без этого Windows спрашивает разрешение для
+/// каждого пересобранного тестового бинаря. Без свойства `test-net` ничего не делает.
+fn enable_loopback() {
+    #[cfg(any(test, feature = "test-net"))]
+    super::loopback::bind_loopback_only();
+}
+
 /// Режим запуска для тестов (как три `open*` продукта).
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +37,7 @@ impl Node {
         h: &HardenReport,
         store: Arc<dyn KeyBackend>,
     ) -> Result<(Node, NodeEvents), NodeError> {
+        enable_loopback();
         open_node(cfg, h, OpenMode::Normal, StoreSource::Given(store))
     }
 
@@ -46,6 +54,7 @@ impl Node {
             TestOpen::AcceptOlder => OpenMode::AcceptOlder,
             TestOpen::StartOver => OpenMode::StartOver,
         };
+        enable_loopback();
         open_node(cfg, h, mode, StoreSource::Given(store))
     }
 

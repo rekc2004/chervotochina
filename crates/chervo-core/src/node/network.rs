@@ -20,6 +20,35 @@ use super::profile;
 use super::settings::{self, MAX_CLOCK_OFFSET_MS};
 use super::views::{ClockProposal, ClockSync, DiagnosisView, FriendRef, RouterCandidate};
 
+/// Продукт: маяк на группе и порту поиска (на Windows приём на `0.0.0.0`).
+#[cfg(not(any(test, feature = "test-net")))]
+fn make_beacon(mode: LanMode, now: Arc<dyn Fn() -> u64 + Send + Sync>) -> LanBeacon {
+    LanBeacon::new(mode, now)
+}
+
+/// Тестовая сборка: пока включена привязка к петле (`loopback.rs`), маяк слушает только петлю на
+/// случайном порту и шлёт на закрытый порт петли, ни одного пакета в сеть; иначе как в продукте
+/// (этап 18е: сокет на `0.0.0.0` вызывает окно брандмауэра Windows).
+#[cfg(any(test, feature = "test-net"))]
+fn make_beacon(mode: LanMode, now: Arc<dyn Fn() -> u64 + Send + Sync>) -> LanBeacon {
+    if !super::loopback::is_on() {
+        return LanBeacon::new(mode, now);
+    }
+    let lo = Ipv4Addr::LOCALHOST;
+    LanBeacon::new_on_loopback(
+        mode,
+        now,
+        chervo_lan::TestNet {
+            target: std::net::SocketAddrV4::new(lo, 9),
+            bind: lo,
+            listen_port: 0,
+            allow_loopback: false,
+            interval: std::time::Duration::from_secs(30),
+            oracle: chervo_lan::TestNet::no_oracle(),
+        },
+    )
+}
+
 /// Служба поиска друзей: время берётся у поправленных часов узла; подключается к движку сразу.
 pub(crate) fn new_beacon(
     mode: LanMode,
@@ -27,7 +56,8 @@ pub(crate) fn new_beacon(
     engine: &Arc<Eng>,
 ) -> Result<Arc<LanBeacon>, NodeError> {
     let c = clock.clone();
-    let beacon = Arc::new(LanBeacon::new(mode, Arc::new(move || c.now_unix())));
+    let now: Arc<dyn Fn() -> u64 + Send + Sync> = Arc::new(move || c.now_unix());
+    let beacon = Arc::new(make_beacon(mode, now));
     let dynamic: Arc<dyn LanDiscovery> = beacon.clone();
     engine.attach_lan(dynamic).map_err(NodeError::from)?;
     Ok(beacon)

@@ -16,6 +16,8 @@ mod events;
 mod folder;
 mod friends;
 mod interrupt;
+#[cfg(any(test, feature = "test-net"))]
+mod loopback;
 mod network;
 mod open_folder;
 mod profile;
@@ -66,6 +68,9 @@ pub use self::echo::{
 };
 pub use self::error::{EchoFailure, NodeError};
 pub use self::events::{NodeEvent, NodeEvents};
+#[cfg(any(test, feature = "test-net"))]
+#[doc(hidden)]
+pub use self::loopback::bind_loopback_only;
 #[cfg(any(test, feature = "fuzzing"))]
 #[doc(hidden)]
 pub use self::settings::fuzz_settings;
@@ -167,11 +172,23 @@ fn random_port() -> u16 {
     49_152 + u16::try_from(r % span).unwrap_or(0)
 }
 
-/// Свободный (на момент проверки) UDP-порт для нового узла.
+/// Адрес привязки сокета узла: в продукте всегда `0.0.0.0`; тестовая сборка может сузить его до
+/// петли (`loopback.rs`, этап 18е), чтобы Windows не спрашивала разрешение для тестового бинаря.
+#[cfg(any(test, feature = "test-net"))]
+fn listen_ip() -> Ipv4Addr {
+    loopback::listen_ip()
+}
+
+#[cfg(not(any(test, feature = "test-net")))]
+fn listen_ip() -> Ipv4Addr {
+    Ipv4Addr::UNSPECIFIED
+}
+
+/// Свободный (на момент проверки) UDP-порт для нового узла на том адресе, где узел будет слушать.
 fn pick_port() -> u16 {
     for _ in 0..32 {
         let p = random_port();
-        if UdpSocket::bind((Ipv4Addr::UNSPECIFIED, p)).is_ok() {
+        if UdpSocket::bind((listen_ip(), p)).is_ok() {
             return p;
         }
     }
@@ -458,8 +475,7 @@ fn build_core(cfg: &NodeConfig, p: Parts) -> Result<Built, NodeError> {
     let allow = AllowSet::new();
     let filter: Arc<dyn PeerFilter> = allow.clone();
     let port = cfg.port_override.unwrap_or(st.port);
-    let sock = UdpSocket::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)))
-        .map_err(|e| map_bind(&e))?;
+    let sock = UdpSocket::bind(SocketAddr::from((listen_ip(), port))).map_err(|e| map_bind(&e))?;
     let transport = Arc::new(
         QuinnTransport::from_socket(sock, QuinnConfig::default(), filter)
             .map_err(|_| NodeError::Io)?,

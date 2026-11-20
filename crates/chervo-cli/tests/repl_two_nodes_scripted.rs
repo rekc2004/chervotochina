@@ -286,6 +286,7 @@ fn two_free_ports() -> (u16, u16) {
 /// Настройки узла готовы (как после `chervo init`), запас места 0 %: тест не зависит от
 /// заполненности диска.
 fn prepare(root: &Path, port: u16) -> (PathBuf, PathBuf) {
+    chervo_core::bind_loopback_only();
     let data = root.join("data");
     let recv = root.join("recv");
     std::fs::create_dir_all(&recv).unwrap();

@@ -211,6 +211,8 @@ pub fn hardened() -> HardenReport {
 }
 
 pub fn cfg_in(data: &Path, port: Option<u16>) -> NodeConfig {
+    // этап 18е: тестовые узлы слушают только петлю (иначе окно брандмауэра на каждый прогон)
+    chervo_core::bind_loopback_only();
     NodeConfig {
         data_dir: Some(data.to_path_buf()),
         receive_limits: ReceiveLimits::default(),

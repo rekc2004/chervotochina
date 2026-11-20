@@ -142,8 +142,9 @@ fn no_product_manifest_enables_test_features() {
         let bad = violations(&fs::read_to_string(m).unwrap());
         assert!(bad.is_empty(), "{}: {bad:?}", m.display());
     }
-    // положительный контроль: свой манифест определяет оба свойства и включает их только в dev
+    // положительный контроль: свой манифест определяет три свойства и включает их только в dev
     let own = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")).unwrap();
     assert!(own.contains("test-store = []") && own.contains("fuzzing = []"));
-    assert!(own.contains("features = [\"fuzzing\", \"test-store\"]"));
+    assert!(own.contains("test-net = []"));
+    assert!(own.contains("features = [\"fuzzing\", \"test-store\", \"test-net\"]"));
 }
